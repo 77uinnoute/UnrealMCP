@@ -1,0 +1,39 @@
+# Build outputs and editor state
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Build script logs / status
+Build/build_status.txt
+Build/build_run.txt
+Build/build_log.txt
+Build/build_out.txt
+Build/last_build_console.txt
+Build/last_editor_console.txt
+*.log
+
+# Local agent/tool state (not part of the plugin)
+.codemaker/
+
+# Local-only material: internal notes, spec history, dev fixtures, host-project scripts
+# (anchored to the repository root on purpose: an unanchored "Scripts/" also matches
+#  nested dirs like .claude/skills/<skill>/scripts/ on case-insensitive filesystems)
+/Docs/
+/TestResults/
+/openspec/
+/Scripts/
+/Content/Python/scripts/
+
+# Ad-hoc shell leftovers
+ERR
+get
+
+# Local backup of the pre-public repository (safe to delete once the release is pushed)
+.git.bak-before-public/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+Content/Python/.venv/

@@ -1,0 +1,59 @@
+# Exceptions for check_command_consistency.py.
+#
+# One entry per line:  <identifier>   # <reason>
+# The reason is mandatory - an entry without one is reported as an error, because an
+# unreviewable exception is how a real drift gets buried.
+#
+# Use this only for identifiers that are correct but cannot be visible to the checker, e.g. a
+# name that legitimately exists outside the command surface. Do NOT add a command that is
+# simply missing: register it instead.
+
+delete_all_material_expressions  # unreal.MaterialEditingLibrary python API used in a doc snippet
+get_num_material_expressions     # unreal.MaterialEditingLibrary python API used in a doc snippet
+get_attached_parent_actor        # unreal API used in a doc snippet (parent lookup example)
+import_asset_tasks               # unreal.AssetTools python API used in a doc snippet
+get_editor_property              # unreal python API, not an MCP tool
+set_editor_property              # unreal python API, not an MCP tool
+get_components_by_class          # unreal.Actor python API quoted in the material skill's component-carrier note, not an MCP tool
+save_asset                       # unreal.EditorAssetLibrary python API quoted in the material skill's save/verify note, not an MCP tool
+set_node_property                # UnrealMCPBlueprintGraphLibrary method (lib.*), not a bridge command
+set_pin_default                  # UnrealMCPBlueprintGraphLibrary method (lib.*), not a bridge command
+compile_result                   # response field documented in a skill, not a tool
+load_failed                      # error code documented in a skill, not a tool
+write_failed                     # error code documented in a skill, not a tool
+attach_parent                    # response field of attach_component_to_component (read back from the SCS)
+attach_socket                    # response field of attach_component_to_component (read back from the SCS)
+duplicate_components             # response field of get_blueprint_component_hierarchy (SCS names registered twice)
+create_failed                    # error code documented in a skill, not a tool
+scan_strategy                    # response field of find_montages_using_animation, not a tool
+export_render_target             # unreal.RenderingLibrary python API quoted in the material skill (its PNG output is unusable, see preview_material_expression)
+render_settled                   # response field of preview_material_expression, not a tool
+remove_failed                    # error code documented in a skill, not a tool
+add_new_subobject                # unreal.SubobjectDataSubsystem python API (the editor's Add Component path), not an MCP tool
+add_instance_component           # unreal.UnrealMCPComponentLibrary method, not a bridge command
+register_component               # unreal.UnrealMCPComponentLibrary method, not a bridge command
+register_component_with_world    # unreal.UnrealMCPComponentLibrary method, not a bridge command
+is_component_registered          # unreal.UnrealMCPComponentLibrary method, not a bridge command
+apply_unit_scale                 # Blender bpy export_scene.fbx parameter quoted in the asset-import skill, not a UE identifier
+delete_asset                     # unreal.EditorAssetLibrary python API quoted in skill docs (the "do not use" column), not an MCP tool
+delete_loaded_asset              # unreal.EditorAssetLibrary python API quoted in the retarget skill, not an MCP tool
+rename_asset                     # unreal.EditorAssetLibrary python API quoted in skill docs, not an MCP tool
+rename_directory                 # unreal.EditorAssetLibrary python API quoted in the asset-import skill (the "do not use" note), not an MCP tool
+duplicate_asset                  # unreal.EditorAssetLibrary python API quoted in the asset-import skill (the redirector-occupies-the-old-path measurement), not an MCP tool
+create_asset                     # unreal factory/AssetTools python API call quoted in the retarget skill, not an MCP tool
+get_controller                   # unreal.EditorLevelLibrary python API quoted in the retarget skill, not an MCP tool
+get_socket_transform             # unreal.SkeletalMeshComponent python API quoted in the retarget skill, not an MCP tool
+get_ref_pose_transform_of_bone   # unreal.AnimPoseExtensions python API quoted in the retarget skill, not an MCP tool
+scan_paths_synchronous           # unreal asset-registry python API quoted in the asset-import skill, not an MCP tool
+set_retarget_root                # unreal.IKRetargeterController python API quoted in the retarget skill, not an MCP tool
+export_text                      # unreal struct/UObject python API used by the retarget skill to dump real field names, not an MCP tool
+get_class                        # unreal UObject python API quoted in the retarget skill to describe the dir() plumbing of RetargetChainSettings, not an MCP tool
+render_sections                  # response field of apply_cloth_masks (the render-data cloth contribution split, read back to tell "mask off" from "mesh not rebuilt"), not a tool
+load_asset                       # unreal.EditorAssetLibrary python API quoted in the material skill's "never recreate a live instance" note, not an MCP tool
+save_dirty_packages              # unreal.EditorLoadingAndSavingUtils python API quoted in the material skill (World Partition external-actor packages), not an MCP tool
+render_opacity                   # property key of set_widget_properties' props object, not a tool
+render_transform                 # property key of set_widget_properties' props object, not a tool
+render_transform_pivot           # property key of set_widget_properties' props object, not a tool
+compile_performed                # response field of get_umg_compile_errors (says the read command compiled to capture messages), not a tool
+focus_reason                     # response field of open_umg_designer (why a requested widget could not be selected), not a tool
+list_assets                      # unreal.EditorAssetLibrary python API quoted in the UMG skill's probe caveat (it answers empty while PIE runs), not an MCP tool
