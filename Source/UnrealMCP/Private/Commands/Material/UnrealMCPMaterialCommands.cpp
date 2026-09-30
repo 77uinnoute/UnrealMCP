@@ -1,6 +1,7 @@
 #include "Commands/Material/UnrealMCPMaterialCommands.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/Material/UnrealMCPMaterialHlslLint.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Core/MCPCommandRegistry.h"
 #include "Reflection/MCPPropertyCodecs.h"
 #include "Dom/JsonObject.h"
@@ -1427,7 +1428,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleGetMaterialCompileErro
     for (const TPair<const TCHAR*, ERHIFeatureLevel::Type>& FeatureLevel : FeatureLevels)
     {
         TArray<TSharedPtr<FJsonValue>> LevelErrors;
-        if (const FMaterialResource* Resource = Mat->GetMaterialResource(FeatureLevel.Value))
+        if (const FMaterialResource* Resource = UNREALMCP_MATERIAL_RESOURCE_FOR_FEATURE_LEVEL(Mat, FeatureLevel.Value))
         {
             for (const FString& Error : Resource->GetCompileErrors())
             {

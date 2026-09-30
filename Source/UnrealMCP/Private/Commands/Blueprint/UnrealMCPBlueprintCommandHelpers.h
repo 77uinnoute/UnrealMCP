@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Json.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/Blueprint/UnrealMCPBlueprintGraphOps.h"
 #include "Engine/Blueprint.h"

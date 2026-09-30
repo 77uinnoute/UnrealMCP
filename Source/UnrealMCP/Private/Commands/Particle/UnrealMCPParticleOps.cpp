@@ -1,6 +1,7 @@
 #include "Commands/Particle/UnrealMCPParticleOps.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/Blueprint/UnrealMCPBlueprintGraphOps.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Reflection/MCPPropertyCodecs.h"
 
 #include "Particles/ParticleSystem.h"
@@ -3057,7 +3058,7 @@ namespace
         {
             return;
         }
-        if (const FMaterialResource* Resource = BaseMaterial->GetMaterialResource(ERHIFeatureLevel::SM5))
+        if (const FMaterialResource* Resource = UNREALMCP_MATERIAL_RESOURCE_FOR_FEATURE_LEVEL(BaseMaterial, ERHIFeatureLevel::SM5))
         {
             OutErrors = Resource->GetCompileErrors();
         }

@@ -530,26 +530,26 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleAddComponentToBluepri
     UClass* ComponentClass = nullptr;
 
     // Try to find the class with exact name first
-    ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentType);
+    ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentType);
     
     // If not found, try with "Component" suffix
     if (!ComponentClass && !ComponentType.EndsWith(TEXT("Component")))
     {
         FString ComponentTypeWithSuffix = ComponentType + TEXT("Component");
-        ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentTypeWithSuffix);
+        ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentTypeWithSuffix);
     }
     
     // If still not found, try with "U" prefix
     if (!ComponentClass && !ComponentType.StartsWith(TEXT("U")))
     {
         FString ComponentTypeWithPrefix = TEXT("U") + ComponentType;
-        ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentTypeWithPrefix);
+        ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentTypeWithPrefix);
         
         // Try with both prefix and suffix
         if (!ComponentClass && !ComponentType.EndsWith(TEXT("Component")))
         {
             FString ComponentTypeWithBoth = TEXT("U") + ComponentType + TEXT("Component");
-            ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentTypeWithBoth);
+            ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentTypeWithBoth);
         }
     }
     

@@ -46,6 +46,7 @@ public class UnrealMCP : ModuleRules
 					"EditorSubsystem",
 					"Slate",
 					"SlateCore",
+					"RHI",                 // For GetFeatureLevelShaderPlatform (material resource lookup on 5.7+)
 					"UMG",
 					"MovieScene",          // For UMovieScene / AddPossessable / property tracks (widget animation authoring)
 					"MovieSceneTracks",    // For UMovieSceneFloatTrack / UMovieSceneByteTrack and their sections

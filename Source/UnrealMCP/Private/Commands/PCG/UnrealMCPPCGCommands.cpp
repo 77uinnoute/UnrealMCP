@@ -1,6 +1,7 @@
 #include "Commands/PCG/UnrealMCPPCGCommands.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/PCG/UnrealMCPPCGGraphFactory.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Core/MCPCommandRegistry.h"
 #include "Reflection/MCPPropertyReflector.h"
 
@@ -2554,7 +2555,7 @@ TSharedPtr<FJsonObject> FUnrealMCPPCGCommands::HandleCleanupPCGComponent(const T
             FString::Printf(TEXT("'%s' is managed by the runtime generation system, which owns its cleanup"), *Component->GetName()));
     }
 
-    Component->Cleanup(bRemoveComponents, bSaveGeneratedComponents);
+    UNREALMCP_PCG_CLEANUP(Component, bRemoveComponents, bSaveGeneratedComponents);
 
     // Cleanup never touches the graph asset, so there is no "saved" field here: reporting one would
     // suggest the graph was rewritten.

@@ -2,6 +2,7 @@
 // inside them, and the keyframes on.
 #include "Commands/UnrealMCPUMGCommands.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
@@ -523,7 +524,7 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleAddWidgetAnimationTrack(con
 		// The engine's own track editors set name and path from the property; the UMG component
 		// registry matches on this pair, so a wrong path means a track that never binds.
 		PropertyTrack->SetPropertyNameAndPath(Spec.PropertyName, Spec.PropertyName.ToString());
-		PropertyTrack->UniqueTrackName = Spec.PropertyName;
+		UNREALMCP_SET_PROPERTY_TRACK_UNIQUE_NAME(PropertyTrack, Spec.PropertyName);
 	}
 	if (UMovieSceneByteTrack* ByteTrack = Cast<UMovieSceneByteTrack>(Track))
 	{
@@ -564,7 +565,7 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleAddWidgetAnimationTrack(con
 	// Scene->GetTracks() only counts the master tracks; a track that drives a possessed widget lives
 	// inside its binding, so both have to be counted for the number to mean anything.
 	int32 TrackCount = Scene->GetTracks().Num();
-	for (const FMovieSceneBinding& Binding : Scene->GetBindings())
+	for (const FMovieSceneBinding& Binding : UNREALMCP_SCENE_BINDINGS(Scene))
 	{
 		TrackCount += Binding.GetTracks().Num();
 	}
@@ -970,7 +971,7 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleListWidgetAnimations(const 
 		TArray<TSharedPtr<FJsonValue>> TrackItems;
 		if (Scene)
 		{
-			for (const FMovieSceneBinding& Binding : Scene->GetBindings())
+			for (const FMovieSceneBinding& Binding : UNREALMCP_SCENE_BINDINGS(Scene))
 			{
 				FName WidgetName;
 				FName SlotWidgetName;
@@ -1434,7 +1435,7 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetWidgetAnimationPlaybackR
 	// them behind the caller's back.
 	int32 KeysBeyondRange = 0;
 	TArray<double> KeyTimes;
-	for (const FMovieSceneBinding& Binding : Scene->GetBindings())
+	for (const FMovieSceneBinding& Binding : UNREALMCP_SCENE_BINDINGS(Scene))
 	{
 		for (UMovieSceneTrack* Track : Binding.GetTracks())
 		{

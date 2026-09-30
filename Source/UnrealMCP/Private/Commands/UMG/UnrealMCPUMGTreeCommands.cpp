@@ -1,6 +1,7 @@
 // UMG commands: widget tree structure editing (remove / reparent / reorder / rename / set root).
 #include "Commands/UnrealMCPUMGCommands.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanelSlot.h"
@@ -400,7 +401,7 @@ namespace
 				int32 TrackCount = 0;
 				if (Scene)
 				{
-					for (const FMovieSceneBinding& SceneBinding : Scene->GetBindings())
+					for (const FMovieSceneBinding& SceneBinding : UNREALMCP_SCENE_BINDINGS(Scene))
 					{
 						if (SceneBinding.GetObjectGuid() == AnimationBinding.AnimationGuid)
 						{
@@ -424,13 +425,11 @@ namespace
 			{
 				for (const FGuid& Guid : RemovedGuids)
 				{
-					// The possessable owns the tracks; the binding entry that holds them is removed
-					// through the public accessor (UMovieScene::RemoveBinding is protected).
+					// The possessable owns the tracks; RemovePossessable drops its binding entry too
+					// (and fires the binding-removed event), so no second removal is needed - and on
+					// 5.7+ none is possible, since the array accessor it would need is const-only.
 					Scene->RemovePossessable(Guid);
-					Scene->GetBindings().RemoveAll([&Guid](const FMovieSceneBinding& SceneBinding)
-					{
-						return SceneBinding.GetObjectGuid() == Guid;
-					});
+					UNREALMCP_REMOVE_BINDING_FOR_GUID(Scene, Guid);
 				}
 			}
 		}

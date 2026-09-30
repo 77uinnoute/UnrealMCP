@@ -39,8 +39,12 @@ echo [UnrealMCP] Build SUCCEEDED.
 echo [UnrealMCP] Deploying binaries to %~dp0Binaries\Win64 ...
 copy /Y "%PACKAGE_PATH%\Binaries\Win64\UnrealEditor-UnrealMCP.dll" "%~dp0Binaries\Win64\"
 if errorlevel 1 goto :deploy_failed
-if exist "%PACKAGE_PATH%\Binaries\Win64\UnrealEditor-UnrealMCP.modules" (
-    copy /Y "%PACKAGE_PATH%\Binaries\Win64\UnrealEditor-UnrealMCP.modules" "%~dp0Binaries\Win64\"
+rem The manifest MUST be deployed: the editor compares its BuildId against the engine's before loading
+rem the module, and a stale one (e.g. left behind by a build made with another engine version) makes
+rem startup fail with "modules are missing or built with a different engine version: UnrealMCP".
+rem BuildPlugin names it UnrealEditor.modules (the packaged host target), not UnrealEditor-UnrealMCP.modules.
+if exist "%PACKAGE_PATH%\Binaries\Win64\UnrealEditor.modules" (
+    copy /Y "%PACKAGE_PATH%\Binaries\Win64\UnrealEditor.modules" "%~dp0Binaries\Win64\"
     if errorlevel 1 goto :deploy_failed
 )
 if exist "%PACKAGE_PATH%\Binaries\Win64\UnrealEditor-UnrealMCP.pdb" (

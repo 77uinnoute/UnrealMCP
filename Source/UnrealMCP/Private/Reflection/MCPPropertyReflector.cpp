@@ -1,6 +1,7 @@
 #include "Reflection/MCPPropertyReflector.h"
 #include "Reflection/MCPPropertyCodecs.h"
 
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 
 #include "UObject/UnrealType.h"

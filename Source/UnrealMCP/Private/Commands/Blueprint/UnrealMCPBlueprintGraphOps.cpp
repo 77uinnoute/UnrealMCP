@@ -1,5 +1,6 @@
 #include "Commands/Blueprint/UnrealMCPBlueprintGraphOps.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "EdGraph/EdGraph.h"
@@ -1467,7 +1468,7 @@ bool FUnrealMCPBlueprintGraphOps::ResolveClass(const FString& ClassName, UClass*
 
     for (const FString& Candidate : NamesToTry)
     {
-        if (UClass* Found = FindObject<UClass>(ANY_PACKAGE, *Candidate))
+        if (UClass* Found = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *Candidate))
         {
             OutClass = Found;
             return true;
