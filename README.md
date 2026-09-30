@@ -1,6 +1,6 @@
 # UnrealMCP
 
-Unreal Engine 5.5 editor plugin + Model Context Protocol (MCP) server that lets an AI agent drive the editor:
+Unreal Engine 5.5 - 5.8 editor plugin + Model Context Protocol (MCP) server that lets an AI agent drive the editor:
 Blueprints (graphs, nodes, pins, components), materials, UMG widgets, animation sequences and montages,
 skeletal meshes and retargeting, cloth/physics, Cascade particle systems, PCG graphs, levels and lighting,
 plus asset import/move/delete — through a single structured command surface exposed as MCP tools.
@@ -16,7 +16,9 @@ The bridge listens on `127.0.0.1:55557` once the editor has loaded the plugin.
 
 ## Requirements
 
-- Unreal Engine 5.5 (installed build).
+- Unreal Engine 5.5 - 5.8 (installed build). All four build from this one source tree: every engine API that
+  moved between those releases is guarded in `Source/UnrealMCP/Private/Compat/UnrealMCPVersionCompat.h`, so a new
+  engine version is a change there rather than a hunt through the command files.
 - Windows (the bridge and the build scripts are Windows-first).
 - A C++ toolchain UnrealBuildTool accepts. Visual Studio 2022 is the supported one; newer Visual Studio releases work
   as long as they ship the MSVC v143 toolset (UBT picks that toolset up and reports it as `Visual Studio 2022 14.3x`).
@@ -60,3 +62,7 @@ The bridge listens on `127.0.0.1:55557` once the editor has loaded the plugin.
 `.claude/skills/<name>/SKILL.md` — ten task-oriented guides (Blueprint, material, UMG, animation, cloth/physics,
 level & lighting, asset pipeline, particle, PCG, retargeting). Each is a plain Agent Skill: YAML frontmatter
 (`name`, `description`) plus Markdown, so any agent that reads `.claude/skills` can pick the right one.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
