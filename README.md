@@ -63,6 +63,13 @@ The bridge listens on `127.0.0.1:55557` once the editor has loaded the plugin.
 level & lighting, asset pipeline, particle, PCG, retargeting). Each is a plain Agent Skill: YAML frontmatter
 (`name`, `description`) plus Markdown, so any agent that reads `.claude/skills` can pick the right one.
 
+## Credits
+
+Started from an early version of [avdo403/UnrealMCP](https://github.com/avdo403/UnrealMCP), an MCP plugin for
+Unreal Engine 5 whose README declares an MIT license (that repository carries no LICENSE file of its own). The
+editor bridge, the Python MCP server and the command surface all descend from it and have grown since — more
+command domains, the 5.5-5.8 compatibility layer, and the build/verification scripts in this repository.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
