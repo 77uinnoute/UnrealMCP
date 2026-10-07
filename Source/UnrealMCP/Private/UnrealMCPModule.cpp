@@ -8,6 +8,8 @@
 
 void FUnrealMCPModule::StartupModule()
 {
+	// NOTE: GEditor is still null here (modules start before the editor engine object exists), so the
+	// "do not throttle PIE" hook is bound from the start_pie command instead - see UnrealMCPPIECommands.
 	UE_LOG(LogTemp, Display, TEXT("Unreal MCP Module has started"));
 }
 

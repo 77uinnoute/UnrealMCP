@@ -4,6 +4,7 @@
 
 #include "CoreGlobals.h"
 #include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "EditorSubsystem.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
@@ -35,11 +36,43 @@ FUnrealMCPPIECommands::FUnrealMCPPIECommands()
 {
 }
 
+namespace
+{
+	/**
+	 * Whether the editor should skip its background throttling right now.
+	 *
+	 * UEditorEngine::GetMaxTickRate() answers a hard 3.0 fps whenever ShouldThrottleCPUUsage() is true
+	 * (EditorEngine.cpp:2562), and that state is the norm for this setup: the editor is started without
+	 * a foreground window (Start_Editor.bat uses -WindowStyle Hidden, and AreAllWindowsHidden() forces
+	 * the throttle even with the "Use Less CPU when in Background" preference off) while the driver of
+	 * the session lives outside the app. At 0.33 s per frame the physics substep budget cannot cover the
+	 * frame, so speeds read correctly but positions drift - the simulation is right, the measurements
+	 * are not.
+	 *
+	 * The engine's hook for this is the ShouldDisableCPUThrottlingDelegates array ("delegates that can
+	 * force disable throttling cpu usage if any of them return true", EditorEngine.h:662). Answer true
+	 * only while a PIE world exists: playing is when frames matter, and outside of PIE the editor keeps
+	 * behaving exactly as the user's preference asks.
+	 */
+	bool ShouldDisableThrottlingDuringPIE()
+	{
+		return GEditor != nullptr && GEditor->PlayWorld != nullptr;
+	}
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPPIECommands::HandleStartPIE(const TSharedPtr<FJsonObject>& Params)
 {
     if (!GEditor)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("editor_unavailable: GEditor is null"));
+    }
+
+    // Bind the no-throttle hook once, here: this is the first command that runs with a live GEditor
+    // (plugin StartupModule runs before the editor engine object exists).
+    if (GEditor->ShouldDisableCPUThrottlingDelegates.Num() == 0)
+    {
+        GEditor->ShouldDisableCPUThrottlingDelegates.Add(
+            UEditorEngine::FShouldDisableCPUThrottling::CreateStatic(&ShouldDisableThrottlingDuringPIE));
     }
 
     // PIE refuses to start while a Blueprint has compile errors, and asks that question with a modal
