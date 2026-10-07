@@ -462,6 +462,15 @@ def register_blueprint_node_tools(mcp: FastMCP):
             linked_to (["<node guid>.<pin>", ...]). connections uses guids on both
             ends: {"from": "<guid>.<pin>", "to": "<guid>.<pin>"}.
             node_ids holds the matching event guids (node_type="Event" only).
+            truncated is true ONLY when a node that should have been listed was
+            dropped by max_nodes (re-ask with a bigger max_nodes); filtering does
+            NOT set it - read filtered for that, because re-asking a filtered
+            query gains nothing.
+
+        verbose=False drops properties, pins and connections: the response declares that in
+        omitted_fields[] and keeps pin_count per node instead. Such a payload cannot answer any
+        pin-name question - filtering it by pin name silently matches nothing. Call again with
+        verbose=True (the default) for pin-level work.
         """
         from unreal_mcp_server import get_unreal_connection
         

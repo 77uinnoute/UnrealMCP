@@ -99,34 +99,7 @@ def main():
         assert got_md5 == expect_md5, f"iter {i}: md5 mismatch (middle-of-payload loss)"
     print("[OK] 64KB random payloads x 20: zero loss (len + md5)")
 
-    # 3. deferred job + poll
-    resp = send_framed("execute_python_command", {
-        "command": "import time\nprint('JOB_START')\n"
-                   "total = sum(i * i for i in range(3000000))\n"
-                   "print('JOB_TOTAL:%d' % total)",
-        "deferred": True,
-    })
-    job_id = resp["result"]["job_id"]
-    print(f"[OK] deferred job queued: {job_id}")
-    deadline = time.time() + 60
-    state = None
-    while time.time() < deadline:
-        poll = send_framed("poll_python_job", {"job_id": job_id, "cleanup": True})
-        state = poll["result"].get("state")
-        if state == "done":
-            job = poll["result"]["job"]
-            assert job.get("success") is True, f"job failed: {job.get('error')}"
-            job_out = "".join(e.get("output", "") for e in (job.get("log") or []))
-            assert "JOB_TOTAL:" in job_out, f"job output missing: {job_out[:500]}"
-            print("[OK] poll_python_job: done, job payload correct")
-            break
-        time.sleep(0.5)
-    else:
-        raise RuntimeError(f"deferred job never finished (state={state})")
-    poll2 = send_framed("poll_python_job", {"job_id": job_id, "cleanup": False})
-    assert poll2["result"]["state"] == "pending", "job file should be gone after cleanup"
-    print("[OK] poll_python_job cleanup: pending after read")
-
+    # 3. (deferred job + poll_python_job coverage removed: execute_python_* is sync-only)
     # 4. take_screenshot (absolute path, filename honored)
     shot = os.path.abspath(os.path.join(os.path.dirname(__file__), "test_shot.png")).replace("\\", "/")
     resp = send_framed("take_screenshot", {"filepath": shot})

@@ -77,6 +77,22 @@ struct UNREALMCP_API FPropertyDescriptor
     /** True when FromJson can write it. */
     bool bSupported = false;
 
+    /**
+     * True when the write path accepts this property's *edit flags*. Computed by IsWritable, the same
+     * call the writer makes, so a probe cannot claim writable while the write refuses (the two used to
+     * be independent and could drift).
+     */
+    bool bWritable = true;
+
+    /** Why bWritable is false: "" / "read_only" / "engine_managed" / "unsupported_type" / "fixed_size_array:N". */
+    FString WritableDetail;
+
+    /** Writable field names of the element struct, so a container write needs no guesswork. */
+    TArray<FString> ElementFields;
+
+    /** Shape phrased for a caller, e.g. "array<struct{Animation: asset path string}>". */
+    FString Shape;
+
     /** True when a struct or property codec owns it (its shape is codec-defined). */
     bool bHasCodec = false;
 
@@ -117,6 +133,18 @@ public:
 
     /** Type / shape / support description of a property, without touching any value. */
     static FPropertyDescriptor Describe(const FProperty* Property);
+
+    /**
+     * Edit-flag half of the write gate, used by BOTH the writer and `reflect_probe`.
+     *
+     * bNestedPath mirrors the writer's rule: addressing a leaf through a path
+     * ("LodData[0].PhysicalMeshData.WeightMaps[1].Values") is the explicit opt-in for baked data that
+     * carries no Edit specifier at all, so only `CPF_EditConst` still refuses.
+     */
+    static bool IsWritable(const FProperty* Property, bool bNestedPath, FString& OutDetail);
+
+    /** Same, plus the "can FromJson write this type at all" half - the answer a probe reports. */
+    static bool IsWritableAndSupported(const FProperty* Property, bool bNestedPath, FString& OutDetail);
 
     /** True when FromJson can write this property. */
     static bool IsSupported(const FProperty* Property);

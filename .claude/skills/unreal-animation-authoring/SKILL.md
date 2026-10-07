@@ -1,6 +1,6 @@
 ---
 name: unreal-animation-authoring
-description: "UE5（UnrealMCP）里用 MCP 工具 + python 脚本程序化建/改动画资产的方法：序列（UAnimSequence）为什么必须走 C++ 命令、数据模型取帧率陷阱与帧率兼容规则、骨骼轨道/曲线/Notify/NotifyTrack/SyncMarker 的写入顺序与回读、压缩与派生数据同步等待、蒙太奇（UAnimMontage）section/slot/segment/notify/branching point/blend 的结构编辑纪律与「结构写先关编辑器」规则、编辑器会话与预览控制（打开 Persona、预览时间、播放/停止、跳段）、NAME_None 序列化陷阱、写入自证字段与验收纪律。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— create_anim_sequence / create_anim_sequence_from_pose / add_bone_track / set_bone_track_keys / add_curve / set_curve_keys / add_notify / add_notify_state / add_notify_track / add_sync_marker / set_animation_frame_rate / compress_animation / create_montage_from_animation / create_empty_montage / duplicate_montage / add_section / remove_section / rename_section / add_slot_track / add_anim_segment / set_segment_play_rate / add_branching_point / set_blend_in / set_blend_out / open_animation_editor / open_montage_editor / refresh_montage_editor / set_preview_time / play_preview / stop_preview / jump_to_section；以及任何涉及「用 MCP 建/改 UE 动画序列或蒙太奇、骨骼动画数据、动画曲线、AnimNotify、同步标记、蒙太奇段落与槽位、动画编辑器预览、压缩动画、动画资产验收」的任务。材质与粒子不在这里：走 unreal-material-authoring / unreal-particle-authoring。"
+description: "UE5（UnrealMCP）里用 MCP 工具 + python 脚本程序化建/改动画资产的方法：序列（UAnimSequence）为什么必须走 C++ 命令、数据模型取帧率陷阱与帧率兼容规则、骨骼轨道/曲线/Notify/NotifyTrack/SyncMarker 的写入顺序与回读、压缩与派生数据同步等待、蒙太奇（UAnimMontage）section/slot/segment/notify/branching point/blend 的结构编辑纪律与「结构写先关编辑器」规则、编辑器会话与预览控制（打开 Persona、预览时间、播放/停止、跳段）、NAME_None 序列化陷阱、写入自证字段与验收纪律；以及「复刻官方模板 AnimBP（整份复制 → 换骨架 → 逐个换动画引用）」、动画状态机/状态/转移内层图的 python 取法（`unreal.load_object`）、BlendSpace 的三条硬边界（`Skeleton` EditConst / `BlendParameters` 定长数组的两种写法 / 新建资产没有运行时 triangulation ⇒ T 字，用 finalize_blend_space 一条命令收口）。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— create_anim_sequence / create_anim_sequence_from_pose / add_bone_track / set_bone_track_keys / add_curve / set_curve_keys / add_notify / add_notify_state / add_notify_track / add_sync_marker / set_animation_frame_rate / compress_animation / create_montage_from_animation / create_empty_montage / duplicate_montage / add_section / remove_section / rename_section / add_slot_track / add_anim_segment / set_segment_play_rate / add_branching_point / set_blend_in / set_blend_out / open_animation_editor / open_montage_editor / refresh_montage_editor / set_preview_time / play_preview / stop_preview / jump_to_section / set_asset_properties（写 BlendSpace）/ finalize_blend_space（补 BlendSpace 运行时数据）；以及任何涉及「用 MCP 建/改 UE 动画序列或蒙太奇、骨骼动画数据、动画曲线、AnimNotify、同步标记、蒙太奇段落与槽位、动画编辑器预览、压缩动画、动画资产验收、复刻第三人称模板 locomotion 状态机、BlendSpace 混合空间（样本/轴参数/运行时数据/样本变「无动画」=引用断了）、走跑切换或 T 字姿势排查」的任务。材质与粒子不在这里：走 unreal-material-authoring / unreal-particle-authoring。"
 metadata:
   version: "1.0.0"
   upstream: unreal-blueprint-authoring
@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP 动画（序列 + 蒙太奇）编写 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
 目标：用 MCP 工具 + python 脚本**可重复、可验证**地建/改动画序列与蒙太奇。
 
 **环境注意**：改了 `Plugins/UnrealMCP/Content/Python/**`（含工具描述、脚本）后需**重启 unrealMCP server**；改插件 C++ 需 `Build_UnrealMCP.bat` 编译 + 重启编辑器（`Editor.bat start`，或 `Build/start_editor.bat`）。
@@ -32,7 +32,7 @@ metadata:
 
 | 用途 | 路径 |
 |---|---|
-| 单个操作 / 需要结构化错误 | MCP 工具（130 个，命令名 = 工具名） |
+| 单个操作 / 需要结构化错误 | MCP 工具（命令名 = 工具名） |
 | 批量建/配（几十次写入） | 脚本内 `unreal.UnrealMCPPythonAPI.execute_mcp_command` **回环**（同步派发，无 TCP、无死锁） |
 | 独立校验 | `unreal.AnimationLibrary`（`get_sequence_length()` / `get_num_frames()` / `get_animation_track_names()` / `get_animation_notify_events()` / `get_bone_pose_for_time()` …）+ `unreal.load_asset(...)` 直读属性 |
 
@@ -46,7 +46,7 @@ def bridge(cmd, **params):
 print(bridge("get_animation_length", asset_path="/Game/Anims/MM_Idle")["length"])
 ```
 
-脚本写到 `Content/Python/scripts/animation/*.py` → `execute_python_file(file_path=..., deferred=True)` + `poll_python_job`（长脚本一律走文件 + deferred，别用 inline 长字符串）。脚本的 bridge 包装要 `except RuntimeError` 兜住并记成结构化失败，避免一条失败打断整轮。
+脚本写到 `Content/Python/scripts/animation/*.py` → `execute_python_file(file_path=..., timeout=...)`（长脚本一律走文件，别用 inline 长字符串；命令一律同步，重活拆成多次短调用）。脚本的 bridge 包装要 `except RuntimeError` 兜住并记成结构化失败，避免一条失败打断整轮。
 
 ---
 
@@ -58,11 +58,14 @@ print(bridge("get_animation_length", asset_path="/Game/Anims/MM_Idle")["length"]
 | `set_animation_frame_rate` 只接受**当前帧率的整数倍或整除数**（`IsMultipleOf`/`IsFactorOf`）；否则控制器 `ReportErrorf`，命令侧预检后返回 `incompatible_frame_rate` + `candidates`（current、×2、×4、÷2、÷4） | `IAnimationDataController::SetFrameRate` |
 | 改帧率必须让控制器**走事务**（不能传 "不要事务"） | `AnimDataController.cpp` |
 | 曲线写入要 `FAnimationCurveIdentifier(曲线名, RCT_Float)` + `AACF_DefaultCurve` 标志；曲线名不存在时先 `AddCurve` 再写 keys | `AnimDataController.h` |
-| 5.5 没有 `UAnimSequenceBase::AddNotify`；做法是 `Notifies.AddDefaulted_GetRef()` + `Link(资产, 时间)` + `TriggerTimeOffset = GetTriggerTimeOffsetForType(...)` → 再 `RefreshCacheData()`；返回索引要用新增项自己的 `Guid` 反查 | `AnimSequenceBase.cpp` |
+| 引擎没有 `UAnimSequenceBase::AddNotify`；做法是 `Notifies.AddDefaulted_GetRef()` + `Link(资产, 时间)` + `TriggerTimeOffset = GetTriggerTimeOffsetForType(...)` → 再 `RefreshCacheData()`；返回索引要用新增项自己的 `Guid` 反查 | `AnimSequenceBase.cpp` |
 | `UAnimNotify` / `UAnimNotifyState` 在 5.5 是**抽象类**，实例化会崩 → 命令侧显式拒绝抽象类 | `AnimNotify.h`/`AnimNotifyState.h` |
-| 5.5 的 NotifyTrack **有名字**（`FAnimNotifyTrack::TrackName`），不是 5.7 之后的隐式索引；改名要真改 `AnimNotifyTracks[i].TrackName` | `AnimSequenceBase.h` |
+| 引擎的 NotifyTrack **有名字**（`FAnimNotifyTrack::TrackName`），不是隐式索引；改名要真改 `AnimNotifyTracks[i].TrackName` | `AnimSequenceBase.h` |
 | SyncMarker 存在 `UAnimSequence::AuthoredSyncMarkers`：改完要 `SortSyncMarkers()` + `RefreshSyncMarkerDataFromAuthored()`，否则读回还是旧的 | `AnimSequence.h` |
 | `FAnimTrack::ValidateSegmentTimes()` **没有 ENGINE_API** → 蒙太奇结构写的收尾只能做 `Montage->SetCompositeLength()` + `UpdateLinkableElements()` + `RefreshCacheData()` | `AnimCompositeBase.h` |
+| **蒙太奇的段拖不动是设计，不是 bug**：`FAnimSegment::StartPos` 是 `UPROPERTY(VisibleAnywhere, DisplayName="Starting Position")`（只读）；且 `FAnimTrack::CollapseAnimSegments()` 排序后**把第一个段的 `StartPos` 直接置 0**、其余段贴在前一段尾部 ⇒ 单段蒙太奇里唯一的段永远从 0 开始，编辑器里拖它会被 collapse 拉回 | `AnimCompositeBase.h:104`、`AnimCompositeBase.cpp:505` |
+| 蒙太奇的播放起点由**播放方**决定：`Montage_Play(..., InTimeToStartMontageAt)` → `NewInstance->SetPosition(Clamp(t, 0, MontageLength))`；`UAnimMontage::CreateSlotAnimationAsDynamicMontage` 的同名参数**已废弃不用**（注释明写） | `AnimInstance.cpp:2441`、`AnimMontage.cpp:3059` |
+| `ACharacter::PlayAnimMontage(Montage, InPlayRate, StartSectionName)`（= 蓝图 `Play Anim Montage`）= `Montage_Play` + `JumpToSection`，**没有起始时间参数** | `Character.cpp` |
 | 字段是 `NAME_None` 时 `FName::ToString()` 会输出字面量 `"None"` → 所有 section 链接 / sync group / track name / slot group 都序列化为**空串** | `NameTypes.h` |
 | 蒙太奇**没有**「notify 关联到 section」的存储字段：`linked_section_name` 是**按触发时间推导**的，所以「link to section」的语义 = 把 notify 移到该 section 起始时间 | `AnimMontage.h` + 参考实现 |
 | 蒙太奇的 BranchingPoint 就是 `MontageTickType == EMontageNotifyTickType::BranchingPoint` 的 notify（旧 `FBranchingPoint` 已废弃） | `AnimTypes.h` |
@@ -213,6 +216,8 @@ unreal.EditorAssetLibrary.save_asset("/Game/.../MySeq", only_if_is_dirty=False)
 - **notify 命令是序列/蒙太奇共用的**（注册表命令名唯一，按资产类型分派）：`list_notifies`、`add_notify`、`add_notify_state`、`remove_notify`、`set_notify_trigger_time`、`get_root_motion_at_time`。传蒙太奇时响应带 `is_montage: true`，且 notify 条目**额外**有 `linked_section_name`（推导）与 `is_branching_point`。
 - 蒙太奇专属：`set_notify_link_to_section(asset_path, section="Attack", notify_index=0 / notify_name=...)`（= 把 notify 移到该 section 起始时间）、`list_branching_points`、`add_branching_point(name, trigger_time, track_index=0)`、`remove_branching_point(branching_point_index)`、`is_branching_point_at_time(time)`。
 - `branching_point_index` 是「分支点序号」，`notify_index` 是「notify 数组索引」；`remove_branching_point` **只**删分支点，同位置普通 notify 不动（验收脚本会断言 notify 计数只减 1）。
+- **要一个「能拖的播放起点」就把 notify 当把手**（段本身被引擎钉死，见 §一）：在目标时刻放一条普通 notify（约定名 `Start`），播放方在 `Montage_Play` **之前**扫 `Montage->Notifies` 取同名 notify 的 `GetTriggerTime()`（找不到回退 0），把它当 `InTimeToStartMontageAt` 传下去；改起点 = 在编辑器里拖那条 notify（脚本等价物 `set_notify_trigger_time`）。`Montage_Play` 在蓝图侧是 `Play Anim Montage`（无起始时间参数，见 §一）⇒ 蓝图要用就把「读把手时间 + `Montage_Play`」包成一个 `BlueprintCallable`。
+  验收：把手在 1.0s 时 PIE 里 `Montage_GetPosition()` 读到 1.0（该函数 `BlueprintPure`，python 可读）。
 
 ### 3.5 Blend 与根运动
 
@@ -250,9 +255,9 @@ unreal.EditorAssetLibrary.save_asset("/Game/.../MySeq", only_if_is_dirty=False)
 
 ---
 
-## 五、工具全表（130）
+## 五、工具全表
 
-### 5.1 序列：读（38）
+### 5.1 序列：读
 
 | 命令 | 说明 |
 |---|---|
@@ -295,7 +300,7 @@ unreal.EditorAssetLibrary.save_asset("/Game/.../MySeq", only_if_is_dirty=False)
 | `play_preview` | 开始/继续预览（共用） |
 | `stop_preview` | 预览停止 |
 
-### 5.2 序列：写（38）
+### 5.2 序列：写
 
 | 命令 | 说明 |
 |---|---|
@@ -337,8 +342,9 @@ unreal.EditorAssetLibrary.save_asset("/Game/.../MySeq", only_if_is_dirty=False)
 | `set_force_root_lock` | 开关强制根锁 |
 | `set_compression_scheme` | 指定骨骼压缩设置 |
 | `compress_animation` | 同步压缩并回读结果 |
+| `set_blend_space_samples` | 整表写 BlendSpace 样本 + 自动 finalize + 回读自证（见 `unreal-animation-case-template-abp` 的 BlendSpace 那节） |
 
-### 5.3 蒙太奇（54）
+### 5.3 蒙太奇
 
 | 命令 | 说明 |
 |---|---|
@@ -464,3 +470,8 @@ unreal.EditorAssetLibrary.save_asset("/Game/.../MySeq", only_if_is_dirty=False)
 | slot/segment 族 | `slot_track`、`segment`（`start_time`/`end_time`/`start_position`/`end_position`/`play_rate`/`loop_count`）、`segment_count`、`editor_closed` |
 | blend/根运动 | `blend`（in/out 全部字段）、`enable_root_motion_*` |
 | 编辑器会话 | `opened`/`refreshed`、`editor_open`、`preview_available`、`preview_time`、`playing`、`current_section_name`（**没有** `saved`，这些命令不碰资产） |
+
+---
+
+> **这一节已拆成独立 skill**：`unreal-animation-case-template-abp`（复刻官方模板 ABP 与 BlendSpace）。
+> **这一节已拆成独立 skill**：`unreal-animation-case-joint-transition-band`（关节过渡带：图侧配方 + 权重侧做法）。

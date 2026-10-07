@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP UMG 控件编写 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
 目标：用 MCP 工具 + python 脚本**可重复、可验证**地建/改控件蓝图：造控件、改控件树、写属性与槽、删/搬/改名。
 
 **环境注意**：改 `Plugins/UnrealMCP/Content/Python/**`（含工具描述）后需**重启 unrealMCP server**；改插件 C++ 则需编译 + 重启编辑器（`Build_UnrealMCP.bat` → `Editor.bat start`）。
@@ -22,7 +22,7 @@ metadata:
 |---|---|---|
 | 造控件 | ✅ `add_widget` —— `UWidgetTree::ConstructWidget<T>` 是 C++ 模板，`python_api_index("WidgetTree")` → `unknown_class`；`new_object` 造的控件不归树、不注册变量、重启即失 | — |
 | 读控件树 | ✅ `get_widget_tree`（资产侧）—— 一次读全：绘制序、每类槽展开字段、绑定/事件、`effective`/`compiled`。python 只能按对象路径逐个取（`…:WidgetTree` 或 `…:WidgetTree.<控件名>`，见 §四a），没有"一次读全"的入口 | 单个控件的自身属性/槽字段（按对象路径） |
-| 读**运行时**控件树（PIE） | ✅ `get_pie_widget_tree` —— 实例的控件树、当前文本、几何、有效可见性都只有 C++ 拿得到 | 拿到 `instance_path` 后可以用 `unreal.load_object` 取到**实例对象本身**并 `call_method` 调它的蓝图函数（见 §八.6） |
+| 读**运行时**控件树（PIE） | ✅ `get_pie_widget_tree` —— 实例的控件树、当前文本、几何、有效可见性都只有 C++ 拿得到 | 拿到 `instance_path` 后可以用 `unreal.load_object` 取到**实例对象本身**并 `call_method` 调它的蓝图函数（见 `unreal-umg-case-list-grid-selection` 的“运行时怎么取证”那节） |
 | 改树结构（删/换父/调序/换根/改名） | ✅ `remove_widget` / `reparent_widget` / `reorder_widget` / `set_root_widget` / `rename_widget` —— 没有树对象，且要连带清理绑定与变量 | — |
 | 绑定 | ✅ `set_text_block_binding` / `bind_widget_event` —— `Bindings` 在 python 侧不可见（生成类的 `Bindings` 是 protected） | — |
 | 写控件属性 | 命令更省事（统一寻址 + `applied[]/failed[]` + 落盘） | ✅ `TextBlock.set_font / set_color_and_opacity / justification(Read-Write 属性)`、`Image.set_brush`、`Slider.set_value`、`CheckBox.set_checked_state`、`ProgressBar.set_percent`、`Widget.set_visibility / set_is_enabled / set_render_transform` |
@@ -260,146 +260,12 @@ def main():
 main()
 ```
 
-- 运行：`execute_python_file(file_path=<绝对路径>, timeout=300)`；脚本长/编译多时再考虑 `deferred=True`。
+- 运行：`execute_python_file(file_path=<绝对路径>, timeout=300)`（`timeout` 是**工具面**参数，bridge 命令只有 `file_path`/`deferred`）；脚本长/编译多时才考虑 `deferred=True`。
 - **断言用回读**：`applied[].value_after`、`slot.*`、`child_order`、`removed_*`、`blockers`；别断言"命令返回 success"。
 - 负例要断言 `error_code` **和**候选字段（`candidates` / `panels` / `fields` / `blockers`）。
 - **判资产存在用 `unreal.EditorAssetLibrary.does_asset_exist(path)`**：`does_asset_exist` 不是 bridge 命令，python 侧 `bridge("does_asset_exist", …)` 会回 `unknown_command`（拿它做门禁会让断言静默 SKIP）。**例外：PIE 运行期间这个 python API（以及 `list_assets`）会回空/False**，而资产其实在（C++ 侧 `get_umg_compile_errors` / `safe_delete_asset` 照样能读到）——PIE 期间的探针不要用它当门禁，用命令自身的错误码（如 `widget_blueprint_not_found`）。
-- **PIE 运行中不要删夹具资产**：`safe_delete_asset` 已因此加了守卫 —— PIE / SIE 里调用会整调用拒（`pie_running` + `hint`，`force` 也不绕过），因为它在 play mode 下文件部分做不成、却会把内存对象删掉；若该资产此刻在设计器里开着，tab 的 `EditingObjects` 变空，下一帧直接断言崩溃（`AssetEditorToolkit.cpp` 的 `EditingObjects.Num() > 0`，实测自 2026-09-29 的一次真崩溃）。清理一律放在 `stop_pie` 之后、确认 `pie running == false` 的那一次派发里做；PIE 期间的"资产还在不在"别用 `does_asset_exist`（会说谎），用任一读命令复查。
-- 探针的"写入证据"不能用默认值：TextBlock 的 `font_size` 默认就是 24，写 24 的回读与不写一样（本轮踩过）。
+- **PIE 运行中不要删夹具资产**：`safe_delete_asset` 已因此加了守卫 —— PIE / SIE 里调用会整调用拒（`pie_running` + `hint`，`force` 也不绕过），因为它在 play mode 下文件部分做不成、却会把内存对象删掉；若该资产此刻在设计器里开着，tab 的 `EditingObjects` 变空，下一帧直接断言崩溃（`AssetEditorToolkit.cpp` 的 `EditingObjects.Num() > 0`）。清理一律放在 `stop_pie` 之后、确认 `pie running == false` 的那一次派发里做；PIE 期间的"资产还在不在"别用 `does_asset_exist`（会说谎），用任一读命令复查。
+- 探针的"写入证据"不能用默认值：TextBlock 的 `font_size` 默认就是 24，写 24 的回读与不写一样（踩过）。
 - 想验"控件真的归控件树"（而不是 `NewObject` 造的孤儿）：造控件 → 保存 → 重启编辑器 → 再 `get_widget_tree` 读回仍在树中。重启由用户执行，脚本分两段（写夹具 / 读夹具）。
 
-## 八、列表 / 网格 / 选中态 / 详情联动（实测套路）
-
-做大一点的成品界面（多格网格 + 选中 + 右侧详情）时，下面几条是可复用的定式。
-
-### 1. 网格布局：`GridSlot.Row/Column` 必须显式写
-
-`WidgetTree::AddChild` **不自动铺排** `GridPanel` 子件，`UGridSlot::Row/Column` 缺省都是 0 —— 不写就是 18 个格子原地叠在一起。所以：
-
-```python
-add_widget(blueprint_name=WBP, widget_class="SizeBox", widget_name="Slot_%02d_Cell" % i,
-           parent_widget="Grid_Slots",
-           slot={"padding": {"right": 8, "bottom": 8},   # 步进 = 96 + 8
-                 "row": i // 6, "column": i % 6,          # 6 列
-                 "horizontal_alignment": "Left", "vertical_alignment": "Top"})
-```
-
-- **建控件时就把槽一起写**（`add_widget(slot=…)`）：槽键在**构造控件之前**校验，非法键整调用拒绝且不留半成品；`AddChild` 之后不用再补一发 `set_widget_slot`。
-- 忘了给行列不会静默：网格子件缺 `row`/`column` 时回执带 `warnings: [{code: "grid_slot_unplaced", …}]`。**看到这条告警就补槽**，别把它当噪音滤掉。
-- 格子尺寸要**固定**：`GridPanel` 的槽没有宽高档，用 `SizeBox` 包一层写 `WidthOverride`/`HeightOverride`；写这两个属性时命令会**自动**把 `bOverride_WidthOverride`/`bOverride_HeightOverride` 置真（回执 `applied[].implied[]` 里能看到），不必手写 —— 需要关掉时同一次调用里显式写 `bOverride_XX = false` 即可。
-- `padding` 用"只给 right/bottom"的写法，首格左上 = 网格左上，于是"第 i 格 左上 = `(i%6)*步进, (i//6)*步进`" —— 这个公式后面算选中框位置要用。
-- 断言：逐格读 `unreal.load_object(None, "<pkg>:WidgetTree.Slot_07_Cell").get_editor_property("Slot")` 的 `Row`/`Column`。
-
-### 2. "唯一选中"用**一个可平移的高亮框**，别逐格改外观
-
-把选中高亮做成**单个** `Border`（等大于格子），与网格同叠在一个 `Overlay` 里、左上对齐；点击第 i 格时只 `SetRenderTranslation((i%6)*步进, (i//6)*步进)`。
-
-- 好处：**任意时刻只有一个选中项由结构保证**（全树只有一个高亮框），不需要 18 路"恢复未选中外观"的回滚逻辑；节点量从"每格 2~4 个 set"降到"每格 1 个算术 + 1 个平移"；框画在格子之上，金色描边更接近 RPG 背包观感。
-- 用 `Widget.SetRenderTranslation`（`UWidget` 方法）而不是改 Canvas 槽，省掉 `GetSlot → Cast To CanvasPanelSlot` 这条链路。
-- 配套的"选中反馈"动画只给 `RenderTransform` 的 **scale** 通道打键（不要给 translation 打键），否则动画会把平移覆盖成 0、高亮框跳回第一格。
-
-### 3. 数据承载：**自函数 + 引脚默认值**（每条数据 0 个额外节点）
-
-`add_function_call_node(graph, "WBP_X_C", "ApplyDetail", x, y)` 造一条"把数据写进详情面板"的调用，8 个入参全部用 `set_pin_default` 写默认值（object 引脚收资产路径字符串、text 引脚 kind=`text`、int 收 `number`）。于是每个格子的事件体只有 **1 个事件 + 1 个调用**两个节点，函数体写一次 —— 比"每格 4~6 个 set"省一个数量级，也比"把数据藏进隐藏 TextBlock"干净。
-
-- 自函数调用节点的 `target` **写生成类名**（`WBP_InventoryPanel_C`），且**必须先把函数图 + 参数建好并编译一次**，否则报 `Function 'X' not found in class`。
-- 色阶/枚举这类"多处共用的定义"集中成**一个数组变量**（如 `RarityColors: linear_color[]`），运行时用 `KismetArrayLibrary.Array_Get` 按档位取 —— 便于"同一档位在格子边框 / 标签 / 名称底板三处同色"这类断言。
-- 断言色阶不要读变量的描述文本，**读 CDO**：`unreal.get_default_object(unreal.load_class(None, "<WBP>_C")).get_editor_property("RarityColors")`。
-
-### 4. 点击承接：用透明 `Button`，不要给 `Border` 绑鼠标事件
-
-每个格子加一层 `Slot_NN_Hit`（`Button`，`background_color` alpha=0，放在 `Overlay` 最上层），事件走 `bind_widget_event(..., event_name="OnClicked")` —— 这是最稳的一条组件事件路径（透明 Button 仍然命中）。给 `Border` 绑 `OnMouseButtonDown` 要多处理 `Handled` 返回值，不划算。
-
-### 5. 收口顺序：先造型 → 再图 → **最后烘焙静态默认值**
-
-造型脚本（写控件属性）会把详情面板的默认文本/颜色**重置**成它自己的常量。所以"界面一打开就该看到的那件物品"必须放在**最后一步**单独写（和"默认选中框位置"一致），否则重跑造型脚本就把它冲掉 —— 本轮踩过（`Detail_Name` 变回占位、`Detail_Rarity` 变回灰）。
-
-### 6. 运行时怎么取证：三件套（PIE 里能读到控件树的真值）
-
-`UUserWidget.WidgetTree` 与 `unreal.WidgetBlueprintLibrary` 在 python 侧仍然不存在，但**实例本身与它的运行时控件树现在读得到**，所以"点击后详情刷没刷新""文字在哪、多大、可见吗"这类问题不必再靠肉眼二分：
-
-1. **`get_pie_widget_tree(blueprint_name, root_widget?, max_depth?)`**（只读）：在运行中的 PIE 世界里找到该控件蓝图的实例，回读**运行时**树 —— 每个控件的 `visibility` / `is_visible`（含父链的有效可见性）/ `render_opacity` / `render_transform` / `desired_size` / `geometry`（`absolute_position` / `local_size` / `absolute_size`，读自缓存几何）/ `has_geometry` / 运行时槽；`TextBlock` 另给**当前文本** / `font_size` / `font_object` / `color` / `auto_wrap` / `wrap_text_at`；`Image` 给当前 `brush_resource` / `image_size` / `tint`；`Button` 给 `is_hovered` / `is_pressed`。
-2. **`instance_path` + `call_method`**：响应里的 `instance_path`（形如 `/Engine/Transient.UnrealEdEngine_0:GameInstance_0.WBP_X_C_0`）就是该实例的对象路径 —— `unreal.load_object(None, path)` 拿到同一个对象，然后可以**直接调它的蓝图函数**：
-   ```python
-   w = unreal.load_object(None, instance_path)
-   w.call_method("ApplyDetail", args=(5, icon, "名称", 2, "稀有", "类型行", "数值行", "描述"))
-   ```
-   参数要用 `args=(…)` 元组或 `kwargs={…}` 传（`call_method(self, name, *args, **kwargs)` 里 `args`/`kwargs` 是两个关键字位，直接摊平传会报 "takes at most 3 arguments"）。**这条把"点击的后果"变成可脚本复现**：调用前后各读一次树，就能判"数据写进去了没"。
-3. **`take_screenshot(filepath, source="pie")`**：Slate 截 PIE 游戏视口 widget，**含 UMG**（`level_viewport` 只截场景 backbuffer，永远没有 PIE / UMG）。只当作布局排查手段，观感结论仍归用户。
-
-几条实测边界，读之前先知道：
-
-- **几何是"上一次绘制"的结果** —— 而 Slate 空闲时会整帧跳过 tick/draw（`Slate.AllowSlateToSleep` 编辑器缺省开着，`SleepBufferPostInput` 缺省 0，只要没输入也没活跃 timer 就睡），编辑器失焦还会停视口（偏好里的 "Use Less CPU in Background"）。所以"窗口明明在屏幕上"也可能读到零几何。
-- **不必自己去开这些设置**：根节点没有几何时，命令会先**强制重画一次**该 PIE 窗口再重读，响应里的 `geometry_refreshed` 说明做没做这次重画（几何已有时不重画）。实测：同一次派发里"刚建完控件立刻读"（期间没 tick）也能拿到真实几何。
-- **真正拿不到的只有"窗口不可绘制"**：被最小化（或 Windows 判定完全不可见）时 Slate 没有 surface，重画也白搭 —— 这时 `geometry_hint` 会带上 `window_visible` / `window_minimized`，`desired_size` 仍然有效（它是算出来的，不需要绘制）。要长期免开窗口，把 PIE 播在**编辑器视口里**（游戏视口成为编辑器窗口的一个控件，编辑器窗口在屏幕上就跟着画）；`Slate.AllowSlateToSleep 0` 也能让 Slate 一直 tick/draw（可用 `set_console_variable` 设，重启编辑器会回到默认）。
-- 改完状态（调用函数、改属性）后**要下一次派发再读**几何：`start_pie` → 建控件 → 读，三步分开（脚本占着 GameThread 时 PIE/Slate 都没机会跑帧；真要在同一次派发里读，靠上面那条强制重画兜底）。
-- 同一蓝图的多个实例按 `GetUniqueID` 排序取 `instance_index`，响应给 `instance_name` / `instance_path` 便于核对与取值。
-- `source="pie"` 截图失败时回 `pie_screenshot_failed` 并附 `window_visible` / `window_minimized` / `captured_width|height` —— 先看这些字段再怀疑工具。
-
-**离线断言仍然要做**（结构 / 槽 / 颜色 / 事件与调用节点的引脚默认值）：`get_widget_tree` + `<pkg>:WidgetTree.<控件名>` 的 `get_editor_property` + CDO + `UnrealMCPBlueprintGraphLibrary`。运行时的树是"此刻的样子"，资产契约要靠离线那套守。
-
-### 7. 关卡入口：把开关放在 PlayerController 蓝图里（并记得开鼠标指针）
-
-两条实测事实决定了这个结构：
-
-- **关卡 Actor 的 `BeginPlay` 早于 PlayerController 可用**：那时 `GetPlayerController(0)` 可能是 `None`，用空 owning player 建出来的控件 `AddToViewport()` 之后 `IsInViewport()` 仍为假（等于没显示，且不报错）。
-- **`bShowMouseCursor` 只有 PlayerController 设得动**：它是 `APlayerController` 上的 `BlueprintReadWrite` 位域属性，而 `SetShowMouseCursor`（`PlayerController.h:2094`）是纯 C++ 方法、**没有 UFUNCTION**，蓝图里调不到。两条都行得通：
-  - **本蓝图就是 PlayerController 子类**：`add_variable_set_node("bShowMouseCursor")` 按 Self 解析出 Get/Set 节点（`self` 引脚类型 `object/PlayerController`）——写起来最短；
-  - **在别的蓝图（如关卡 Actor）里写**：`add_blueprint_variable_node(variable_name="bShowMouseCursor", node_kind="set", owner_class="PlayerController")` 建**非 self** 节点，再把 `GetPlayerController` 的返回值连到它的 `self` 引脚（**这条 Target 连线不能省**，否则节点是"无效目标"而编译失败）。
-
-所以：**让 PlayerController 蓝图承担开关**，事件图只留分支，逻辑收进两个函数：
-
-```
-ShowPanel():  CreateWidget(owner=Self) → Set 变量 → AddToViewport(10)
-              → Set bShowMouseCursor(true)
-              → WidgetBlueprintLibrary.SetInputMode_GameAndUIEx(Self, 面板, DoNotLock, false, true)
-              → bShown = true
-HidePanel():  RemoveFromParent() → Set bShowMouseCursor(false)
-              → WidgetBlueprintLibrary.SetInputMode_GameOnly(Self, true) → bShown = false
-事件图:       InputKey(I) → Branch(bShown) → HidePanel() / ShowPanel()
-```
-
-- **PlayerController 自带 InputComponent**：`InputKey` 不需要 `EnableInput`，也就不需要 `BeginPlay → Delay` 那套绕行 —— 这是把开关从关卡 Actor 挪到 PC 的主要收益。
-- **输入模式必须切**：只开光标不切模式时鼠标仍被视口 capture，UMG 收不到点击（表现就是"有光标但点不动"）。`APlayerController::SetInputMode` 不是 BlueprintCallable，蓝图里用 UMG 的 `WidgetBlueprintLibrary.SetInputMode_GameAndUIEx` / `SetInputMode_GameOnly`（注意隐藏侧是 `SetInputMode_GameOnly`，**没有** `SetInputMode_GameOnlyEx`）。
-- 给 `InWidgetToFocus` 传面板控件，键盘导航/焦点才落在面板上。
-- **让关卡真的用上这个 PC**：GameMode 的 `PlayerControllerClass` 用 `set_blueprint_property` 写（回读真值），关卡 World Settings 的 `DefaultGameMode` 用 `set_actor_property` 写；判据是 **PIE 里 `get_player_controller(world,0)` 的类名**，不是"命令回 success"。
-- 造型上像"取纯函数返回值"却带 `execute` 引脚的 K2 节点（`WidgetBlueprintLibrary.Create`、`GameplayStatics.Spawn*`、`KismetSystemLibrary.Delay`…）**必须显式串 exec**，否则返回值恒为 null 且编译 0 错误 —— 判据是读引脚（反射库的 `UnrealMCPBlueprintGraphLibrary.get_node_pins`，不是工具）看有没有 `execute`。
-- **"按键才出现"的链路怎么验**：python 模拟不了按键，所以在 PC 蓝图里临时挂一条 `BeginPlay → ShowPanel()`（夹具），PIE 里断言 `IsInViewport()` / `show_mouse_cursor` / `bPanelShown`，然后把夹具关掉重跑（事件图整段重建 ⇒ 夹具自然消失），再断言初始态 `PanelWidget == None` + 光标 false。这样除"按键本身"以外的全链路都被真跑过一遍。
-
-### 8. 布局三坑：热区 / 缩放 / 内缩（都是引擎默认值，命令全部回 success）
-
-这三条都**不会报错**，只会让成品"点不到 / 变形 / 莫名内缩"，写代码前先记住：
-
-1. **`OverlaySlot` 的默认对齐是 `HAlign_LEFT` + `VAlign_TOP`，不是 Fill。** `add_widget` 把控件加进 `Overlay`（含 `GridPanel` 的格子、叠层）后，控件按**自己的 desired size** 钉在左上 —— 一个没有内容的 `Button` 的 desired size 极小，于是"只有左上角一小块能点"。要铺满必须显式写：
-   ```python
-   set_widget_slot(widget_name="Slot_00_Hit",
-                   slot={"padding": 0, "horizontal_alignment": "Fill",
-                         "vertical_alignment": "Fill"})
-   ```
-   判据：`unreal.load_object(None, "<pkg>:WidgetTree.<控件名>").get_editor_property("slot")` 读 `HorizontalAlignment` / `VerticalAlignment`。
-2. **`UImage` 只给 `ResourceObject`（不给 `ImageSize`）时，brush 的 `ImageSize` 是 `(0,0)` ⇒ desired size 为 0。** 它在 FILL 槽里就完全跟着父容器走：父容器（如被 VBox 拉满宽的 `Border`）多宽就多宽、高度取 0 → **一张 128² 的图被拉成 360×20 的横条**。要正方必须用 `SizeBox` 锁死（`WidthOverride`/`HeightOverride`），槽用 Fill。
-3. **`UBorder` 的默认 `Padding` 是 `(4,2,4,2)`。** 往 `Border` 里塞内容、或把 `Border` 当父面板用，都会莫名多一层内缩（`BorderSlot.Padding` 就是它）。要贴边必须显式 `set_widget_properties(border, {"Padding": 0})`。
-
-另外几条相关的：
-
-- **第 4 坑：HBox 的宽度分配会被子件的 desired 宽度左右，而文本会反过来推布局。** `SHorizontalBox` 里两个 `Fill` 子件不是干净的 50/50 —— 谁的内容"想要"得更宽，谁就拿到更多，另一个被压窄。于是**只要列里有跟随内容变化的长文本，切换内容就会让整个布局横向位移**：详情列变宽 → 格子列变窄 → 网格装不下 → 出现滚动条 + 最右一列（连它的数量角标）被裁掉/被详情面板压住。界面看起来就像"面板往左拉伸盖住了最后一列"。
-  修法（一条就够）：给**内容会变的那一列**套一个固定宽度的 `SizeBox`（`WidthOverride` + 自动打开的 `bOverride_WidthOverride`），把它作为 HBox 里 `Automatic` 的那个子件，另一列保持 `Fill` —— 宽度分配从此与文本无关。配套把列内文本设成 `auto_wrap = true` + `wrap_text_at = 0`（按可用宽度换行），`desired_size` 就不会超过盒子。
-  取证方法（`get_pie_widget_tree`）：**在"切换内容"前后各读一次** `LeftCol` / 右列 / 容器 / `Grid_Slots` 的 `geometry.local_size` 与 `desired_size`；宽度变了就是这个问题，`desired > local` 则说明文本正在推盒子。
-- **长文本用 `size_rule: Fill` 吃剩余高度**：`Automatic` 在容器空间不足时会被压到很小甚至 0；把描述这类"可伸缩"的项设成 `Fill`（`{"rule": "Fill", "value": 1.0}`）就不会被挤没。**但要算清余量**：`Fill` 拿到的是"Automatic 兄弟分完之后剩下的"，文本想要 3 行而只分到 2 行的高度时会被裁掉一行 —— 排查"文字少了一截"要看 `desired_size`（想要多大）与 `geometry.local_size`（实际多大）的差。
-- **写控件属性不必背精确反射名**：属性查找忽略大小写与下划线，bool 还容许省 `b`（`brush_color` → `BrushColor`、`override_width_override` → `bOverride_WidthOverride`）；真晦涩的键用 `get_widget_tree` / 失败回执里的 `candidates` 抄。命中多个才报 `ambiguous_property`。
-- **UMG 的初始化事件是 `Construct`**，不是 `ReceiveBeginPlay`（`UUserWidget` 不是 Actor，`add_blueprint_event_node(event_name="ReceiveBeginPlay")` 会回 `function_not_found`，但回执带 `candidates`，里面有 `Construct` / `PreConstruct` / `Tick` —— 写错事件名先看候选）。
-- **`set_widget_slot(slot={})` 是合法的无操作**（`changed: false`，不编译不落盘）：批量脚本里不必为"这格没有槽值"特判。
-
-### 9. 图里"调用自己函数"的节点：Target 不能悬空（否则点击静默无效）
-
-用反射库往 WBP 的事件图里连"调用本蓝图自函数"（例：每格 `OnClicked → ApplyDetail(…8 个引脚默认值) → PlayAnimation`）时，最容易漏、也最难查的一件事：**这个调用节点有没有目标**。
-
-- 编辑器自己放置这种节点时，因为函数属于本蓝图自己的类，会建成 **self 上下文** —— 这种节点**根本没有 `self` 引脚**。
-- 若被建成了**非 self 上下文**（`function_reference.member_parent=''`），节点会多出一个 `self` 引脚且**没有默认值**；不接它 ⇒ 编译后 Target 为 **None** ⇒ 运行时**函数体不执行**，而 exec 照旧走到下一个节点、**不报错、不打日志**。表现就是"点击看着有反应、界面却什么都不变"，而**从外部 `call_method` 调同一个函数完全正常** —— 差异全在"有没有目标"。
-- 查法：`find_blueprint_nodes(graph_name="EventGraph")` 看每个 `K2Node_CallFunction` 的 `self`/`Target` 引脚 `default_value` 与 `linked_to`。**别只验引脚默认值和 exec 链** —— 那两样全对了也照样不执行。
-- 修法：图里放一个「自引用」节点（`add_blueprint_self_reference`），把这些节点的 `self` 逐个接上（一次循环接完再编译）。
-
-同一条对任何"函数不是 static、Target 引脚悬空"的调用都成立（含 `UUserWidget` 上的 `PlayAnimation`）。
-
-**另一条同源陷阱：文本类引脚的默认值。** `FText` 引脚的字面量住在 **`DefaultTextValue`**（编译器读它物化 FText 实参）；只写 `DefaultValue`（字符串）会编译成**空文本**、不报错。工具已按引擎写法（`EdGraphSchema_K2.cpp:4880-4882`）同时写两者，但**判据要落在运行时**：写完后由图里那个调用节点真的调用一次，看被调函数收到的是不是那段文本（用"外部 `call_method` 传字符串"和"图内调用"两条路径做差分，一眼就能切开）。
-
+> **这一节已拆成独立 skill**：`unreal-umg-case-list-grid-selection`（列表/网格/选中态/详情联动的实测套路）。

@@ -26,6 +26,7 @@
 #include "UObject/Field.h"
 #include "UObject/FieldPath.h"
 #include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectIterator.h"
 #include "ScopedTransaction.h"
 #include "EditorAssetLibrary.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -114,7 +115,11 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
         }), MCPFlags(false, false, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("add_component_to_blueprint"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleAddComponentToBlueprint(P); }); }));
 
-    MCP_REGISTER_COMMAND(Registry, "set_component_property", "blueprint", "Set one property on a Blueprint's component template.",
+    MCP_REGISTER_COMMAND(Registry, "set_component_property", "blueprint",
+        "Set one property on a Blueprint's component template. This writes the SCS TEMPLATE: instances already "
+        "placed in the level keep their own copy of the property values and do NOT follow, so the response "
+        "reports placed_instances / counted_in and, when there is at least one, a hint naming the three routes "
+        "that do change placed behaviour (change the graph, write each instance, re-spawn).",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("component_name"), TEXT("string"), TEXT("Component variable name")),
@@ -225,7 +230,15 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
         }), MCPFlags(false, true, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("rename_blueprint_variable"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleRenameBlueprintVariable(P); }); }));
 
-    MCP_REGISTER_COMMAND(Registry, "set_blueprint_variable_type", "blueprint", "Change a member variable's type (same type grammar as add_blueprint_variable).",
+    MCP_REGISTER_COMMAND(Registry, "set_blueprint_variable_type", "blueprint",
+        "Change a member variable's type (same type grammar as add_blueprint_variable). REFUSES with "
+        "variable_referenced_by_nodes when graph nodes already use the variable: on that shape the engine's "
+        "ChangeMemberVariableType rebuilds their pins and the call has been measured to freeze the game thread "
+        "dead (editor alive, port listening, no further log line, client timeout). The refusal lists the nodes "
+        "in referencing_nodes[] and names the safe route - remove_blueprint_variable (which clears them too), "
+        "add_blueprint_variable with the target type, rebuild the nodes. There is no override: one was tried "
+        "and removed (it did not apply the change, put up the same dialog anyway, and answering that dialog by "
+        "hand did not apply it either).",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("variable_name"), TEXT("string"), TEXT("Member variable to retype")),
@@ -306,7 +319,7 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
 
     // --- Component hierarchy ---
 
-    MCP_REGISTER_COMMAND(Registry, "get_blueprint_component_hierarchy", "blueprint", "Read a Blueprint's component tree: parent, root, socket, inheritance.",
+    MCP_REGISTER_COMMAND(Registry, "get_blueprint_component_hierarchy", "blueprint", "Read a Blueprint's component tree: parent, root, socket, inheritance and relative_location. Each entry's relative_location is the component TEMPLATE's rest value (the construction script default, not a runtime world position) in the frame of the parent that same entry reports; it is null for components without a transform (a plain ActorComponent) - the response's no_transform_count counts those.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
         }), MCPFlags(false, false, false, false) /* read-only */,
@@ -338,7 +351,11 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
         }), MCPFlags(false, true, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("detach_component"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleDetachComponent(P); }); }));
 
-    MCP_REGISTER_COMMAND(Registry, "set_component_collision", "blueprint", "Configure a primitive component's collision through the shared property reflector.",
+    MCP_REGISTER_COMMAND(Registry, "set_component_collision", "blueprint",
+        "Configure a primitive component's collision through the shared property reflector. This writes the SCS "
+        "TEMPLATE: instances already placed in the level keep their own collision and do NOT follow, so the "
+        "response reports placed_instances / counted_in and, when there is at least one, a hint naming the three "
+        "routes that do change placed behaviour (change the graph, write each instance, re-spawn).",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("component_name"), TEXT("string"), TEXT("Primitive component variable name")),
@@ -526,37 +543,78 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleAddComponentToBluepri
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
     }
 
-    // Create the component - dynamically find the component class by name
-    UClass* ComponentClass = nullptr;
-
-    // Try to find the class with exact name first
-    ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentType);
-    
-    // If not found, try with "Component" suffix
-    if (!ComponentClass && !ComponentType.EndsWith(TEXT("Component")))
+    // Create the component - resolve the class through the shared resolver.
+    //
+    // The old body called FindObject<UClass>(ANY_PACKAGE, ...) four times with hand-built spellings.
+    // On 5.7 ANY_PACKAGE is a null outer, and a null outer only matches TOP-LEVEL packages
+    // (UObjectHash.cpp:1118) - so not one component class resolved there. ResolveUClass covers the
+    // same spellings (bare, "U"-prefixed, "A"-prefixed) through FindFirstObject, which hashes on the
+    // object name alone, and only the "Component" suffix is left for this command to add.
+    TArray<FString> CandidateNames;
+    CandidateNames.Add(ComponentType);
+    if (!ComponentType.EndsWith(TEXT("Component")))
     {
-        FString ComponentTypeWithSuffix = ComponentType + TEXT("Component");
-        ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentTypeWithSuffix);
+        CandidateNames.Add(ComponentType + TEXT("Component"));
     }
-    
-    // If still not found, try with "U" prefix
-    if (!ComponentClass && !ComponentType.StartsWith(TEXT("U")))
+
+    UClass* ComponentClass = nullptr;
+    TArray<FString> TriedForms;
+    FString ResolvedPath;
+    for (const FString& Candidate : CandidateNames)
     {
-        FString ComponentTypeWithPrefix = TEXT("U") + ComponentType;
-        ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentTypeWithPrefix);
-        
-        // Try with both prefix and suffix
-        if (!ComponentClass && !ComponentType.EndsWith(TEXT("Component")))
+        ComponentClass = FUnrealMCPCommonUtils::ResolveUClass(Candidate, TriedForms, ResolvedPath);
+        if (ComponentClass)
         {
-            FString ComponentTypeWithBoth = TEXT("U") + ComponentType + TEXT("Component");
-            ComponentClass = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *ComponentTypeWithBoth);
+            break;
         }
     }
-    
-    // Verify that the class is a valid component type
+
+    // Verify that the class is a valid component type. The message keeps the long-standing wording
+    // ("Unknown component type: X") and gains the attempted spellings plus near misses, because a
+    // bare failure leaves the caller guessing at the spelling the resolver wanted.
     if (!ComponentClass || !ComponentClass->IsChildOf(UActorComponent::StaticClass()))
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown component type: %s"), *ComponentType));
+        TSharedPtr<FJsonObject> Failure = FUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("unknown_component_class"),
+            FString::Printf(TEXT("Unknown component type: %s"), *ComponentType));
+        FUnrealMCPCommonUtils::AddStringArrayField(Failure, TEXT("tried"), TriedForms);
+
+        // Near misses. A plain "name contains the input" scan was silently empty for a typo in the
+        // middle of the word ("SkeletalMeshWidgit"), which left the caller with no candidates at all -
+        // the one case where a candidate list is the whole point. A shared prefix is added as a second
+        // rule: it is cheap, deterministic, and catches exactly that shape of typo.
+        const FString LowerInput = ComponentType.ToLower();
+        const int32 PrefixLength = FMath::Min(8, LowerInput.Len());
+
+        TArray<TSharedPtr<FJsonValue>> Candidates;
+        for (TObjectIterator<UClass> It; It; ++It)
+        {
+            UClass* CandidateClass = *It;
+            if (!CandidateClass || !CandidateClass->IsChildOf(UActorComponent::StaticClass()))
+            {
+                continue;
+            }
+
+            const FString CandidateName = CandidateClass->GetName();
+            const FString LowerCandidate = CandidateName.ToLower();
+            const bool bSharesPrefix = PrefixLength > 0
+                && LowerCandidate.Len() >= PrefixLength
+                && LowerCandidate.Left(PrefixLength) == LowerInput.Left(PrefixLength);
+
+            if (LowerCandidate.Contains(LowerInput) || bSharesPrefix)
+            {
+                Candidates.Add(MakeShared<FJsonValueString>(CandidateName));
+                if (Candidates.Num() >= 15)
+                {
+                    break;
+                }
+            }
+        }
+        if (Candidates.Num() > 0)
+        {
+            Failure->SetArrayField(TEXT("candidates"), Candidates);
+        }
+        return Failure;
     }
 
     // The SCS must exist AND be bound to this blueprint before CreateNode, otherwise the engine
@@ -1024,6 +1082,8 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetComponentProperty(
             ResultObj->SetField(TEXT("property_value_after"), FUnrealMCPCommonUtils::PropertyValueToJson(
                 Property, Property->ContainerPtrToValuePtr<void>(ComponentTemplate)));
             ResultObj->SetBoolField(TEXT("success"), true);
+            // The write landed on the SCS template; say what that does not reach (level instances).
+            FUnrealMCPCommonUtils::AddTemplateInstanceReport(Blueprint, ResultObj);
             return ResultObj;
         }
         else
@@ -1575,6 +1635,14 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleGetAssetProperties(co
     UObject* Asset = FUnrealMCPCommonUtils::FindAsset(AssetName);
     if (!Asset)
     {
+        // "not found" and "cannot be loaded while PIE runs" are different answers to a caller, and the
+        // null asset alone cannot tell them apart.
+        const FString PieCode = FUnrealMCPCommonUtils::ClassifyAssetLoadFailure(AssetName);
+        if (!PieCode.IsEmpty())
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(PieCode,
+                FString::Printf(TEXT("%s exists but could not be loaded while a play session is running"), *AssetName));
+        }
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetName));
     }
 

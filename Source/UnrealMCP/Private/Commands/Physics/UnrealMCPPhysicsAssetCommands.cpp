@@ -51,6 +51,50 @@ namespace
         return nullptr;
     }
 
+    /**
+     * Body lookup that does NOT trust UPhysicsAsset::BodySetupIndexMap.
+     *
+     * That map is a cache (PhysicsAsset.h:254), rebuilt only in PostLoad and by
+     * UpdateBodySetupIndexMap(), while FindBodyIndex (PhysicsAsset.cpp:455-464) returns whatever index
+     * the cache holds without validating it against SkeletalBodySetups. Any add/remove that mutates the
+     * array and forgets to refresh the cache therefore makes FindBodyIndex hand out out-of-range
+     * indices, and a caller doing SkeletalBodySetups[Index] / RemoveAt(Index) trips the Array.h:1095
+     * assert ("Array index out of bounds: N into an array of size N") and takes the editor down.
+     * The array itself is authoritative, so scan it.
+     */
+    int32 FindBodyIndexByName(const UPhysicsAsset* PhysicsAsset, const FName& BoneName)
+    {
+        for (int32 Index = 0; Index < PhysicsAsset->SkeletalBodySetups.Num(); ++Index)
+        {
+            if (const USkeletalBodySetup* Body = Cast<USkeletalBodySetup>(PhysicsAsset->SkeletalBodySetups[Index].Get()))
+            {
+                if (Body->BoneName == BoneName)
+                {
+                    return Index;
+                }
+            }
+        }
+        return INDEX_NONE;
+    }
+
+    /**
+     * Rebuild every int32 index cache UPhysicsAsset keeps beside SkeletalBodySetups.
+     *
+     * There are two of them and neither is serialized, so both are only ever rebuilt on
+     * PostLoad/editor property change:
+     *   - BodySetupIndexMap (PhysicsAsset.h:255) -> read by FindBodyIndex, which does NOT range-check;
+     *   - BoundsBodies (PhysicsAsset.h:206) -> index list of bConsiderForBounds bodies, consumed when the
+     *     component builds/updates its bounds.
+     * Any add/remove that skips them leaves stale indices behind, which then crash the editor with
+     * "Array index out of bounds: N into an array of size N" - from FindBodyIndex/RemoveAt on the next
+     * removal, or from the Engine when PIE starts and the bounds are computed.
+     */
+    void RefreshBodyIndexCaches(UPhysicsAsset* PhysicsAsset)
+    {
+        PhysicsAsset->UpdateBodySetupIndexMap();
+        PhysicsAsset->UpdateBoundsBodiesArray();
+    }
+
     ELinearConstraintMotion ParseLinear(const FString& Value, bool& bOutValid)
     {
         bOutValid = true;
@@ -133,6 +177,25 @@ void FUnrealMCPPhysicsAssetCommands::RegisterCommands(FMCPCommandRegistry& Regis
         }), MCPFlags(false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetCollision(Params); });
 
+    MCP_REGISTER_COMMAND(Registry, "remove_physics_asset_body", "physics",
+        "Remove a body from a PhysicsAsset for good, together with every constraint that referenced it and its collision-table entries (the remaining table indices are renumbered so each key still addresses the same pair). Until this existed a body could only be parked as PhysType_Kinematic.",
+        (TArray<FMCPParamSpec>{
+            MCPParam(TEXT("asset_path"), TEXT("string"), TEXT("PhysicsAsset path")),
+            MCPParam(TEXT("bone_name"), TEXT("string"), TEXT("Bone whose body is removed")),
+            MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save the asset after the command; default true")),
+        }), MCPFlags(false, false, false, true),
+        [this](const TSharedPtr<FJsonObject>& Params) { return HandleRemoveBody(Params); });
+
+    MCP_REGISTER_COMMAND(Registry, "remove_physics_asset_constraint", "physics",
+        "Remove one constraint of a PhysicsAsset, identified by the same (child, parent) bone pair add_physics_asset_constraint uses.",
+        (TArray<FMCPParamSpec>{
+            MCPParam(TEXT("asset_path"), TEXT("string"), TEXT("PhysicsAsset path")),
+            MCPParam(TEXT("child_bone"), TEXT("string"), TEXT("ConstraintBone1 of the constraint to remove")),
+            MCPParam(TEXT("parent_bone"), TEXT("string"), TEXT("ConstraintBone2 of the constraint to remove")),
+            MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save the asset after the command; default true")),
+        }), MCPFlags(false, false, false, true),
+        [this](const TSharedPtr<FJsonObject>& Params) { return HandleRemoveConstraint(Params); });
+
     MCP_REGISTER_COMMAND(Registry, "list_physics_asset_bodies", "physics",
         "Read back every body (bone, shapes, radii) and constraint (bones, limits) of a PhysicsAsset in one call.",
         (TArray<FMCPParamSpec>{
@@ -186,7 +249,7 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleAddBody(const TSha
         return Removed;
     };
 
-    const int32 ExistingIndex = PhysicsAsset->FindBodyIndex(FName(*BoneName));
+    const int32 ExistingIndex = FindBodyIndexByName(PhysicsAsset, FName(*BoneName));
     if (ExistingIndex != INDEX_NONE)
     {
         USkeletalBodySetup* Existing = Cast<USkeletalBodySetup>(PhysicsAsset->SkeletalBodySetups[ExistingIndex].Get());
@@ -289,7 +352,7 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleAddBody(const TSha
         Body->PhysicsType = bSimulate ? PhysType_Simulated : PhysType_Default;
     }
     Body->InvalidatePhysicsData();
-    PhysicsAsset->UpdateBodySetupIndexMap();
+    RefreshBodyIndexCaches(PhysicsAsset);
     PhysicsAsset->InvalidateAllPhysicsMeshes();
     PhysicsAsset->MarkPackageDirty();
 
@@ -328,8 +391,8 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleAddConstraint(cons
             TEXT("'child_bone' and 'parent_bone' are required"));
     }
 
-    const int32 ChildBodyIndex = PhysicsAsset->FindBodyIndex(FName(*ChildBone));
-    const int32 ParentBodyIndex = PhysicsAsset->FindBodyIndex(FName(*ParentBone));
+    const int32 ChildBodyIndex = FindBodyIndexByName(PhysicsAsset, FName(*ChildBone));
+    const int32 ParentBodyIndex = FindBodyIndexByName(PhysicsAsset, FName(*ParentBone));
     if (ChildBodyIndex == INDEX_NONE || ParentBodyIndex == INDEX_NONE)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("body_not_found"),
@@ -361,10 +424,36 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleAddConstraint(cons
     Params->TryGetBoolField(TEXT("disable_collision"), bDisableCollision);
     const bool bPersist = FUnrealMCPCommonUtils::IsPersistRequested(Params);
 
-    const bool bIsNew = PhysicsAsset->FindConstraintIndex(FName(*ChildBone), FName(*ParentBone)) == INDEX_NONE;
-    const int32 ConstraintIndex = bIsNew
-        ? FPhysicsAssetUtils::CreateNewConstraint(PhysicsAsset, FName(*ChildBone))
-        : PhysicsAsset->FindConstraintIndex(FName(*ChildBone), FName(*ParentBone));
+    // A constraint is identified by its (ConstraintBone1, ConstraintBone2) pair, so that is what decides
+    // "re-initialise" vs "append". Do NOT route this through FPhysicsAssetUtils::CreateNewConstraint():
+    // it looks the template up by JointName - which this command sets to the child bone - and returns the
+    // existing template instead of appending a new one (PhysicsAssetUtils.cpp:1444-1451). Calling it twice
+    // for the same child therefore silently rewrites the first joint, so a body could never be the child
+    // of two constraints (an in-column joint *and* a lateral joint to the neighbouring column).
+    const int32 ExistingConstraintIndex =
+        PhysicsAsset->FindConstraintIndex(FName(*ChildBone), FName(*ParentBone));
+    const bool bIsNew = ExistingConstraintIndex == INDEX_NONE;
+    int32 ConstraintIndex = ExistingConstraintIndex;
+    if (bIsNew)
+    {
+        if (!FPhysicsAssetUtils::CanCreateConstraints())
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("create_failed"),
+                TEXT("FPhysicsAssetUtils::CanCreateConstraints() refused another constraint template"));
+        }
+        UPhysicsConstraintTemplate* NewTemplate =
+            NewObject<UPhysicsConstraintTemplate>(PhysicsAsset, NAME_None, RF_Transactional);
+        if (!NewTemplate)
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("create_failed"),
+                TEXT("could not allocate a UPhysicsConstraintTemplate"));
+        }
+        ConstraintIndex = PhysicsAsset->ConstraintSetup.Add(NewTemplate);
+        // JointName has to stay unique: FindConstraintIndex(FName) matches on it, so two templates sharing
+        // a name are indistinguishable to the editor and to the profile lookups.
+        NewTemplate->DefaultInstance.JointName =
+            FName(*FString::Printf(TEXT("%s_%s"), *ChildBone, *ParentBone));
+    }
     UPhysicsConstraintTemplate* Template = PhysicsAsset->ConstraintSetup.IsValidIndex(ConstraintIndex)
         ? PhysicsAsset->ConstraintSetup[ConstraintIndex].Get()
         : nullptr;
@@ -434,7 +523,7 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleSetCollision(const
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
             TEXT("'bone_name' (string) is required"));
     }
-    const int32 BodyIndex = PhysicsAsset->FindBodyIndex(FName(*BoneName));
+    const int32 BodyIndex = FindBodyIndexByName(PhysicsAsset, FName(*BoneName));
     if (BodyIndex == INDEX_NONE)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("body_not_found"),
@@ -446,15 +535,22 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleSetCollision(const
     const bool bPersist = FUnrealMCPCommonUtils::IsPersistRequested(Params);
 
     // Which bodies to pair with: the named list, or every other body of the asset.
+    //
+    // Unknown names used to fail the whole call, which meant one typo in a long list silently threw
+    // away every edit before it (measured: a sleeve BLOCK pass applied nothing at all and the caller
+    // only noticed days later). Each entry is reported instead: the resolvable ones are applied, the
+    // rest come back in `unknown`.
     TArray<int32> Targets;
+    TArray<FString> AppliedNames;
     TArray<FString> Unknown;
     const TArray<TSharedPtr<FJsonValue>>* OtherBones = nullptr;
-    if (Params->TryGetArrayField(TEXT("other_bones"), OtherBones) && OtherBones->Num() > 0)
+    const bool bHasExplicitList = Params->TryGetArrayField(TEXT("other_bones"), OtherBones) && OtherBones->Num() > 0;
+    if (bHasExplicitList)
     {
         for (const TSharedPtr<FJsonValue>& Value : *OtherBones)
         {
             const FString Other = Value->AsString();
-            const int32 OtherIndex = PhysicsAsset->FindBodyIndex(FName(*Other));
+            const int32 OtherIndex = FindBodyIndexByName(PhysicsAsset, FName(*Other));
             if (OtherIndex == INDEX_NONE)
             {
                 Unknown.Add(Other);
@@ -462,12 +558,17 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleSetCollision(const
             else if (OtherIndex != BodyIndex)
             {
                 Targets.AddUnique(OtherIndex);
+                AppliedNames.AddUnique(Other);
             }
         }
-        if (Unknown.Num() > 0)
+
+        if (Targets.Num() == 0)
         {
-            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("body_not_found"),
-                FString::Printf(TEXT("no body in this asset for: %s"), *FString::Join(Unknown, TEXT(", "))));
+            TSharedPtr<FJsonObject> NoMatch = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_matching_bodies"),
+                FString::Printf(TEXT("none of the requested bones has a body in this asset (unknown: %s)"),
+                    *FString::Join(Unknown, TEXT(", "))));
+            FUnrealMCPCommonUtils::AddStringArrayField(NoMatch, TEXT("unknown"), Unknown);
+            return NoMatch;
         }
     }
     else
@@ -515,8 +616,171 @@ TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleSetCollision(const
     Result->SetNumberField(TEXT("body_index"), BodyIndex);
     Result->SetBoolField(TEXT("disabled"), bDisable);
     Result->SetNumberField(TEXT("pairs_changed"), Targets.Num());
+    Result->SetNumberField(TEXT("applied_count"), Targets.Num());
+    TArray<TSharedPtr<FJsonValue>> AppliedJson;
+    for (const FString& Applied : AppliedNames)
+    {
+        AppliedJson.Add(MakeShared<FJsonValueString>(Applied));
+    }
+    Result->SetArrayField(TEXT("applied"), AppliedJson);
+    FUnrealMCPCommonUtils::AddStringArrayField(Result, TEXT("unknown"), Unknown);
     Result->SetNumberField(TEXT("collision_disabled_pairs"), PairedWith.Num());
     Result->SetArrayField(TEXT("collision_disabled_with"), PairedWith);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    Result->SetBoolField(TEXT("persist_requested"), bPersist);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleRemoveBody(const TSharedPtr<FJsonObject>& Params)
+{
+    TSharedPtr<FJsonObject> Error;
+    UPhysicsAsset* PhysicsAsset = ResolvePhysicsAsset(Params, Error);
+    if (!PhysicsAsset)
+    {
+        return Error;
+    }
+
+    FString BoneName;
+    if (!Params->TryGetStringField(TEXT("bone_name"), BoneName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
+            TEXT("'bone_name' (string) is required"));
+    }
+    const int32 BodyIndex = FindBodyIndexByName(PhysicsAsset, FName(*BoneName));
+    if (BodyIndex == INDEX_NONE)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("body_not_found"),
+            FString::Printf(TEXT("'%s' has no body in this asset"), *BoneName));
+    }
+    const bool bPersist = FUnrealMCPCommonUtils::IsPersistRequested(Params);
+    const FName BoneFName(*BoneName);
+
+    // Constraints first: a template names its two bones, so it has to be found by name. Nothing else in
+    // the asset points at the body by name, which is why the order here is constraints -> table -> body.
+    int32 RemovedConstraints = 0;
+    for (int32 Index = PhysicsAsset->ConstraintSetup.Num() - 1; Index >= 0; --Index)
+    {
+        const UPhysicsConstraintTemplate* Template = PhysicsAsset->ConstraintSetup[Index].Get();
+        if (!Template)
+        {
+            continue;
+        }
+        const FConstraintInstance& Instance = Template->DefaultInstance;
+        if (Instance.ConstraintBone1 == BoneFName || Instance.ConstraintBone2 == BoneFName)
+        {
+            PhysicsAsset->ConstraintSetup.RemoveAt(Index);
+            ++RemovedConstraints;
+        }
+    }
+
+    // Drop the pairs that involve this body BEFORE the array shrinks, otherwise the index in those keys
+    // would point at a different body by the time they are tested.
+    int32 RemovedPairs = 0;
+    for (auto It = PhysicsAsset->CollisionDisableTable.CreateIterator(); It; ++It)
+    {
+        const FRigidBodyIndexPair& Pair = It->Key;
+        if (Pair.Indices[0] == BodyIndex || Pair.Indices[1] == BodyIndex)
+        {
+            It.RemoveCurrent();
+            ++RemovedPairs;
+        }
+    }
+
+    PhysicsAsset->SkeletalBodySetups.RemoveAt(BodyIndex);
+    // Refresh both index caches: BodySetupIndexMap keeps FindBodyIndex honest (it does not range-check,
+    // so a stale entry makes the next removal crash), and BoundsBodies holds bare indices that the Engine
+    // walks when it computes the mesh bounds - stale ones crash PIE with "index N into an array of size N".
+    RefreshBodyIndexCaches(PhysicsAsset);
+
+    // ... and now renumber. CollisionDisableTable is keyed by bare indices into SkeletalBodySetups, so
+    // every key above the removed index now addresses the wrong pair unless it is shifted down. This is
+    // the step that silently corrupts the collision set when it is forgotten.
+    TMap<FRigidBodyIndexPair, bool> Renumbered;
+    Renumbered.Reserve(PhysicsAsset->CollisionDisableTable.Num());
+    for (const TPair<FRigidBodyIndexPair, bool>& Pair : PhysicsAsset->CollisionDisableTable)
+    {
+        FRigidBodyIndexPair Key = Pair.Key;
+        for (int32 Axis = 0; Axis < 2; ++Axis)
+        {
+            if (Key.Indices[Axis] > BodyIndex)
+            {
+                --Key.Indices[Axis];
+            }
+        }
+        Renumbered.Add(Key, Pair.Value);
+    }
+    PhysicsAsset->CollisionDisableTable = MoveTemp(Renumbered);
+
+    PhysicsAsset->MarkPackageDirty();
+    const bool bSaved = bPersist ? FUnrealMCPCommonUtils::SaveAssetForObject(PhysicsAsset) : false;
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("bone_name"), BoneName);
+    Result->SetNumberField(TEXT("removed_body_index"), BodyIndex);
+    Result->SetBoolField(TEXT("removed_body"), true);
+    Result->SetNumberField(TEXT("removed_constraints"), RemovedConstraints);
+    Result->SetNumberField(TEXT("removed_collision_pairs"), RemovedPairs);
+    Result->SetNumberField(TEXT("body_count"), PhysicsAsset->SkeletalBodySetups.Num());
+    Result->SetNumberField(TEXT("constraint_count"), PhysicsAsset->ConstraintSetup.Num());
+    Result->SetNumberField(TEXT("collision_disabled_pairs"), PhysicsAsset->CollisionDisableTable.Num());
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    Result->SetBoolField(TEXT("persist_requested"), bPersist);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPPhysicsAssetCommands::HandleRemoveConstraint(const TSharedPtr<FJsonObject>& Params)
+{
+    TSharedPtr<FJsonObject> Error;
+    UPhysicsAsset* PhysicsAsset = ResolvePhysicsAsset(Params, Error);
+    if (!PhysicsAsset)
+    {
+        return Error;
+    }
+
+    FString ChildBone;
+    FString ParentBone;
+    if (!Params->TryGetStringField(TEXT("child_bone"), ChildBone) ||
+        !Params->TryGetStringField(TEXT("parent_bone"), ParentBone))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
+            TEXT("'child_bone' and 'parent_bone' (strings) are required"));
+    }
+
+    const FName ChildFName(*ChildBone);
+    const FName ParentFName(*ParentBone);
+    const int32 ConstraintIndex = PhysicsAsset->FindConstraintIndex(ChildFName, ParentFName);
+    if (ConstraintIndex == INDEX_NONE)
+    {
+        // Report what the asset does hold: a pair is easy to get backwards, and the list is the fastest
+        // way for the caller to see the direction this asset actually uses.
+        TArray<FString> ExistingPairs;
+        for (const TObjectPtr<UPhysicsConstraintTemplate>& Template : PhysicsAsset->ConstraintSetup)
+        {
+            if (const UPhysicsConstraintTemplate* ConstraintTemplate = Template.Get())
+            {
+                ExistingPairs.Add(FString::Printf(TEXT("%s<-%s"),
+                    *ConstraintTemplate->DefaultInstance.ConstraintBone1.ToString(),
+                    *ConstraintTemplate->DefaultInstance.ConstraintBone2.ToString()));
+            }
+        }
+        TSharedPtr<FJsonObject> NotFound = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("constraint_not_found"),
+            FString::Printf(TEXT("no constraint with child '%s' and parent '%s'"), *ChildBone, *ParentBone));
+        FUnrealMCPCommonUtils::AddStringArrayField(NotFound, TEXT("constraints"), ExistingPairs);
+        return NotFound;
+    }
+
+    const bool bPersist = FUnrealMCPCommonUtils::IsPersistRequested(Params);
+    PhysicsAsset->ConstraintSetup.RemoveAt(ConstraintIndex);
+
+    PhysicsAsset->MarkPackageDirty();
+    const bool bSaved = bPersist ? FUnrealMCPCommonUtils::SaveAssetForObject(PhysicsAsset) : false;
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("child_bone"), ChildBone);
+    Result->SetStringField(TEXT("parent_bone"), ParentBone);
+    Result->SetNumberField(TEXT("removed_constraint_index"), ConstraintIndex);
+    Result->SetBoolField(TEXT("removed"), true);
+    Result->SetNumberField(TEXT("constraint_count"), PhysicsAsset->ConstraintSetup.Num());
     Result->SetBoolField(TEXT("saved"), bSaved);
     Result->SetBoolField(TEXT("persist_requested"), bPersist);
     return Result;

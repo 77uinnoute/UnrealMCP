@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP 蓝图编辑 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
 目标：用 MCP 工具 + python 脚本**可重复、可验证**地读/建/改蓝图图与组件层级。
 
 **环境注意**：改了 `Plugins/UnrealMCP/Content/Python/**`（含工具描述）后需**重启 unrealMCP server**；改插件 C++ 则需编译 + 重启编辑器（`Build_UnrealMCP.bat` → `Editor.bat start`）。
@@ -75,7 +75,7 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 |---|---|---|
 | 函数调用 | `add_blueprint_function_node(target=<类名>, function_name=<函数名>, params={pin: value})` | `target` 如 `KismetSystemLibrary` / `MeshComponent`；`params` 写不进的引脚进 `failed`，**不静默丢弃**。**建的节点类按引擎 spawner 判据选**（`BlueprintFunctionNodeSpawner.cpp:208-247`）：带 `ArrayParm` 的函数 → `UK2Node_CallArrayFunction`，带 `DataTablePin` → `UK2Node_CallDataTableFunction`，带 `MaterialParameterCollectionFunction` → `UK2Node_CallMaterialParameterCollectionFunction`，可交换结合且纯 → `UK2Node_CommutativeAssociativeBinaryOperator`，否则 `UK2Node_CallFunction`。**不要指望普通 CallFunction 能带 wildcard 数组引脚**：`Array_Length` / `Array_Get` 这类函数的数组引脚定型、以及重建后的自愈，全都只在 `UK2Node_CallArrayFunction` 里（`AllocateDefaultPins` 强制 wildcard、`NotifyPinConnectionListChanged` 从对端拷类型、`PostReconstructNode` 逐引脚重派生）；建错类时"连线看起来正常、编译也过"，但**任何一次重建**（关卡加载 / 编译前刷新 / `refresh_blueprint_node`）都会把引脚打回 `wildcard[]` → `Target Array 的类型尚未确定` |
 | 标准事件 | `add_blueprint_event_node(event_name="ReceiveBeginPlay")` | 标准事件带 `Receive` 前缀 |
-| 输入动作事件 | `add_blueprint_input_action_node(action_name=...)` | **建的是 legacy `K2Node_InputAction`**（引脚 `Pressed`/`Released`/`Key`），配套 `create_input_mapping(action_name, key, input_type)` 写 `Config/DefaultInput.ini`（回执 `persisted: true` 才跨重启有效）。EnhancedInput 的 `K2Node_EnhancedInputAction` **只能手工在编辑器里拖**：用图库的 `lib.add_node_by_class` 建出来的实例会让 Kismet 编译器崩（细节见 Docs 的工具缺陷记录）。前提：`UEnhancedPlayerInput::ProcessInputStack` 会先调 `Super::`（`EnhancedPlayerInput.cpp:779-781`），所以 legacy 映射在 Enhanced Input 工程里照旧生效；映射缺失时编译只报 warning（`引用了未知操作 'X'`）。 |
+| 输入动作事件 | `add_blueprint_input_action_node(action_name=...)` | **建的是 legacy `K2Node_InputAction`**（引脚 `Pressed`/`Released`/`Key`），配套 `create_input_mapping(action_name, key, input_type)` 写 `Config/DefaultInput.ini`（回执 `persisted: true` 才跨重启有效）。EnhancedInput 的 `K2Node_EnhancedInputAction` **只能手工在编辑器里拖**：用图库的 `lib.add_node_by_class` 建出来的实例会让 Kismet 编译器崩。前提：`UEnhancedPlayerInput::ProcessInputStack` 会先调 `Super::`（`EnhancedPlayerInput.cpp:779-781`），所以 legacy 映射在 Enhanced Input 工程里照旧生效；映射缺失时编译只报 warning（`引用了未知操作 'X'`）。 |
 | 常量 | `add_blueprint_literal_node(literal_type, value)` | 本质是建 `KismetSystemLibrary.MakeLiteral<Type>` 并写其 `Value` 引脚（**不注入自定义节点类**）。`literal_type`：`float`/`double`/`int`/`int64`/`bool`/`name`/`byte`/`string`/`text`；未知类型 → `unsupported_literal_type`，值解析失败 → `invalid_value` 且不建节点。**`float` 与 `double` 都落到 `MakeLiteralDouble`**（5.5 里 `MakeLiteralFloat` 不是 UFUNCTION，它的显示名才叫 "Make Literal Float"） |
 | 变量 Get/Set | `add_blueprint_variable_node(variable_name, node_kind="get"\|"set")` | 见 §4 |
 | 本组件引用 / Self | `add_blueprint_get_self_component_reference(component_name)` / `add_blueprint_self_reference()` | |
@@ -110,7 +110,7 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 - 基础类型：`bool` / `byte` / `int` / `int64` / `float` / `double` / `name` / `string` / `text` / `object` / `class` / `struct` / `enum` / `vector` / `vector2d` / `rotator` / `transform` / `linear_color`
 - 容器后缀（**非直觉，别猜**）：`"int[]"`=Array、`"struct{}"`=Set、`"int{,}"`=Map
 - `sub_class` 传 object/class/struct/enum 的资产路径。未知类型 → `unsupported_variable_type` + `supported_types`
-- **`is_exposed` 是"实例可编辑"（那只眼睛），不是"类默认值可见"**：`is_exposed=false` 置位 `CPF_DisableEditOnInstance`（关卡里的实例不可在细节面板改），`true` 清位，**缺省不动位**；它与 `set_blueprint_variable_flags(instance_editable=…)`、`list_blueprint_variables.flags.instance_editable` **读同一个位**。想要"类默认值面板里能不能改"（`CPF_Edit`）看**只读字段 `class_editable`** —— 两者是不同的位，改一个 MUST NOT 动另一个（2026-09-30 前 `is_exposed` 读的是 `CPF_Edit`，且传 `false` 是空操作，按旧含义写的脚本要改读 `class_editable`）。
+- **`is_exposed` 是"实例可编辑"（那只眼睛），不是"类默认值可见"**：`is_exposed=false` 置位 `CPF_DisableEditOnInstance`（关卡里的实例不可在细节面板改），`true` 清位，**缺省不动位**；它与 `set_blueprint_variable_flags(props={"instance_editable": …})`、`list_blueprint_variables.flags.instance_editable` **读同一个位**。想要"类默认值面板里能不能改"（`CPF_Edit`）看**只读字段 `class_editable`** —— 两者是不同的位，改一个 MUST NOT 动另一个。
 - **名字占用分三种，别再靠"命令成功"当变量加上了**：
   - 空名 → `invalid_params`（引擎对空名只回一个裸 false，命令在调用前挡下）；
   - 名字是**本蓝图自己**的变量 → **幂等成功**（重复调用只重写 `default_value` / `is_exposed`），回执的 `pin_category` / `container` / `default_value` / `is_exposed` **从变量读回**；
@@ -145,11 +145,12 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 | 读 | `list_blueprint_variables` / `get_blueprint_variable_info` | 只列**本蓝图自己**的变量（不含父类），每项带 `flags{}`：`instance_editable` / `expose_on_spawn` / `blueprint_read_only` / `replicated` / `rep_notify_func` / `category` / `tooltip` / `transient` / `private` |
 | 删 | `remove_blueprint_variable` | **删变量会动图**：命令同时调 `RemoveMemberVariable` + `RemoveVariableNodes`，把引用该变量的 get/set 节点一并清掉；改完回 `compiled`/`errors` |
 | 改名 | `rename_blueprint_variable` | **改名也会动图**：图内引用节点跟随新名（回读 `reference_nodes_renamed` / `reference_nodes_stale`，后者必须为 0）；占用名 → `variable_name_in_use`（引擎自己不去重，撞名会被静默吞掉） |
-| 改类型 | `set_blueprint_variable_type` | 类型解析**复用与 `add_blueprint_variable` 同一份**（含 `int[]` / `struct{}` / `int{,}` 后缀）；也可以改写 `container=none/array/set/map`，两者冲突 → `unsupported_container_type`；不支持类型 → `unsupported_variable_type`+`supported_types` |
+| 改类型 | `set_blueprint_variable_type` | 类型解析**复用与 `add_blueprint_variable` 同一份**（含 `int[]` / `struct{}` / `int{,}` 后缀）；也可以改写 `container=none/array/set/map`，两者冲突 → `unsupported_container_type`；不支持类型 → `unsupported_variable_type`+`supported_types`；**变量已被图节点引用时直接拒**（`variable_referenced_by_nodes`，见下） |
 | 改默认值 | `set_blueprint_variable_default_value` | 写 `FBPVariableDescription.DefaultValue`，由**编译**把它解析进 CDO（`KismetCompiler::SetPropertyDefaultValue`）；解析失败会在 `errors` 里现形，不会静默回退。**回读要看 CDO**：编译后引擎会把这个描述字段清空（struct/容器类型必清），所以命令回的是 CDO 上的导出文本 + `default_value_source: "cdo"` |
 | 改 flags | `set_blueprint_variable_flags(props={...})` | 逐项 `applied`/`failed`；未知键进 `failed` 并带候选键名。语义映射（与引擎详情面板一致）：`instance_editable`→清/置 `CPF_DisableEditOnInstance`；`expose_on_spawn`/`private`/`tooltip`→元数据（`MD_ExposeOnSpawn`/`MD_Private`/`MD_Tooltip`）；`blueprint_read_only`→`CPF_BlueprintReadOnly`；`replicated`→`CPF_Net`；`rep_notify_func`→`RepNotifyFunc` + `CPF_RepNotify|CPF_Net` |
 
 - `rename_blueprint_variable`：引擎的 `RenameMemberVariable` 在变量带 OnRep 函数时会弹模态对话框，命令在调用前先清 `RepNotifyFunc`（与对话框选"Yes"的结局一致），并在响应里回 `rep_notify_cleared`；看到这个字段说明 OnRep 关联被断开了。
+- `set_blueprint_variable_type`：引擎的 `ChangeMemberVariableType` 会重建**引用该变量的图节点**的引脚，而**在被引用时这条调用会把 GameThread 冻死**（实测：编辑器还活着、端口还监听、日志再无新行、客户端连续两次超时 —— 见 `Docs/MCP_Findings_2026-10-06_platformer-round.md` §3）。⇒ 命令改成**前置拒绝**：调用前扫全图找 `UK2Node_Variable` 里指向该变量的节点，命中就回 `variable_referenced_by_nodes` + 列出 `referencing_nodes[]`（图名/节点名/类名）+ `hint`。安全路线就是当时那份规避法：`remove_blueprint_variable`（它本来就会连带清掉引用节点）→ `add_blueprint_variable`（目标类型）→ 重建节点。**没有覆盖开关**（曾试过 `force=true`，现已撤掉）：实测它**不改类型**（回执却带 `compiled: true`）、照样弹框，而且**手点那个框也没把类型改上去** ⇒ 这个形状下这条路根本走不通。机制已定性为**模态框**（不是死循环 —— 人点就走），且卡在**命令返回之后**；并且**该框不走 `FCoreDelegates::ModalMessageDialog`**：给它套 `FUnrealMCPScopedDialogAutoAnswer` 仍会卡住（若走委托，弹框瞬间就该被自动答掉）⇒ **自动应答救不了它**，护栏只有前置拒绝。另外回执带 `type_change_not_applied`，把"看着成功、其实没改"变成显式失败（详见 `Docs/MCP_Findings_2026-10-06_platformer-round.md` §3）。
 
 **删 / 改名 / 改默认值（局部变量）**：`list_ / add_ / remove_ / rename_blueprint_local_variable`、`set_blueprint_local_variable_default`
 
@@ -164,7 +165,7 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 |---|---|---|
 | 加组件 | `add_component_to_blueprint(component_type=<无 U 前缀的类名>, component_name, location/rotation/scale, component_properties?)` | **所有新组件都落在 SCS root**，不建层级 |
 | 建层级 | `attach_component_to_component(child_component, parent_component, socket_name?)` | child/parent 都是**组件变量名**；socket 可选 |
-| 组件属性 | `set_component_property(component_name, property_name, property_value)` | 属性名可 C++ 名或 snake_case；回 `property_value_before/after` |
+| 组件属性 | `set_component_property(component_name, property_name, property_value)` | 属性名可 C++ 名或 snake_case；回 `property_value_before/after`；**改的是 SCS 模板** ⇒ 另回 `placed_instances` / `counted_in`（`editor`/`pie`），实例数 > 0 时附 `hint`：**已放置实例各自保存属性值、不跟随模板** |
 | CDO 属性 | `set_blueprint_property(property_name, property_value)` | 改类默认对象 |
 
 - 引擎口径：同一 SCS 内挂接**只** `AddChildNode`，不写 `ParentComponentOrVariableName` / `ParentComponentOwnerClassName`（那是"父组件来自另一个 SCS"才用的路径，写错会让引擎 PostLoad 命中 `possible cyclic linkage` 的 `ensure`）；socket 走 `AttachToName`。命令已按此实现，返回值里的 `attach_parent` / `attach_socket` / `is_root` 是**服务端从 SCS 实读回读**的，不是回显请求。
@@ -180,7 +181,7 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 | 删组件 | `remove_component_from_blueprint(component_name, recursive=true, force=false)` | ① **唯一的根删不掉**：目标是 SCS 里唯一的 root 且 `force=false` → `root_component_protected`（回 `hint: force=true`）；② `recursive=false` 且有子组件 → `component_has_children`（带子组件名），**绝不静默丢子树**；③ 删完回读剩余清单，`removed_components` 给出被删的整棵子树 |
 | 换根 | `set_blueprint_root_component(component_name)` | 目标成为 SCS 根，原根变成它的**子组件**（非 scene 组件的旧根只保持为根，不会挂成子节点）；新根的位置/旋转归零、attach socket 清空。回读整棵层级并断言 **`unique_root: true`**（换根最容易出"两个根"），同时断言 `component_count` 不变 |
 | 摘除 | `detach_component(component_name)` | 从父组件摘出并挂回 SCS 根（**不删除**）；已经是根时 `already_root: true`（幂等）。非 scene 组件 → `component_not_scene` |
-| 碰撞 | `set_component_collision(component_name, props={collision_enabled, collision_profile, object_type, responses})` | 走既有属性反射写 `BodyInstance`（与 `set_component_property` 同一内核），逐项 `applied`/`failed`，回读 `collision{}`。非 primitive 组件 → `component_not_primitive`；未知键 → `failed`+候选键名 |
+| 碰撞 | `set_component_collision(component_name, props={collision_enabled, collision_profile, object_type, responses})` | 走既有属性反射写 `BodyInstance`（与 `set_component_property` 同一内核），逐项 `applied`/`failed`，回读 `collision{}`。非 primitive 组件 → `component_not_primitive`；未知键 → `failed`+候选键名。**同样只改 SCS 模板** ⇒ 另回 `placed_instances` / `counted_in` + `hint`（实例不跟随） |
 
 - 碰撞的 `responses` 只接受 `{通道名: 响应名}`，通道/响应名**前缀可省**（`Visibility` / `ECC_Visibility` / `Ignore` / `ECR_Ignore` 都认）—— `ECollisionChannel` / `ECollisionResponse` 的成员带 `ECC_`/`ECR_` 前缀且**没有 DisplayName**，反射器只认带前缀的拼法，命令内部先解析成成员名再交出去；`responses` 走引擎的 `FBodyInstance::SetResponseToChannels`（`FCollisionResponse::ResponseToChannels` 是 transient，反射器写不了）。
 - `object_type` 同样两种拼法都收（`WorldStatic` / `ECC_WorldStatic`）。
@@ -200,6 +201,30 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 | 打开 / 聚焦 | `open_blueprint_graph(graph_name?)` / `focus_blueprint_node(node_id, graph_name?)` | 三态语义，**没有静默 false**：资产不存在 → `blueprint_not_found`；图不存在 → `graph_not_found`+`available_graphs`；编辑器会话不可用 → `editor_not_open`。`open_blueprint_graph` 会按需打开蓝图编辑器（用到 `FBlueprintEditor::OpenGraphAndBringToFront`），`focus_blueprint_node` 用 `JumpToNode` |
 
 - `node_id` 不必配 `graph_name`：不给 `graph_name` 时命令会**遍历该蓝图的全部图**找这个 guid（guid 全蓝图唯一），比默认落到事件图更不容易误报 `node_not_found`。
+
+**`split_blueprint_pin` 是"结构体引脚写不进默认值"的通用绕法**（实测，为给 `UHitReact::HitReact` 的三个结构体入参赋值而摸出来）：
+
+症状与原因：
+
+- `set_blueprint_pin_default` 对**非 compact 的结构体引脚**直接拒：`unsupported_pin_type` + `Struct pin 'World' of type 'HitReactImpulse_WorldParams' is not supported`；
+- **结构体文本默认值会被静默丢弃**：写 `(LinearDirection=(X=0,Y=1,Z=0))` 回读 `default_value` 仍是空、BP 变量走 `set_blueprint_variable_default_value` 读回 CDO 是 `()`（引擎 `FProperty::ImportText_Internal` 会跳过**非可编辑**字段 —— `Transient, VisibleInstanceOnly` 且无 `CPF_Edit` 的成员就是这么被吃掉的；python 侧 `struct.import_text()` 会显式报 `Cannot perform text import on property 'X' here`）；
+- 造 `K2Node_MakeStruct` 补不上：`set_blueprint_node_property(node_id, 'StructType', '/Script/<Mod>.<Struct>')` 回 `load_failed` —— 该属性的对象解析器只认**资产路径**，解析不了 `/Script/...` 里的脚本结构体（`reflect_probe` 只会告诉你 `supported_shapes: ["asset path string"]`）。
+
+⇒ 解法：**把结构体输入引脚拆开**。子引脚是普通类型（bool / real / FName / Vector / soft object …），默认值全都能写，且**拆开本身满足 by-ref 入参"必须连线"的编译器要求**：
+
+```
+split_blueprint_pin(node_id, 'Params')                 → Params_Profile / Params_SimulatedBoneName / Params_bIncludeSelf / ...
+split_blueprint_pin(node_id, 'Impulse')                → Impulse_LinearImpulse / Impulse_AngularImpulse / Impulse_RadialImpulse
+split_blueprint_pin(node_id, 'Impulse_LinearImpulse')  → Impulse_LinearImpulse_bApplyImpulse / _Impulse / _bFactorMass
+split_blueprint_pin(node_id, 'World')                  → World_LinearDirection / World_AngularDirection / World_RadialLocation
+set_blueprint_pin_default(node_id, 'World_LinearDirection', '[0.0,1.0,0.0]')
+set_blueprint_pin_default(node_id, 'Params_Profile', '/ProcHitReact/Profiles/HRP_Flop.HRP_Flop')
+```
+
+- **拆引脚吃掉了 by-ref 的报错**：`Params` / `World` 是 `const T&`，未拆时编译报"必须连接一个输入（by ref 参数需要一个有效的输入）"；拆开后这条消失，最终 `compiled: true` + `errors: []`。**所以结构体 by-ref 入参不需要 Make 节点，也不需要额外的 producer 节点**。
+- **Vector 子引脚要传 JSON 数组字符串**：`value` 是字符串，传 `"[0.0,1.0,0.0]"` 成功，传 `"0,1,0"` 回 `type_mismatch`（`expected an array of numbers or a struct object`）。
+- 子引脚名恒为 `<父引脚名>_<字段名>`，可取 split 回执的 `sub_pins[]` 现读，不要猜。
+- 该手法的相关事实（同一个夹具里踩到）：**python 调不到蓝图自定义事件**（`FUNC_BlueprintEvent` 不在 python 暴露面，`hasattr(actor, 'punch')` 为 `False`）⇒ 想让"python/左键"驱动，用 `K2Node_InputKey` 事件节点（`add_blueprint_node_by_class('K2Node_InputKey')` + `set_blueprint_node_property(node_id, 'InputKey', '{"KeyName": "LeftMouseButton"}')`，免写 `DefaultInput.ini`）；**非 possessed 的 actor 收不到输入**，还要把 `AutoReceiveInput` 设成 `Player0`（`set_blueprint_property(property_name='AutoReceiveInput', property_value='Player0')`，而且**同关卡里已存在的实例要单独再设一次**：实例保存的是差值属性，CDO 改了不会回溯，实测 PIE 里读回仍是 `DISABLED`，得在编辑器世界对实例 `set_editor_property('auto_receive_input', unreal.AutoReceiveInput.PLAYER0)` 或重新 spawn）。
 
 ### 5c. 接口、存在性检查与蓝图对比
 
@@ -291,8 +316,8 @@ assert lib.set_pin_default(r.node, "Duration", "3.0", "auto").success
   - `connect_blueprint_nodes` 的 bridge 参数名与工具一致（`source_node_id` / `source_pin` / `target_node_id` / `target_pin`）；
   - 组件挂接 bridge 命令名 = `attach_component_to_component`；
   - 材质域另有一套名字（见材质 Skill），别串用。
-- 回环**禁用名单**：`execute_python_command` / `execute_python_file` / `poll_python_job` / `take_screenshot` → `{"status":"error","error":"reentry_forbidden"}`。
-- 长脚本走 `Saved/MCPScripts/*.py` + `execute_python_file(file_path=..., deferred=True)` + `poll_python_job(job_id)`；脚本内 `print()` 输出中间状态。
+- 回环**禁用名单**：`execute_python_command` / `execute_python_file` / `take_screenshot` → `{"status":"error","error":"reentry_forbidden"}`。
+- 长脚本走 `Saved/MCPScripts/*.py` + `execute_python_file(file_path=..., timeout=...)`（同步；重活拆成多次短调用）；脚本内 `print()` 输出中间状态。
 - 若只是要"建节点 / 连线 / 断言"，直接用反射库更短（对象面，不需要字符串 guid）；要"结构化错误信封 / 增量改场景 / 组件命令"时用 `bridge()`。同一脚本里混用是常态。
 
 ### 8. 保存、编译、回验
@@ -328,15 +353,32 @@ lib.compile_blueprint_checked(bp)      # 或 bridge("compile_blueprint", bluepri
 - 控件树里的 TextBlock 默认**不是**类的可读属性；要断言显示内容，读它绑定的**变量值**（`hud.get_editor_property("AmmoValue")`）最省事。
 - UMG 命令各自会保存资产，但**写完仍要回读确认真的在盘上**（`does_asset_exist` + 磁盘 mtime）。
 
-**`verify_blueprint_graph` 的两条已知误报**（判真假靠直读，不要据此改图）：
-`unreachable_node` 会把"以 `K2Node_InputAction` 为根"的执行链判成不可达（直读 `linked_to` 就能证明 `Pressed → execute` 存在）；
-`dangling_producer` 对"纯节点上没人用的返回值"也是启发式（Tick 的 `DeltaSeconds`、`Montage_Play.ReturnValue` 都会被报）。
+**`verify_blueprint_graph` 的误报与修**（判真假一律直读 `linked_to`，不要据此改图）：
+`unreachable_node` 曾把"以 `K2Node_InputKey` / `K2Node_InputAction` / `K2Node_InputTouch` 为根"的执行链判成不可达 ——
+入口集只认 `UK2Node_Event`，而它们是 `UK2Node` + `IK2Node_EventNodeInterface`（`K2Node_InputKey.h:35`）。
+**已按引擎自己的判据修好**（`KismetCompiler::GatherRootSet`，`KismetCompiler.cpp:104-128`：`FunctionEntry | Event | Timeline | IsNodeRootSet()` + "无输入引脚的非纯 K2Node"），回包另带 `root_node_count` 以区分"干净"与"没有入口"。
+`dangling_producer` 对"纯节点上没人用的返回值"是启发式（Tick 的 `DeltaSeconds`、`Montage_Play.ReturnValue` 都会被报）⇒ 按需忽略。
 
-**带输入的行为要"分两半"在 PIE 里验**（`PlayerController` 没有按键注入 API，只有 `is_input_key_down` / `get_input_*` 一类读取）：
+**带输入的行为要在 PIE 里验，三段各管一件事**：
 ① 直接调节点要调用的那个函数（例：`anim.montage_play(montage)` 回播放时长、下一帧 `montage_is_playing=True`）证明"资产 + 图接对了"；
 ② 用状态变化驱动下一帧的分支（例：`pawn.add_movement_input(Vector(0,100,0))`，再下一帧 `montage_is_playing=False`）证明"打断链真的跑"；
-③ 按键本身留给用户视口确认。PIE 世界用 `unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()` 取
+③ **按键本身可以脚本注入了**：`inject_key(key, event)`（`key` 是键名不是动作名，`event` = press / release / tap）走 `UGameViewportClient::InputKey` —— 真人按键的同一道门，含 `SetIgnoreInput` 那道闸，所以 UI 聚焦/输入被忽略时它同样进不去。它证明的是**键位映射**（动作级注入只证明"动作能到逻辑"，键级注入才证明"绑对了"）；
+   **别拿回执当判据**：`viewport_handled` 只是视口返回值，**对轴映射恒为 false**（实测 `W` 返回 false 而 DefaultPawn 照飞）；同帧也**没有**"送到了"的读数 —— 事件在帧内稍后才被处理，调用期间去读按下状态读到的是**本次事件之前**的态（实测：press 帧读到 false、release 帧读到 true，而两次注入都生效）。⇒ **只能回读游戏自己的状态**（`get_actor_pose` / Pawn 位置 / 玩法读数）来证明效果。
+   `PlayerController` 上确实没有按键注入 API（`is_input_key_down` / `get_input_*` 一类只是读取）—— 通路在**视口层**，不在 PC 上。手感与观感仍归用户判定。
+PIE 世界用 `unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()` 取
 （`start_pie` 起的是真 Play，GameMode 会 spawn 默认 Pawn）。
+
+**写"数组类"引脚：先连线定型、再写值**（UE 5.7 实测）。
+`Actor.AddTag` **不是**蓝图可调用函数（`add_blueprint_function_node(target="Actor", function_name="AddTag")` → `function_not_found`；`AddTag` / `K2_AddTag` / `ActorAddTag` 三个名字都不存在），可用的只有 `ActorHasTag`（读）与 `Tags`（`Array[Name]`，Read-Write）。
+写 `Tags` 时 **`Set Tags` 节点的默认值不接受数组字面量**（回 `type_mismatch: 'name' pin 'Tags' requires a string value`）：必须先用 `K2Node_MakeArray`，把元素引脚 `[0]` 连到 `Tags`，**等连线就位后再写 `[0]` 的值** —— 连线前 `[0]` 是 wildcard，写值报 `unsupported_pin_type`。
+
+**PIE 探针里 `SetActorLocation` 的 sweep 会在同一次派发内派发重叠**：`sweep=True, teleport=False` 扫进目标位置时，overlap 委托在**本次派发内**就跑完 —— 一次调用扫过 8 枚金币，**同一次回包**里读到的收集状态就是 8/8，不需要跨帧等待。（`teleport=True` 的瞬移不产生重叠，用来摆位很方便。）
+
+**环境坑（省时用）**：
+- **编辑器 python 解释器常驻**：`sys.modules` 里缓存的脚本模块**不会**因磁盘改动而刷新 ⇒ 改过的 helper 必须 `importlib.reload`，否则跑的还是旧版（曾因此白跑两轮，且桥侧 `BRIDGE_LOG` 还带着上一轮内容）。
+- **编辑器崩溃/重启不会回到崩溃前正在编辑的关卡**（实测回到 `/Game/test`），要用 `LevelEditorSubsystem.load_level()` 显式切回 ⇒ **动手前先把改动存盘**。
+- **参数名已统一为一个概念一个名字**：`create_asset_safe` 的资产类参数两层都叫 `asset_class`；`set_object_property` 的对象选择参数两层都叫 `target`（与同族 `reflect_probe` 一致 —— 这两个命令是"先探后写"连着用的）。两个旧名（`asset_class_name` / `object_path`）仍可用作**弃用别名**，用了会在回执里看到 `renamed_params[]`；两个名字同时给且取值不一致 → `invalid_params`（不猜哪个优先）。用引擎内回环直调 bridge 命令时按 **bridge** 名字写。
+- `unreal.CollisionResponse` 的枚举成员在 python 侧既不是 `ECR_IGNORE` 也不是 `IGNORE`（实测未命中）⇒ 要逐通道改响应就走 bridge 的 `set_component_collision(responses={"Pawn": "Overlap", ...})`（通道名可省前缀）。
 
 ---
 
@@ -355,7 +397,7 @@ lib.compile_blueprint_checked(bp)      # 或 bridge("compile_blueprint", bluepri
 | `list_blueprint_variables` / `get_blueprint_variable_info` | `blueprint_name`（+`variable_name`） | `variables[]` / `variable_count`；详情回 `type`/`container`/`sub_class`/`default_value`/`flags{}`（只读） |
 | `remove_blueprint_variable` | `variable_name` | `removed` / `variables[]`（剩余）/ `compiled` / `errors`；**同时清掉图里引用它的 get/set 节点** |
 | `rename_blueprint_variable` | `old_name`, `new_name` | `variable{}`（回读）/ `reference_nodes_renamed` / `reference_nodes_stale` / `compiled`；占用名 → `variable_name_in_use` |
-| `set_blueprint_variable_type` | `variable_name`, `variable_type`, `sub_class?`, `container?` | `variable{}`（回读）/ `type` / `container` / `compiled`；类型语法与 `add_blueprint_variable` 同一份 |
+| `set_blueprint_variable_type` | `variable_name`, `variable_type`, `sub_class?`, `container?` | `variable{}`（回读）/ `type` / `container` / `compiled`；类型语法与 `add_blueprint_variable` 同一份；被图节点引用 → **直接拒**：`variable_referenced_by_nodes` + `referencing_nodes[]` + `hint`（无覆盖开关，见正文）；类型没真正落上时另带 `type_change_not_applied` |
 | `set_blueprint_variable_default_value` | `variable_name`, `default_value` | `default_value`（回读）/ `compiled` / `errors`（解析失败在这里现形） |
 | `set_blueprint_variable_flags` | `variable_name`, `props={}` | `applied[]` / `failed[]` / `applied_count` / `flags{}` / `compiled` |
 | `list_blueprint_local_variables` / `add_blueprint_local_variable` / `remove_blueprint_local_variable` / `rename_blueprint_local_variable` / `set_blueprint_local_variable_default` | `function_name` + 变量名（新增还要 `variable_type`, `sub_class?`, `default_value?`） | `variables[]`（局部）/ `variable_count` / `compiled`；函数不存在 → `function_graph_not_found`+`candidates`；override 函数 → `function_not_editable` |
@@ -363,7 +405,7 @@ lib.compile_blueprint_checked(bp)      # 或 bridge("compile_blueprint", bluepri
 | `remove_component_from_blueprint` | `component_name`, `recursive=true`, `force=false` | `removed_components[]` / `components[]`（剩余）/ `root_count` / `unique_root` / `compiled` |
 | `set_blueprint_root_component` | `component_name` | 整棵层级回读 + `root_components` / `root_count` / `unique_root` / `compiled` |
 | `detach_component` | `component_name` | 同上（组件不删，只挂回 SCS 根） |
-| `set_component_collision` | `component_name`, `props={}` | `applied[]` / `failed[]` / `collision{collision_enabled,collision_profile,object_type,responses}`（回读）/ `compiled` |
+| `set_component_collision` | `component_name`, `props={}` | `applied[]` / `failed[]` / `collision{collision_enabled,collision_profile,object_type,responses}`（回读）/ `compiled` / `placed_instances` / `counted_in` / `hint`（有实例时） |
 | `implement_blueprint_interface` | `interface_path` | `implemented` / `already_implemented` / `generated_graphs[]` / `interface{}` / `compiled` |
 | `unimplement_blueprint_interface` | `interface_path`, `preserve_functions=false` | `removed` / `removed_graphs[]` / `interfaces[]`（剩余）/ `compiled` |
 | `list_blueprint_interfaces` | `blueprint_name` | `interfaces[]`（`interface_path` + `functions[{function_name,implemented}]`）/ `interface_count`（只读） |
@@ -385,7 +427,7 @@ lib.compile_blueprint_checked(bp)      # 或 bridge("compile_blueprint", bluepri
 | `add_blueprint_variable_node` | `variable_name`, `node_kind="get"\|"set"`, `node_position`, `graph_name?`, `is_local=false`, `variable_type?`, `sub_class?`, `default_value?` | `node_id`/`variable_name`/`node_kind`/`is_local`/`readback` |
 | `add_blueprint_get_self_component_reference` | `component_name`, `node_position`, `graph_name?` | 同建节点（`node_id`/`readback`） |
 | `add_blueprint_self_reference` | `node_position`, `graph_name?` | 同上 |
-| `connect_blueprint_nodes` | `source_node_id`, `source_pin`, `target_node_id`, `target_pin`, `graph_name?` | 解析后的 `source_linked_to`/`target_linked_from` + `verified`/`src_pin_consumers`/`tgt_pin_prev_source`（写后双向回读，`verified` 为 false 就当作没接上） |
+| `connect_blueprint_nodes` | `source_node_id`, `source_pin`, `target_node_id`, `target_pin`, `graph_name?` | 解析后的 `source_linked_to`/`target_linked_from` + `displaced_links[]` + `verified`/`src_pin_consumers`/`tgt_pin_prev_source`（写后双向回读）。**`displaced_links` 是被引擎顶掉的旧线**（单连接引脚，通常断的是**源**侧）：非空即"接上了但代价是别处断了一根"，此时 `verified=false`、并附 `hint` ⇒ 要扇出用 Sequence 节点，别重复接同一个输出 |
 | `set_blueprint_pin_default` | `node_id`, `pin_name`, `value`, `graph_name?` | `default_value_after` + `readback` |
 | `set_blueprint_node_property` | `node_id`, `property_name`, `property_value`, `graph_name?` | `property_type`/`before`/`after`/`pins_rebuilt`（+重建时 `readback`） |
 | `disconnect_blueprint_pins` | `node_id`, `pin_name`, `linked_node_id?`, `linked_pin_name?`, `graph_name?` | `links_before`/`disconnected_count`/`remaining_links` |
@@ -469,7 +511,7 @@ main()
 
 运行方式：`execute_python_file(file_path=<绝对路径>, deferred=True)` → `poll_python_job(job_id)`。
 
-**脚本里的 bridge 用信封形式** `{"type": command, "params": params}`：它是无歧义的（解包只看 `type`）。裸载荷（直接把参数对象传进去）从 2026-09-29 起也能用 —— 在那之前，解包只看 `params` 键，于是**自带 `params` 字段的命令**（`add_blueprint_function_node` 的引脚默认值表）会把整个载荷替换掉，表现成"明明传了 blueprint_name 却报缺 blueprint_name"。
+**脚本里的 bridge 用信封形式** `{"type": command, "params": params}`：它是无歧义的（解包只看 `type`）。裸载荷（直接把参数对象传进去）也能用，但**自带 `params` 字段的命令**（如 `add_blueprint_function_node` 的引脚默认值表）在裸载荷下会把整个载荷替换掉，表现成"明明传了 blueprint_name 却报缺 blueprint_name" —— 脚本里一律用信封形式。
 
 ### 1. 断言什么（都是"直读"而不是"回显"）
 
@@ -515,12 +557,12 @@ main()
    批量建资产时最后必须 flush。
 6. **没有该参数的命令**：`move_asset` / `move_directory` / `safe_delete_asset` 这类，落盘是操作语义的一部分
    （引用者重存、删前先落盘），不要指望能关掉。
-7. **`persist=false` 的语义是"这次派发里的所有落盘都关掉"，重建与编译也一样**（2026-09-28 修正）：
+7. **`persist=false` 的语义是"这次派发里的所有落盘都关掉"，重建与编译也一样**（已修正）：
    派发时注册表按 `persist` 建一次作用域（`FMCPPersistScope`），插件内部那几个"自己顺手存一下"的点
    （节点写回执 `MakeWriteResult`、图库 `GuardPersist` / `CompileBlueprintChecked`、`compile_blueprint` 编译后的保存、
    粒子 `PersistSystem`）都读同一标志。所以 `set_blueprint_node_property` / `add_blueprint_node_by_class` /
    `connect_blueprint_nodes` / `compile_blueprint` 传 `persist=false` 时**一次都不写盘**，重建引脚只影响内存与撤销栈。
-   实测（`Saved/MCPScripts/test_persist_dispatch_gate.py`）：加节点 / 编译的 `persist=false` 为 **0/3**（修正前 3/3），
+   实测（当时的夹具脚本已随会话清掉，判据与数字如下）：加节点 / 编译的 `persist=false` 为 **0/3**（修正前 3/3），
    `persist=true` 仍 1 次/条，批末 flush 恰好 1 次。
    > 早前"重建会引发引擎自动保存、命令层拦不住"的结论是错的：那批存盘来自插件自己的帮忙保存。引擎侧
    > 仅有两处编译后保存，且都由 `UBlueprintEditorSettings::SaveOnCompile` 门控（本机为 `SoC_Never`，未触发）。
@@ -538,8 +580,8 @@ main()
      ```
 
      snake_case（`node.physics_body_definitions`）会被 `path_segment_not_found` 拒；
-     **整坨写整个 `Node` 目前在 AnimDynamics 上不可往返**（字段被 reader 改名 / 不可写字段 / `CustomCurve` 加载失败，
-     实测三种失败原文见 `Docs/`）。
+     **整坨写整个 `Node` 不可靠**（字段改名 / 含不可写字段 / 子对象加载失败，任一条都会打断整次写入）
+     ⇒ 一律走点号路径写子字段。
    - **读回是唯一的验收**：`set_editor_property` 对"数组 of 结构"是**静默无效**的（写 7.5 读回 10，不抛异常），
      所以写完一律用 `reflect_probe` 逐字段比对，别信"没报错"。
    - 结构里 `component_pose`（引脚链路 LinkID）**必须跳过**，跨图复制会破坏接线；
@@ -557,3 +599,43 @@ main()
    `PostEditChangeProperty`，落到 `else` 分支执行 `ValidateChainPhysicsBodyDefinitions`，由引擎按链回填名字；
    随后 `node.BoundBone`/`ChainEnd` 与 body 首/末一致，运行时不再重建，**蓝图里的 per-body 参数就是生效值**。
    （想反过来"让重建兜底"：把名字留空即可，但任何一次属性写都会把它填回去。）
+10. **输入接线与 Cast 节点的两个必答项（`BP_GrabDriver` 实测）**
+
+   - **非 possessed 的 actor 收不到输入**：输入只路由给"被 possess 的 pawn"的输入栈。关卡里摆着的角色/工具 actor
+     若没被 possess（例：`L_GrabTest` 里被 possess 的是 `DefaultPawn` 自由飞行相机），必须自己调
+     `Enable Input(PlayerController)`（`Actor.EnableInput`，K2Node_CallFunction）才会收到键/鼠标事件 ——
+     这就是 C++ 侧"组件自己 `PushInputComponent`"在蓝图里的等价物，漏了它表现为"节点连得对、PIE 里毫无反应"。
+     判据：PIE 里 `GetPlayerPawn(0)` 是不是它；不是就必须 `Enable Input`。
+   - **反过来，玩家 pawn 的输入还在生效**：非 possessed 场景里 possess 的仍是玩家 pawn，它的 look 绑定会继续吃鼠标
+     —— 表现为"按住左键拖光标，视角一起转"。光标驱动的交互必须在驱动侧关掉 look：
+     `Set Ignore Look Input(PC, true)`（`Controller.SetIgnoreLookInput`），要转视角时再 `Reset Ignore Look Input(PC)`。
+     实测：这一条 + `Enable Input` 一起才是"组件自读鼠标"时代的等价物（旧 PhysicsGrab 组件正是 `SetIgnoreLookInput(true)`
+     + 按住右键才放开）。
+   - **`add_blueprint_node_by_class(K2Node_DynamicCast)` 之后必须 `refresh_blueprint_node`**：它是骨架节点
+     （起始名为"坏的类型转换节点"），`set_blueprint_node_property(property_name="TargetType", …)` 只写属性、
+     **不重建引脚**（回执 `pins_rebuilt: false`，也没有 `As…` 输出引脚）；对节点点一次 `refresh_blueprint_node`
+     才会出现 `As<类名>`（实测名字是 `AsPhysics Grab`，不是 `AsPhysicsGrabComponent`），并顺手重编译。
+   - 顺带：`GameplayStatics.GetPlayerController` 在 UE5 是**纯节点**（无 exec 引脚），接线时不要从它往下串 exec。
+   - **数据引脚连了 ≠ 会执行**：带结构体 out 参数的调用链（例：`Read Cursor Drag Info` 的 `OutDragInfo → Apply Drag Info.DragInfo`）很容易只连数据、漏掉 `Read.then → Apply.execute`。漏 exec 时**编译不报错、运行期不警告**（没有 Accessed None），表现为"事件明明触发了但下游毫无动静"。
+     定位法：在两个节点之间插 `PrintString` 打点（先 `add_blueprint_function_node(target="KismetSystemLibrary", function_name="PrintString")`，再用 `set_blueprint_pin_default(pin_name="InString", value="XXX")` 写文本（**creation 时的 `params` 也会写入并持久** —— 7 例实测全过，含 `PrintString.InString` 与 `K2_SetTimer` 的三个参数；**但写完必须回读**，不回读就分不清"根本没设"与"设了没生效"，`InString` 的默认值是 `Hello`），配合同一条链上的 C++ 侧日志/状态读数比对，缺口一定能看见）。
+   - **接线完成后逐条验 exec 链**：对每条事件链，用 `find_blueprint_nodes` 的 readback 检查"上一步的 `then` 是否在下一步的 `execute` 的 `linked_from` 里"。**并且当场看 `connect_blueprint_nodes` 的 `displaced_links[]`** —— 引擎顶掉旧线是静默的（曾表现为事后 `verify_blueprint_graph` 报 4 个 `unreachable_node`），现在那一刻就会进回执；非空即"新接的这根把别处顶断了"，按 `hint` 用 Sequence 节点重做。
+   - 收尾跑一遍 `verify_blueprint_graph`：误报判读见本文件"`verify_blueprint_graph` 的误报与修"一节；报告规范见 `## 三、验证纪律`。
+11. **图必须可读（交付纪律，用户明确要求）**：节点**不要堆在原点附近**。约定：
+
+   - **一条事件链一行**：`y` 按链分行（BeginPlay / 每个按键 / Tick 各一行），`x` 沿 exec 流递增（每步 ~300–400）；
+   - **共享的纯节点单独一列**（例：`Get PC` / `Get Grab` 被多行复用 ⇒ 放同一列便于看"谁在喂谁"）；
+   - **每行加一个 `EdGraphNode_Comment`** 标注"这一行是干什么的"（`add_blueprint_node_by_class(node_class="EdGraphNode_Comment")` → `set_blueprint_node_property(NodeComment/NodeWidth/NodeHeight)` → `move_blueprint_node` 摆到该行上方）；
+   - **`add_blueprint_function_node` / `add_blueprint_variable_node` 的 `node_position` 实测不生效**（节点仍落在 0,0；只有 `add_blueprint_event_node` 生效）⇒ 建完统一用 `move_blueprint_node` 收口，并**回读 `pos_x`/`pos_y` 自证**；
+   - 布局是要交给人看的：一次把整张图摆好（脚本里成批 `move_blueprint_node`），不要留一张"点状云"。
+
+---
+
+> **这一节已拆成独立 skill**：`unreal-blueprint-case-bp-to-cpp-migration`（把蓝图逻辑搬进 C++：reparent 的硬约束、会丢什么、怎么验）。
+
+## 本 skill 的 `scripts/`（只读探查工具；改顶部 `BP` 路径即可重跑）
+
+| 脚本 | 做什么 |
+|---|---|
+| `fei_740_bp_survey.py` | 一次看清一个 BP：图表清单 / 变量 / 函数图 / 组件层级 / 每张图的节点（含 `function_reference` 与节点位置） |
+| `fei_741_bp_graph_detail.py` | 单张图的细节 dump：每个节点的引脚（默认值 / 对象 / 连线目标）与节点属性 |
+| `fei_601_dump_graphs.py` | 遍历一个 BP 的所有图逐图 dump 节点（走反射库 `lib.get_graph_nodes`） |

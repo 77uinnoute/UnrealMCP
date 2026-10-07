@@ -85,7 +85,10 @@ bool FMCPObjectPathResolver::ResolveFromParams(const TSharedPtr<FJsonObject>& Pa
 
     if (!Object)
     {
-        OutErrorCode = TEXT("load_failed");
+        // A play session can make an existing asset unloadable; say that instead of "load_failed", so
+        // the caller stops treating it as "the asset is gone" (see ClassifyAssetLoadFailure).
+        const FString PieCode = FUnrealMCPCommonUtils::ClassifyAssetLoadFailure(Target);
+        OutErrorCode = PieCode.IsEmpty() ? TEXT("load_failed") : PieCode;
         OutErrorMessage = FString::Printf(
             TEXT("Could not resolve %s '%s' as an asset, a class, or a sub-object (tried: %s)"),
             ParamName, *Target, *FString::Join(OutTried, TEXT(", ")));

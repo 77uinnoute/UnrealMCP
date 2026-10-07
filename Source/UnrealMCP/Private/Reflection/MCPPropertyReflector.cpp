@@ -64,6 +64,12 @@ namespace
         }
         return Out;
     }
+
+    /** Spellings that mean "no reference": what ToJson emits for a cleared object reference, plus "" . */
+    bool IsEmptyReferenceSpelling(const FString& Text)
+    {
+        return Text.IsEmpty() || Text.Equals(TEXT("None"), ESearchCase::IgnoreCase);
+    }
 }
 
 //==============================================================================
@@ -1321,7 +1327,7 @@ TSharedPtr<FJsonValue> FMCPPropertyReflector::ToJson(FProperty* Property, const 
 namespace
 {
     FWriteResult WritePropertyInternal(FProperty* Property, void* PropertyAddr, const FString& Context,
-                                       const TSharedPtr<FJsonValue>& Value);
+                                       const TSharedPtr<FJsonValue>& Value, bool bElementView = false);
 }
 
 FWriteResult FMCPPropertyReflector::FromJson(FProperty* Property, void* PropertyAddr, const FString& Context,
@@ -1341,7 +1347,7 @@ FWriteResult FMCPPropertyReflector::FromJson(FProperty* Property, void* Property
 namespace
 {
 FWriteResult WritePropertyInternal(FProperty* Property, void* PropertyAddr, const FString& Context,
-                                   const TSharedPtr<FJsonValue>& Value)
+                                   const TSharedPtr<FJsonValue>& Value, bool bElementView)
 {
     if (!Property)
     {
@@ -1363,6 +1369,52 @@ FWriteResult WritePropertyInternal(FProperty* Property, void* PropertyAddr, cons
     if (!Value.IsValid())
     {
         return RejectWithShapes(TEXT("type_mismatch"), FString::Printf(TEXT("%s requires a value"), *Context));
+    }
+
+    // C-style fixed-size array (`FBlendParameter BlendParameters[3]`): one property with ArrayDim slots
+    // at a fixed stride, not a container property - there is no FArrayProperty to walk. It takes the
+    // same "one value per slot" shape as a dynamic array, and slots the caller does not supply keep
+    // their previous values: a 3-slot parameter whose third component is unused in the 2D case is the
+    // normal situation, so demanding an exact length would only force the caller to invent values.
+    //
+    // `bElementView` is how a slot is written: the property is unchanged (only its address moves to the
+    // slot), so re-entering this function with the flag set skips this branch and runs the slot's own
+    // type dispatch against its own memory.
+    if (!bElementView && Property->ArrayDim > 1)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+        if (!Value->TryGetArray(Values))
+        {
+            // Not an array: this is one slot's value, and slot 0 is the only slot it can mean. Describing
+            // the property reports the ELEMENT (Describe has no container branch for a static array), so
+            // rejecting the shape the probe itself advertises would make "probe then write" impossible -
+            // measured: reflect_probe(blend_parameters) answers FBlendParameter. Writing one element this
+            // way lands on slot 0 only; the readback reports that element, so a partial write is visible.
+            return WritePropertyInternal(Property, PropertyAddr, Context, Value, /*bElementView=*/ true);
+        }
+        if (Values->Num() > Property->ArrayDim)
+        {
+            return FWriteResult::Failure(TEXT("too_many_values"),
+                FString::Printf(TEXT("%s holds %d elements; %d were given"),
+                    *Context, Property->ArrayDim, Values->Num()));
+        }
+
+        for (int32 Index = 0; Index < Values->Num(); ++Index)
+        {
+            void* SlotAddr = static_cast<uint8*>(PropertyAddr) + static_cast<int64>(Index) * Property->ElementSize;
+            FWriteResult SlotResult = WritePropertyInternal(Property, SlotAddr,
+                FString::Printf(TEXT("%s[%d]"), *Context, Index), (*Values)[Index], /*bElementView=*/ true);
+            if (!SlotResult.bSuccess)
+            {
+                // Earlier slots of this call are already written. A fixed-size array is not a container
+                // with the container atomicity promise, so state that instead of letting the caller read
+                // the default "unchanged" and assume the whole array is untouched.
+                SlotResult.bUnchanged = false;
+                SlotResult.FailedIndex = Index;
+                return SlotResult;
+            }
+        }
+        return FWriteResult::Success();
     }
 
     // Escape hatch first: a registered property codec owns its shape and its policy.
@@ -1578,6 +1630,14 @@ FWriteResult WritePropertyInternal(FProperty* Property, void* PropertyAddr, cons
 
     if (FObjectProperty* ObjectProperty = CastField<FObjectProperty>(Property))
     {
+        // JSON null clears the reference, and the "None" spelling is accepted because that is what
+        // ToJson writes for a cleared reference - without it a read-back could not be fed back in.
+        if (Value->Type == EJson::Null
+            || (Value->Type == EJson::String && IsEmptyReferenceSpelling(Value->AsString())))
+        {
+            ObjectProperty->SetObjectPropertyValue(PropertyAddr, nullptr);
+            return FWriteResult::Success();
+        }
         if (Value->Type != EJson::String)
         {
             return RejectWithShapes(TEXT("type_mismatch"),
@@ -1603,6 +1663,12 @@ FWriteResult WritePropertyInternal(FProperty* Property, void* PropertyAddr, cons
 
     if (FSoftObjectProperty* SoftObjectProperty = CastField<FSoftObjectProperty>(Property))
     {
+        if (Value->Type == EJson::Null
+            || (Value->Type == EJson::String && IsEmptyReferenceSpelling(Value->AsString())))
+        {
+            SoftObjectProperty->SetPropertyValue(PropertyAddr, FSoftObjectPtr());
+            return FWriteResult::Success();
+        }
         if (Value->Type != EJson::String)
         {
             return RejectWithShapes(TEXT("type_mismatch"),
@@ -1689,6 +1755,65 @@ FWriteResult WritePropertyInternal(FProperty* Property, void* PropertyAddr, cons
 // Describe / IsSupported
 //==============================================================================
 
+namespace
+{
+    // Deep enough for the shapes that appear in practice (array<struct{...}>, struct{SampleValue: {...}}),
+    // capped so a struct that refers back to its own type cannot recurse forever.
+    constexpr int32 MaxShapeDepth = 3;
+
+    /** Shape phrase of one field, in the same vocabulary Describe reports. */
+    FString ShapePhraseForField(const FProperty* Field, int32 Depth)
+    {
+        if (!Field)
+        {
+            return FString(TEXT("value"));
+        }
+
+        if (const FArrayProperty* AsArray = CastField<FArrayProperty>(Field))
+        {
+            if (Depth >= MaxShapeDepth)
+            {
+                return FString(ShapeArray);
+            }
+            return FString::Printf(TEXT("array<%s>"), *ShapePhraseForField(AsArray->Inner, Depth + 1));
+        }
+
+        if (const FStructProperty* AsStruct = CastField<FStructProperty>(Field))
+        {
+            if (Depth >= MaxShapeDepth)
+            {
+                return FString(ShapeFieldObject);
+            }
+
+            FString Fields;
+            for (TFieldIterator<FProperty> It(AsStruct->Struct); It; ++It)
+            {
+                const FProperty* Inner = *It;
+                if (!Inner)
+                {
+                    continue;
+                }
+                // Nested-path form: any field that is not EditConst can be addressed by name, which is
+                // the question "which field names may I write" is really asking.
+                FString Ignored;
+                if (!FMCPPropertyReflector::IsWritable(Inner, /*bNestedPath=*/true, Ignored))
+                {
+                    continue;
+                }
+                if (!Fields.IsEmpty())
+                {
+                    Fields += TEXT(", ");
+                }
+                Fields += FString::Printf(TEXT("%s: %s"), *Inner->GetName(), *ShapePhraseForField(Inner, Depth + 1));
+            }
+            return FString::Printf(TEXT("struct{%s}"), *Fields);
+        }
+
+        const FPropertyDescriptor Descriptor = FMCPPropertyReflector::Describe(Field);
+        return Descriptor.SupportedShapes.Num() > 0 ? Descriptor.SupportedShapes[0] : Descriptor.CppType;
+    }
+}
+
 FPropertyDescriptor FMCPPropertyReflector::Describe(const FProperty* Property)
 {
     FPropertyDescriptor Descriptor;
@@ -1702,6 +1827,10 @@ FPropertyDescriptor FMCPPropertyReflector::Describe(const FProperty* Property)
     FString ExtendedType;
     Descriptor.CppType = Property->GetCPPType(&ExtendedType) + ExtendedType;
     Descriptor.PropertyClass = Property->GetClass()->GetName();
+
+    // Non-nested view of the write gate; a caller that addressed this leaf through a path refines it
+    // with IsWritableAndSupported(... bNestedPath=true ...).
+    Descriptor.bWritable = IsWritable(Property, /*bNestedPath=*/false, Descriptor.WritableDetail);
 
     if (const FPropertyCodec* Codec = FMCPPropertyCodecs::FindPropertyCodec(Property))
     {
@@ -1719,6 +1848,21 @@ FPropertyDescriptor FMCPPropertyReflector::Describe(const FProperty* Property)
         Descriptor.Semantics = TEXT("replace");
         Descriptor.bSupported = IsSupported(ArrayProperty->Inner);
         Descriptor.SupportedShapes = MakeShapes({ ShapeArray });
+        // The shape and the element field names are what turn "write an array" into a write that can be
+        // typed on the first try: the array is replaced whole, so the element's field names matter.
+        Descriptor.Shape = FString::Printf(TEXT("array<%s>"), *ShapePhraseForField(ArrayProperty->Inner, 1));
+        if (const FStructProperty* InnerStruct = CastField<FStructProperty>(ArrayProperty->Inner))
+        {
+            for (TFieldIterator<FProperty> It(InnerStruct->Struct); It; ++It)
+            {
+                const FProperty* Field = *It;
+                FString Ignored;
+                if (Field && IsWritable(Field, /*bNestedPath=*/true, Ignored))
+                {
+                    Descriptor.ElementFields.Add(Field->GetName());
+                }
+            }
+        }
         if (!Descriptor.bSupported)
         {
             // A container is unusable because of its element type, so the element's own hint is what
@@ -1763,6 +1907,16 @@ FPropertyDescriptor FMCPPropertyReflector::Describe(const FProperty* Property)
         }
         Descriptor.bSupported = true;
         Descriptor.SupportedShapes = MakeShapes({ ShapeFieldObject, ShapeNumberArray, ShapeStructText });
+        Descriptor.Shape = ShapePhraseForField(Property, 1);
+        for (TFieldIterator<FProperty> It(StructProperty->Struct); It; ++It)
+        {
+            const FProperty* Field = *It;
+            FString Ignored;
+            if (Field && IsWritable(Field, /*bNestedPath=*/true, Ignored))
+            {
+                Descriptor.ElementFields.Add(Field->GetName());
+            }
+        }
         return Descriptor;
     }
 
@@ -1813,6 +1967,54 @@ FPropertyDescriptor FMCPPropertyReflector::Describe(const FProperty* Property)
 
     Descriptor.bSupported = false;
     return Descriptor;
+}
+
+bool FMCPPropertyReflector::IsWritable(const FProperty* Property, bool bNestedPath, FString& OutDetail)
+{
+    OutDetail.Reset();
+    if (!Property)
+    {
+        return false;
+    }
+
+    if (Property->HasAnyPropertyFlags(CPF_EditConst))
+    {
+        OutDetail = TEXT("read_only");
+        return false;
+    }
+
+    // A nested path is the explicit opt-in for baked data that carries no Edit specifier at all
+    // (FPointWeightMap.Values): addressing it down to the leaf IS the request.
+    if (!bNestedPath && !Property->HasAnyPropertyFlags(CPF_Edit))
+    {
+        OutDetail = TEXT("engine_managed");
+        return false;
+    }
+
+    // A static array (ArrayDim > 1) keeps its element count: the caller replaces values per slot and
+    // cannot resize it, which is the trap that once made a "write the whole array" attempt fail.
+    if (Property->ArrayDim > 1)
+    {
+        OutDetail = FString::Printf(TEXT("fixed_size_array:%d"), Property->ArrayDim);
+    }
+    return true;
+}
+
+bool FMCPPropertyReflector::IsWritableAndSupported(const FProperty* Property, bool bNestedPath, FString& OutDetail)
+{
+    if (!IsWritable(Property, bNestedPath, OutDetail))
+    {
+        return false;
+    }
+
+    // Flags say yes but the type has no JSON mapping (weak / lazy / interface object references):
+    // the write would still be refused, so the probe must not promise it either.
+    if (!IsSupported(Property))
+    {
+        OutDetail = TEXT("unsupported_type");
+        return false;
+    }
+    return true;
 }
 
 bool FMCPPropertyReflector::IsSupported(const FProperty* Property)

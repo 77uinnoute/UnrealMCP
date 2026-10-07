@@ -14,6 +14,7 @@
 #include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_Timeline.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_Variable.h"
 #include "AnimGraphNode_Root.h"
@@ -367,6 +368,10 @@ namespace
         }
 
         TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+        // Explicit success, the same field every other write command (set_object_property, the asset and
+        // component writers) returns. Without it the only way to tell a write from a no-op was the
+        // absence of an "error" field, which reads as a convention rather than an answer.
+        ResultObj->SetBoolField(TEXT("success"), true);
         if (Node)
         {
             ResultObj->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString());
@@ -502,7 +507,13 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::RunCommand(const FStrin
 
 void FUnrealMCPBlueprintNodeCommands::RegisterCommands(FMCPCommandRegistry& Registry)
 {
-    MCP_REGISTER_COMMAND(Registry, "connect_blueprint_nodes", "blueprint_node", "Connect an output pin to an input pin in a Blueprint graph.",
+    MCP_REGISTER_COMMAND(Registry, "connect_blueprint_nodes", "blueprint_node",
+        "Connect an output pin to an input pin in a Blueprint graph. A pin that can hold only one wire "
+        "(every exec pin) loses its previous link when a second one is connected - the engine does that "
+        "silently, so the response lists what was dropped in displaced_links[] (with a hint: branch with a "
+        "Sequence node instead of re-wiring the same output). `verified` means the new wire is in AND "
+        "nothing was displaced; a false there with success=true is a completed connection that cost an "
+        "existing one.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("source_node_id"), TEXT("string"), TEXT("Node guid of the source node")),
@@ -534,7 +545,10 @@ void FUnrealMCPBlueprintNodeCommands::RegisterCommands(FMCPCommandRegistry& Regi
         }), MCPFlags(false, true, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("add_blueprint_event_node"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleAddBlueprintEvent(P); }); }));
 
-    MCP_REGISTER_COMMAND(Registry, "add_blueprint_function_node", "blueprint_node", "Add a function call node, optionally applying input pin defaults.",
+    MCP_REGISTER_COMMAND(Registry, "add_blueprint_function_node", "blueprint_node",
+        "Add a function call node, optionally applying input pin defaults. The defaults go through the same "
+        "setter set_blueprint_pin_default uses, so a LIST handed to a single-valued pin is refused and that "
+        "entry's `hint` under failed[] carries the MakeArray recipe.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("function_name"), TEXT("string"), TEXT("Function to call")),
@@ -614,7 +628,14 @@ void FUnrealMCPBlueprintNodeCommands::RegisterCommands(FMCPCommandRegistry& Regi
         }), MCPFlags(false, true, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("add_blueprint_self_reference"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleAddBlueprintSelfReference(P); }); }));
 
-    MCP_REGISTER_COMMAND(Registry, "find_blueprint_nodes", "blueprint_node", "List nodes and their pins from a Blueprint, Material or MaterialFunction graph.",
+    MCP_REGISTER_COMMAND(Registry, "find_blueprint_nodes", "blueprint_node",
+        "List nodes and their pins from a Blueprint, Material or MaterialFunction graph. `truncated` is true "
+        "only when a node that should have been listed was dropped by max_nodes (raise it and re-ask); it is "
+        "NOT set by node_type filtering - read `filtered` for that, since re-asking a filtered query gains "
+        "nothing. verbose=false drops "
+        "properties, pins and connections - the response declares that in omitted_fields[] and keeps pin_count "
+        "per node - so such a payload cannot answer any pin-name question: do not filter it by pin name (that "
+        "silently matches nothing). Call again with verbose=true (the default) for pin-level work.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Asset name, or __current__ for the focused editor asset")),
             MCPParamOpt(TEXT("node_type"), TEXT("string"), TEXT("Filter: All (default) or Event")),
@@ -622,7 +643,7 @@ void FUnrealMCPBlueprintNodeCommands::RegisterCommands(FMCPCommandRegistry& Regi
             MCPParamOpt(TEXT("event_name"), TEXT("string"), TEXT("Event to match (required when node_type is Event)")),
             MCPParamOpt(TEXT("event_type"), TEXT("string"), TEXT("Alias of event_name")),
             MCPParamOpt(TEXT("max_nodes"), TEXT("int"), TEXT("Maximum nodes returned, 1-1000 (default 200)")),
-            MCPParamOpt(TEXT("verbose"), TEXT("bool"), TEXT("Include properties, pins and connections (default true)")),
+            MCPParamOpt(TEXT("verbose"), TEXT("bool"), TEXT("Include properties, pins and connections (default true). false omits them and reports that in omitted_fields[]; the result is not usable for pin-name lookups")),
         }), MCPFlags(false, false, false, false) /* read-only */,
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("find_blueprint_nodes"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleFindBlueprintNodes(P); }); }));
 
@@ -705,7 +726,11 @@ void FUnrealMCPBlueprintNodeCommands::RegisterCommands(FMCPCommandRegistry& Regi
         }), MCPFlags(false, true, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("rename_blueprint_function_param"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleRenameBlueprintFunctionParam(P); }); }));
 
-    MCP_REGISTER_COMMAND(Registry, "set_blueprint_pin_default", "blueprint_node", "Write one input pin's default value on an existing node.",
+    MCP_REGISTER_COMMAND(Registry, "set_blueprint_pin_default", "blueprint_node",
+        "Write one input pin's default value on an existing node. A pin holds ONE value, so a LIST is refused: "
+        "to feed several values, put a MakeArray node beside it, connect its element pins and write those - the "
+        "refusal carries that recipe in `hint`. (A scalar written to even an Array[Name] pin is accepted and "
+        "lands in the pin's DefaultValue.)",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("node_id"), TEXT("string"), TEXT("Node guid of the node to change")),
@@ -889,8 +914,9 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleConnectBlueprintN
     FString ConnectErrorCode;
     FString ConnectErrorMessage;
     TArray<FString> Candidates;
+    TArray<FUnrealMCPBlueprintGraphOps::FDisplacedLink> DisplacedLinks;
     if (!FUnrealMCPBlueprintGraphOps::ConnectNodes(Graph, SourceNode, SourcePinName, TargetNode, TargetPinName,
-                                                  ConnectErrorCode, ConnectErrorMessage, Candidates))
+                                                  ConnectErrorCode, ConnectErrorMessage, Candidates, &DisplacedLinks))
     {
         return MakeCandidatesError(ConnectErrorCode, ConnectErrorMessage, Candidates);
     }
@@ -905,6 +931,29 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleConnectBlueprintN
 
     TSharedPtr<FJsonObject> ResultObj = MakeWriteResult(Graph, nullptr, BuildReadback(TouchedPins));
     ResultObj->SetArrayField(TEXT("tgt_pin_prev_source"), PreviousSources);
+
+    // displaced_links is the authoritative reading: tgt_pin_prev_source only ever looked at the target,
+    // while the schema drops the SOURCE side when a single-connection pin is re-wired.
+    TArray<TSharedPtr<FJsonValue>> DisplacedJson;
+    for (const FUnrealMCPBlueprintGraphOps::FDisplacedLink& Link : DisplacedLinks)
+    {
+        TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+        Entry->SetStringField(TEXT("node_id"), Link.NodeId);
+        Entry->SetStringField(TEXT("node"), Link.NodeName);
+        Entry->SetStringField(TEXT("pin"), Link.PinName);
+        Entry->SetStringField(TEXT("direction"), Link.Direction);
+        Entry->SetStringField(TEXT("lost_node_id"), Link.LostNodeId);
+        Entry->SetStringField(TEXT("lost_pin"), Link.LostPinName);
+        DisplacedJson.Add(MakeShared<FJsonValueObject>(Entry));
+    }
+    ResultObj->SetArrayField(TEXT("displaced_links"), DisplacedJson);
+    if (DisplacedJson.Num() > 0)
+    {
+        ResultObj->SetStringField(TEXT("hint"),
+            TEXT("the engine dropped these connections to make room: a pin that holds only one wire "
+                 "(every exec pin) loses its previous link when a second one is connected - branch with a "
+                 "Sequence node instead of re-wiring the same output"));
+    }
     ResultObj->SetStringField(TEXT("source_node_id"), SourceNodeId);
     ResultObj->SetStringField(TEXT("target_node_id"), TargetNodeId);
     if (ResolvedSourcePin)
@@ -944,7 +993,9 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleConnectBlueprintN
         bForward = ResolvedSourcePin->LinkedTo.Contains(const_cast<UEdGraphPin*>(ResolvedTargetPin));
         bReverse = ResolvedTargetPin->LinkedTo.Contains(const_cast<UEdGraphPin*>(ResolvedSourcePin));
     }
-    ResultObj->SetBoolField(TEXT("verified"), bForward && bReverse);
+    // verified now means "the new wire is in AND nothing else moved" - the platformer round showed a
+    // bare "true" here while a previously wired exec target had been silently orphaned.
+    ResultObj->SetBoolField(TEXT("verified"), bForward && bReverse && DisplacedLinks.Num() == 0);
     return ResultObj;
 }
 
@@ -1095,6 +1146,14 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleAddBlueprintFunct
                 {
                     Entry->SetStringField(TEXT("error_code"), PinErrorCode);
                     Entry->SetStringField(TEXT("error"), PinErrorMessage);
+
+                    // A list handed to a single-valued pin; hand over the recipe instead of stopping at the
+                    // type mismatch (same helper the standalone pin write uses).
+                    FString MultiValueHint;
+                    if (FUnrealMCPBlueprintGraphOps::TryBuildMultiValuePinHint(Param.Value, MultiValueHint))
+                    {
+                        Entry->SetStringField(TEXT("hint"), MultiValueHint);
+                    }
 
                     TArray<TSharedPtr<FJsonValue>> CandidateArray;
                     for (const FString& Candidate : PinCandidates)
@@ -2225,7 +2284,14 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleSetBlueprintPinDe
     TArray<FString> Candidates;
     if (!FUnrealMCPBlueprintGraphOps::SetPinDefaultValue(Node, PinName, Value, PinErrorCode, PinErrorMessage, Candidates))
     {
-        return MakeCandidatesError(PinErrorCode, PinErrorMessage, Candidates);
+        TSharedPtr<FJsonObject> Failure = MakeCandidatesError(PinErrorCode, PinErrorMessage, Candidates);
+        // A list handed to a single-valued pin: give the MakeArray recipe instead of only the mismatch.
+        FString MultiValueHint;
+        if (Failure.IsValid() && FUnrealMCPBlueprintGraphOps::TryBuildMultiValuePinHint(Value, MultiValueHint))
+        {
+            Failure->SetStringField(TEXT("hint"), MultiValueHint);
+        }
+        return Failure;
     }
 
     UEdGraphPin* AppliedPin = FUnrealMCPBlueprintGraphOps::FindPin(Node, PinName, EGPD_Input);
@@ -2693,10 +2759,43 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleVerifyBlueprintGr
 
     // Exec reachability from event/function entry nodes.
     TSet<const UEdGraphNode*> Reachable;
+    // Entry points, by the engine's own definition rather than by node class alone.
+    //
+    // This used to seed only UK2Node_Event / UK2Node_FunctionEntry, which reported every chain hanging off
+    // an input event as unreachable: UK2Node_InputKey (and InputAction / InputTouch) is a UK2Node with
+    // IK2Node_EventNodeInterface, NOT a UK2Node_Event (K2Node_InputKey.h:35). Measured 2026-10-02 on a fully
+    // connected BP_GrabDriver graph: 6 false "unreachable_node" reports, one per node behind a key event.
+    //
+    // The judgement below is KismetCompiler::GatherRootSet (KismetCompiler.cpp:104-128) verbatim, including
+    // its second mode - "non-pure K2Nodes without input pins", which is what an event source is. Keep it in
+    // sync with the engine if that helper ever changes.
     TArray<const UEdGraphNode*> Queue;
     for (const UEdGraphNode* Node : Graph->Nodes)
     {
-        if (Node && (Node->IsA<UK2Node_Event>() || Node->IsA<UK2Node_FunctionEntry>()))
+        if (!Node)
+        {
+            continue;
+        }
+
+        const UK2Node* K2Node = Cast<UK2Node>(Node);
+        bool bIsRoot = Node->IsA<UK2Node_FunctionEntry>() || Node->IsA<UK2Node_Event>()
+            || Node->IsA<UK2Node_Timeline>() || (K2Node && K2Node->IsNodeRootSet());
+
+        if (!bIsRoot && K2Node && !K2Node->IsNodePure())
+        {
+            bool bHasInputPins = false;
+            for (const UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin && Pin->Direction == EGPD_Input)
+                {
+                    bHasInputPins = true;
+                    break;
+                }
+            }
+            bIsRoot = !bHasInputPins;
+        }
+
+        if (bIsRoot)
         {
             Reachable.Add(Node);
             Queue.Add(Node);
@@ -2822,6 +2921,8 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleVerifyBlueprintGr
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("blueprint_name"), Blueprint->GetName());
     Result->SetStringField(TEXT("graph_name"), Graph->GetName());
+    // Entry count, so "nothing to report" cannot be confused with "no entry points to start from".
+    Result->SetNumberField(TEXT("root_node_count"), Reachable.Num());
     Result->SetArrayField(TEXT("rules_run"), MakeStringArray(RulesRun));
     Result->SetArrayField(TEXT("issues"), Issues);
     Result->SetNumberField(TEXT("issue_count"), Issues.Num());
@@ -2874,6 +2975,9 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::ProcessBlueprintNodes(U
         EmptyResult->SetArrayField(TEXT("node_ids"), {});
         EmptyResult->SetNumberField(TEXT("count"), 0);
         EmptyResult->SetNumberField(TEXT("node_count"), 0);
+        // Same two fields as the populated path, so a caller never has to branch on their presence.
+        EmptyResult->SetBoolField(TEXT("truncated"), false);
+        EmptyResult->SetBoolField(TEXT("filtered"), NodeType != TEXT("All"));
         return EmptyResult;
     }
 
@@ -2898,6 +3002,12 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::ProcessBlueprintNodes(U
     TArray<TSharedPtr<FJsonValue>> NodesArray;
     TArray<TSharedPtr<FJsonValue>> EventNodeIds;
 
+    // Truncation means "a node that SHOULD have been listed was dropped because of max_nodes". It used
+    // to be computed as `NodesArray.Num() < Graph->Nodes.Num()`, which also fires in filtered mode -
+    // there the returned nodes are a subset by design, so the caller could not tell "raise max_nodes and
+    // re-ask" (payload incomplete) from "you asked for a subset" (re-asking gains nothing).
+    bool bTruncated = false;
+
     for (UEdGraphNode* Node : Graph->Nodes)
     {
         if (!Node)
@@ -2917,7 +3027,11 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::ProcessBlueprintNodes(U
 
         if (NodesArray.Num() >= MaxNodes)
         {
-            break;
+            // Keep scanning instead of breaking: only a node that passed the filter and still did not
+            // fit is a real truncation, and a break cannot tell that apart from "the tail is filtered
+            // out". Nothing is appended from here on.
+            bTruncated = true;
+            continue;
         }
 
         FUnrealMCPNodeInfo NodeInfo;
@@ -2937,7 +3051,10 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::ProcessBlueprintNodes(U
     }
     ResultObj->SetNumberField(TEXT("count"), NodesArray.Num());
     ResultObj->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
-    ResultObj->SetBoolField(TEXT("truncated"), NodesArray.Num() < Graph->Nodes.Num());
+    ResultObj->SetBoolField(TEXT("truncated"), bTruncated);
+    // Filtering is reported separately from truncation: `truncated` means "the payload is incomplete,
+    // re-ask with a bigger max_nodes", which is the wrong reaction to a filtered subset.
+    ResultObj->SetBoolField(TEXT("filtered"), NodeType != TEXT("All"));
     if (!bVerbose)
     {
         const TArray<FString> OmittedFields = { TEXT("properties"), TEXT("pins"), TEXT("connections") };

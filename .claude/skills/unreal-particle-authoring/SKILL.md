@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP 粒子（Cascade）编写 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
 目标：用 MCP 工具 + python 脚本**可重复、可验证**地建/改 Cascade 粒子系统，并把成品挂到关卡角色。
 
 > 本文只写**可复用的做法与接口**；不收录具体配方与工具缺陷。
@@ -25,7 +25,7 @@ metadata:
 
 | 用途 | 路径 |
 |---|---|
-| 单个操作 / 需要结构化错误 | MCP 工具（13 个，命令名 = 工具名） |
+| 单个操作 / 需要结构化错误 | MCP 工具（命令名 = 工具名） |
 | 批量建/配（几十次写入） | 脚本内 `unreal.UnrealMCPPythonAPI.execute_mcp_command` **回环**（同步派发，无 TCP、无死锁） |
 | 工具写不进去的属性（结构体/数组） | `unreal.load_object` 拿模块 subobject → `set_editor_property`（见 §3） |
 
@@ -129,7 +129,7 @@ print(bridge("list_particle_emitters", asset_path=PS)["result"]["emitter_count"]
 
 ## 五、把成品挂到关卡角色
 
-**一条命令搞定**（2026-09-13 起）：
+**一条命令搞定**：
 
 ```
 spawn_particle_actor(name="Emitter_Buff", template="/Game/Particles/PS_X",

@@ -13,6 +13,7 @@
 #include "Factories/FbxSkeletalMeshImportData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "UObject/UObjectIterator.h"
 #include "EditorAssetLibrary.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
@@ -74,7 +75,10 @@ void FUnrealMCPAssetEditCommands::RegisterCommands(FMCPCommandRegistry& Registry
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleImportTexture(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "import_skeletal_mesh", "asset_edit",
-        "Import skeletal mesh FBX/OBJ with mesh-specific import options (skeleton binding, physics asset, morph targets).",
+        "Import skeletal mesh FBX/OBJ with mesh-specific import options (skeleton binding, physics asset, morph targets). "
+        "A replace_existing import keeps the mesh's existing physics_asset by default (the importer writes None) and reports "
+        "physics_asset_restored; pass clear_physics_asset=true to actually leave it empty. The reply's equivalence object "
+        "lists slot/material drift (slots_added / slots_removed / slots_renamed / materials_lost / materials_changed).",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("paths"), TEXT("array"), TEXT("Non-empty array of absolute source file paths (fbx/obj)")),
             MCPParam(TEXT("destination_path"), TEXT("string"), TEXT("Content path starting with '/' to import into")),
@@ -83,6 +87,7 @@ void FUnrealMCPAssetEditCommands::RegisterCommands(FMCPCommandRegistry& Registry
             MCPParamOpt(TEXT("skeleton_path"), TEXT("string"), TEXT("Bind to this Skeleton; omit to create a new one")),
             MCPParamOpt(TEXT("create_physics_asset"), TEXT("bool"), TEXT("Create a PhysicsAsset; unset = leave the importer default")),
             MCPParamOpt(TEXT("physics_asset"), TEXT("string"), TEXT("Bind this PhysicsAsset (implies create_physics_asset=false)")),
+            MCPParamOpt(TEXT("clear_physics_asset"), TEXT("bool"), TEXT("Leave the replaced mesh with no PhysicsAsset (default false: the existing one is preserved)")),
             MCPParamOpt(TEXT("import_morph_targets"), TEXT("bool"), TEXT("Import blend shapes as morph targets; default true")),
         }), MCPFlags(false, false, false),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleImportSkeletalMesh(Params); });
@@ -427,6 +432,370 @@ TSharedPtr<FJsonObject> MakeImportFailure(const FString& SourcePath, const FStri
     Entry->SetStringField(TEXT("error"), Error);
     return Entry;
 }
+
+// ---------------------------------------------------------------------------
+// 替换导入的等价性护栏（2026-10-02）
+//
+// 覆盖导入只要"导入器成功"就回 imported: true —— 尺度/包围盒/槽位/morph/骨架是否还是原来那个东西，
+// 回包一律不说。实测过一次 global_scale 被重复折算成 0.01：整个模型缩成 1/100，回包照样
+// imported: true / skeleton_mismatch: false，是事后另写脚本读 mesh.get_bounds() 才发现的。
+// 这里把替换前后各读一次快照，把"导入成功但资产已经不对"变成回包里的 warning/error。
+// ---------------------------------------------------------------------------
+
+/** 快照字段与 inspect_skeletal_mesh 同口径（height_cm = BoxExtent.Z * 2，单位 cm）。 */
+TSharedPtr<FJsonObject> SnapshotSkeletalMesh(const USkeletalMesh* Mesh)
+{
+    if (!Mesh)
+    {
+        return nullptr;
+    }
+
+    auto VectorToJson = [](const FVector& Value)
+    {
+        TArray<TSharedPtr<FJsonValue>> Items;
+        Items.Add(MakeShareable(new FJsonValueNumber(Value.X)));
+        Items.Add(MakeShareable(new FJsonValueNumber(Value.Y)));
+        Items.Add(MakeShareable(new FJsonValueNumber(Value.Z)));
+        return Items;
+    };
+
+    const FBoxSphereBounds Bounds = Mesh->GetBounds();
+
+    TArray<TSharedPtr<FJsonValue>> SlotNamesJson;
+    TArray<TSharedPtr<FJsonValue>> SlotMaterialsJson;
+    for (const FSkeletalMaterial& Slot : Mesh->GetMaterials())
+    {
+        SlotNamesJson.Add(MakeShared<FJsonValueString>(
+            Slot.MaterialSlotName.IsNone() ? FString(TEXT("<unnamed>")) : Slot.MaterialSlotName.ToString()));
+        // Slot name alone cannot show "the material was lost": a re-import that cannot line the slot
+        // names up drops the MI on the slot and keeps the name. The interface path is what makes that
+        // visible in the equivalence report.
+        SlotMaterialsJson.Add(MakeShared<FJsonValueString>(
+            Slot.MaterialInterface ? Slot.MaterialInterface->GetPathName() : FString(TEXT(""))));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> MorphNamesJson;
+    for (const FString& MorphName : Mesh->K2_GetAllMorphTargetNames())
+    {
+        MorphNamesJson.Add(MakeShared<FJsonValueString>(MorphName));
+    }
+
+    TSharedPtr<FJsonObject> Snapshot = MakeShareable(new FJsonObject);
+    Snapshot->SetNumberField(TEXT("height_cm"),
+        FMath::RoundToDouble(static_cast<double>(Bounds.BoxExtent.Z) * 2.0 * 100.0) / 100.0);
+    Snapshot->SetArrayField(TEXT("bounds_origin"), VectorToJson(Bounds.Origin));
+    Snapshot->SetArrayField(TEXT("bounds_extent"), VectorToJson(Bounds.BoxExtent));
+    Snapshot->SetNumberField(TEXT("sphere_radius"), Bounds.SphereRadius);
+    Snapshot->SetNumberField(TEXT("slot_count"), Mesh->GetMaterials().Num());
+    Snapshot->SetArrayField(TEXT("slot_names"), SlotNamesJson);
+    Snapshot->SetArrayField(TEXT("slot_materials"), SlotMaterialsJson);
+    Snapshot->SetNumberField(TEXT("morph_count"), MorphNamesJson.Num());
+    Snapshot->SetArrayField(TEXT("morph_names"), MorphNamesJson);
+    Snapshot->SetStringField(TEXT("skeleton_path"),
+        Mesh->GetSkeleton() ? Mesh->GetSkeleton()->GetPathName() : FString(TEXT("")));
+    Snapshot->SetStringField(TEXT("physics_asset_path"),
+        Mesh->GetPhysicsAsset() ? Mesh->GetPhysicsAsset()->GetPathName() : FString(TEXT("")));
+    return Snapshot;
+}
+
+void AddEquivalenceWarning(TArray<TSharedPtr<FJsonValue>>& Warnings, const TCHAR* Code,
+                           const FString& Detail, const TCHAR* Severity)
+{
+    TSharedPtr<FJsonObject> Warning = MakeShared<FJsonObject>();
+    Warning->SetStringField(TEXT("code"), Code);
+    Warning->SetStringField(TEXT("detail"), Detail);
+    Warning->SetStringField(TEXT("severity"), Severity);
+    Warnings.Add(MakeShared<FJsonValueObject>(Warning));
+}
+
+/** 比值；基线为 0 时无意义，返回 0 表示"不可比对"。 */
+double SafeRatio(double After, double Before)
+{
+    return FMath::IsNearlyZero(Before) ? 0.0 : After / Before;
+}
+
+/** 尺度判据：偏离 1 超过 5% = warning，量级错误（<1/50 或 >50 倍）= error（单位重复折算的形态）。 */
+void AddScaleWarnings(TArray<TSharedPtr<FJsonValue>>& Warnings, const TCHAR* Label,
+                      double Ratio, const TCHAR* WarningCode)
+{
+    if (Ratio <= 0.0)
+    {
+        return;
+    }
+
+    if (Ratio < 0.02 || Ratio > 50.0)
+    {
+        AddEquivalenceWarning(Warnings, TEXT("bounds_scale_mismatch"),
+            FString::Printf(TEXT("%s ratio %.4f: the replacement is a different order of magnitude, which is the "
+                                 "signature of a unit conversion applied twice"), Label, Ratio),
+            TEXT("error"));
+        return;
+    }
+
+    if (FMath::Abs(Ratio - 1.0) > 0.05)
+    {
+        AddEquivalenceWarning(Warnings, WarningCode,
+            FString::Printf(TEXT("%s ratio %.4f"), Label, Ratio), TEXT("warning"));
+    }
+}
+
+/** 逐项比对两个快照；Before 为空表示首次导入（无基线，不产出矛盾报告）。 */
+TSharedPtr<FJsonObject> BuildMeshEquivalence(const TSharedPtr<FJsonObject>& Before,
+                                             const USkeletalMesh* AfterMesh,
+                                             bool bBeforeUnavailable)
+{
+    TSharedPtr<FJsonObject> Equivalence = MakeShareable(new FJsonObject);
+    Equivalence->SetObjectField(TEXT("before"), Before);
+
+    const TSharedPtr<FJsonObject> After = SnapshotSkeletalMesh(AfterMesh);
+    Equivalence->SetObjectField(TEXT("after"), After);
+
+    TArray<TSharedPtr<FJsonValue>> Warnings;
+
+    if (bBeforeUnavailable)
+    {
+        AddEquivalenceWarning(Warnings, TEXT("before_unavailable"),
+            TEXT("an asset of the same name existed, but it could not be read before the import (a play session "
+                 "refuses some asset types), so no equivalence baseline exists for this replacement"),
+            TEXT("warning"));
+    }
+
+    if (!Before.IsValid() || !After.IsValid())
+    {
+        // 无基线：只回读数，不报矛盾（否则首次导入会被当成"槽位全变了"）。
+        Equivalence->SetBoolField(TEXT("skeleton_same"), true);
+        Equivalence->SetBoolField(TEXT("physics_asset_same"), true);
+        Equivalence->SetBoolField(TEXT("slots_same"), true);
+        Equivalence->SetBoolField(TEXT("morphs_same"), true);
+        Equivalence->SetObjectField(TEXT("bounds_delta"), MakeShareable(new FJsonObject));
+        // Drift fields keep the same shape on the no-baseline path (empty, never absent): a caller can
+        // read them without a field-existence check, and "no baseline" is not "no drift".
+        Equivalence->SetArrayField(TEXT("slots_added"), TArray<TSharedPtr<FJsonValue>>());
+        Equivalence->SetArrayField(TEXT("slots_removed"), TArray<TSharedPtr<FJsonValue>>());
+        Equivalence->SetArrayField(TEXT("slots_renamed"), TArray<TSharedPtr<FJsonValue>>());
+        Equivalence->SetArrayField(TEXT("materials_lost"), TArray<TSharedPtr<FJsonValue>>());
+        Equivalence->SetArrayField(TEXT("materials_changed"), TArray<TSharedPtr<FJsonValue>>());
+        Equivalence->SetArrayField(TEXT("warnings"), Warnings);
+        return Equivalence;
+    }
+
+    auto GetNumber = [](const TSharedPtr<FJsonObject>& Object, const TCHAR* Field) -> double
+    {
+        double Value = 0.0;
+        if (Object.IsValid())
+        {
+            Object->TryGetNumberField(Field, Value);
+        }
+        return Value;
+    };
+
+    auto GetNames = [](const TSharedPtr<FJsonObject>& Object, const TCHAR* Field)
+    {
+        TArray<FString> Names;
+        const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+        if (Object.IsValid() && Object->TryGetArrayField(Field, Values) && Values)
+        {
+            for (const TSharedPtr<FJsonValue>& Value : *Values)
+            {
+                if (Value.IsValid())
+                {
+                    Names.Add(Value->AsString());
+                }
+            }
+        }
+        return Names;
+    };
+
+    auto GetString = [](const TSharedPtr<FJsonObject>& Object, const TCHAR* Field)
+    {
+        FString Value;
+        if (Object.IsValid())
+        {
+            Object->TryGetStringField(Field, Value);
+        }
+        return Value;
+    };
+
+    // --- 尺度 -----------------------------------------------------------------
+    const double HeightRatio = SafeRatio(GetNumber(After, TEXT("height_cm")), GetNumber(Before, TEXT("height_cm")));
+    const double RadiusRatio = SafeRatio(GetNumber(After, TEXT("sphere_radius")), GetNumber(Before, TEXT("sphere_radius")));
+
+    TArray<TSharedPtr<FJsonValue>> ExtentAfter = After->GetArrayField(TEXT("bounds_extent"));
+    TArray<TSharedPtr<FJsonValue>> ExtentBefore = Before->GetArrayField(TEXT("bounds_extent"));
+    double ExtentRatio = 0.0;
+    if (ExtentAfter.Num() == 3 && ExtentBefore.Num() == 3)
+    {
+        const double AfterSize = FMath::Sqrt(FMath::Square(ExtentAfter[0]->AsNumber())
+            + FMath::Square(ExtentAfter[1]->AsNumber()) + FMath::Square(ExtentAfter[2]->AsNumber()));
+        const double BeforeSize = FMath::Sqrt(FMath::Square(ExtentBefore[0]->AsNumber())
+            + FMath::Square(ExtentBefore[1]->AsNumber()) + FMath::Square(ExtentBefore[2]->AsNumber()));
+        ExtentRatio = SafeRatio(AfterSize, BeforeSize);
+    }
+
+    TSharedPtr<FJsonObject> Delta = MakeShareable(new FJsonObject);
+    Delta->SetNumberField(TEXT("extent_ratio"), ExtentRatio);
+    Delta->SetNumberField(TEXT("sphere_radius_ratio"), RadiusRatio);
+    Delta->SetNumberField(TEXT("height_ratio"), HeightRatio);
+    Equivalence->SetObjectField(TEXT("bounds_delta"), Delta);
+
+    AddScaleWarnings(Warnings, TEXT("sphere_radius"), RadiusRatio, TEXT("bounds_scale_mismatch"));
+    AddScaleWarnings(Warnings, TEXT("height"), HeightRatio, TEXT("height_ratio_offset"));
+
+    // --- 骨架 / PhysicsAsset ---------------------------------------------------
+    const FString SkeletonBefore = GetString(Before, TEXT("skeleton_path"));
+    const FString SkeletonAfter = GetString(After, TEXT("skeleton_path"));
+    const bool bSkeletonSame = SkeletonBefore == SkeletonAfter;
+    Equivalence->SetBoolField(TEXT("skeleton_same"), bSkeletonSame);
+    if (!bSkeletonSame)
+    {
+        AddEquivalenceWarning(Warnings, TEXT("skeleton_changed"),
+            FString::Printf(TEXT("'%s' -> '%s'"), *SkeletonBefore, *SkeletonAfter), TEXT("warning"));
+    }
+
+    const FString PhysicsBefore = GetString(Before, TEXT("physics_asset_path"));
+    const FString PhysicsAfter = GetString(After, TEXT("physics_asset_path"));
+    const bool bPhysicsSame = PhysicsBefore == PhysicsAfter;
+    Equivalence->SetBoolField(TEXT("physics_asset_same"), bPhysicsSame);
+    if (!bPhysicsSame)
+    {
+        AddEquivalenceWarning(Warnings, TEXT("physics_asset_changed"),
+            FString::Printf(TEXT("'%s' -> '%s'"), *PhysicsBefore, *PhysicsAfter), TEXT("warning"));
+    }
+
+    // --- 材质槽 ---------------------------------------------------------------
+    const TArray<FString> SlotsBefore = GetNames(Before, TEXT("slot_names"));
+    const TArray<FString> SlotsAfter = GetNames(After, TEXT("slot_names"));
+    const bool bSlotsSame = SlotsBefore == SlotsAfter;
+    Equivalence->SetBoolField(TEXT("slots_same"), bSlotsSame);
+    if (!bSlotsSame)
+    {
+        TArray<FString> Added = SlotsAfter.FilterByPredicate(
+            [&SlotsBefore](const FString& Name) { return !SlotsBefore.Contains(Name); });
+        TArray<FString> Removed = SlotsBefore.FilterByPredicate(
+            [&SlotsAfter](const FString& Name) { return !SlotsAfter.Contains(Name); });
+        AddEquivalenceWarning(Warnings, TEXT("slots_changed"), FString::Printf(
+            TEXT("%d -> %d slots; added [%s], missing [%s]"),
+            SlotsBefore.Num(), SlotsAfter.Num(),
+            *FString::Join(Added, TEXT(", ")), *FString::Join(Removed, TEXT(", "))), TEXT("warning"));
+    }
+
+    // --- 槽表/材质漂移（只补字段，不改上面的判定）--------------------------------
+    // 反复覆盖导入会往槽表尾部追加槽（实测 49→50→51，出现 腿2_001 / 顏+）；而当材质名带 .00x
+    // 后缀、槽名对不上时，槽还在、MI 却丢了。这两种漂移在 slots_changed 的一句告警里看不出细节，
+    // 所以逐项列出来，调用方不必另写脚本比对。
+    const TArray<FString> SlotMaterialsBefore = GetNames(Before, TEXT("slot_materials"));
+    const TArray<FString> SlotMaterialsAfter = GetNames(After, TEXT("slot_materials"));
+
+    TArray<TSharedPtr<FJsonValue>> SlotsAddedJson;
+    TArray<TSharedPtr<FJsonValue>> SlotsRemovedJson;
+    TArray<TSharedPtr<FJsonValue>> SlotsRenamedJson;
+    TArray<TSharedPtr<FJsonValue>> MaterialsLostJson;
+    TArray<TSharedPtr<FJsonValue>> MaterialsChangedJson;
+
+    for (const FString& SlotName : SlotsAfter)
+    {
+        if (!SlotsBefore.Contains(SlotName))
+        {
+            SlotsAddedJson.Add(MakeShared<FJsonValueString>(SlotName));
+        }
+    }
+
+    for (int32 Index = 0; Index < SlotsBefore.Num(); ++Index)
+    {
+        const FString& SlotName = SlotsBefore[Index];
+        const int32 AfterIndex = SlotsAfter.IndexOfByKey(SlotName);
+        if (AfterIndex == INDEX_NONE)
+        {
+            SlotsRemovedJson.Add(MakeShared<FJsonValueString>(SlotName));
+            continue;
+        }
+
+        const FString BeforeMaterial = SlotMaterialsBefore.IsValidIndex(Index) ? SlotMaterialsBefore[Index] : FString();
+        const FString AfterMaterial = SlotMaterialsAfter.IsValidIndex(AfterIndex) ? SlotMaterialsAfter[AfterIndex] : FString();
+        if (BeforeMaterial.IsEmpty() || AfterMaterial == BeforeMaterial)
+        {
+            continue;
+        }
+
+        if (AfterMaterial.IsEmpty())
+        {
+            MaterialsLostJson.Add(MakeShared<FJsonValueString>(SlotName));
+        }
+        else
+        {
+            TSharedPtr<FJsonObject> Changed = MakeShared<FJsonObject>();
+            Changed->SetStringField(TEXT("slot"), SlotName);
+            Changed->SetStringField(TEXT("before"), BeforeMaterial);
+            Changed->SetStringField(TEXT("after"), AfterMaterial);
+            MaterialsChangedJson.Add(MakeShared<FJsonValueObject>(Changed));
+        }
+    }
+
+    // 槽名漂移：同一个材质接口在两份快照里占着不同的槽名（`.00x` 后缀的典型形态）。
+    for (int32 Index = 0; Index < SlotMaterialsBefore.Num(); ++Index)
+    {
+        const FString& Material = SlotMaterialsBefore[Index];
+        if (Material.IsEmpty())
+        {
+            continue;
+        }
+
+        const int32 AfterIndex = SlotMaterialsAfter.IndexOfByKey(Material);
+        if (AfterIndex == INDEX_NONE)
+        {
+            continue;
+        }
+
+        const FString BeforeSlot = SlotsBefore.IsValidIndex(Index) ? SlotsBefore[Index] : FString();
+        const FString AfterSlot = SlotsAfter.IsValidIndex(AfterIndex) ? SlotsAfter[AfterIndex] : FString();
+        if (BeforeSlot.IsEmpty() || AfterSlot.IsEmpty() || BeforeSlot == AfterSlot)
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> Renamed = MakeShared<FJsonObject>();
+        Renamed->SetStringField(TEXT("from"), BeforeSlot);
+        Renamed->SetStringField(TEXT("to"), AfterSlot);
+        Renamed->SetStringField(TEXT("material"), Material);
+        SlotsRenamedJson.Add(MakeShared<FJsonValueObject>(Renamed));
+    }
+
+    Equivalence->SetArrayField(TEXT("slots_added"), SlotsAddedJson);
+    Equivalence->SetArrayField(TEXT("slots_removed"), SlotsRemovedJson);
+    Equivalence->SetArrayField(TEXT("slots_renamed"), SlotsRenamedJson);
+    Equivalence->SetArrayField(TEXT("materials_lost"), MaterialsLostJson);
+    Equivalence->SetArrayField(TEXT("materials_changed"), MaterialsChangedJson);
+
+    if (MaterialsLostJson.Num() > 0)
+    {
+        TArray<FString> LostNames;
+        for (const TSharedPtr<FJsonValue>& Value : MaterialsLostJson)
+        {
+            LostNames.Add(Value->AsString());
+        }
+        AddEquivalenceWarning(Warnings, TEXT("materials_lost"), FString::Printf(
+            TEXT("%d slot(s) lost their material interface: [%s] - the slot survived the import, the MI did not"),
+            MaterialsLostJson.Num(), *FString::Join(LostNames, TEXT(", "))), TEXT("warning"));
+    }
+
+    // --- morph ---------------------------------------------------------------
+    const TArray<FString> MorphsBefore = GetNames(Before, TEXT("morph_names"));
+    const TArray<FString> MorphsAfter = GetNames(After, TEXT("morph_names"));
+    const bool bMorphsSame = MorphsBefore == MorphsAfter;
+    Equivalence->SetBoolField(TEXT("morphs_same"), bMorphsSame);
+    if (!bMorphsSame)
+    {
+        TArray<FString> Lost = MorphsBefore.FilterByPredicate(
+            [&MorphsAfter](const FString& Name) { return !MorphsAfter.Contains(Name); });
+        AddEquivalenceWarning(Warnings, TEXT("morphs_lost"), FString::Printf(
+            TEXT("%d -> %d morph targets; missing [%s]"),
+            MorphsBefore.Num(), MorphsAfter.Num(), *FString::Join(Lost, TEXT(", "))),
+            TEXT("warning"));
+    }
+
+    Equivalence->SetArrayField(TEXT("warnings"), Warnings);
+    return Equivalence;
+}
 } // namespace
 
 /**
@@ -443,6 +812,8 @@ struct FMCPImportRequest
     bool bForceLegacy = true;
     bool bReplaceExisting = false;
     bool bInspectMaterials = false;
+    /** 类型层：`clear_physics_asset=true` 时允许覆盖导入把网格的 physics_asset 留空（默认回填原值）。 */
+    bool bClearPhysicsAsset = false;
     /** texture / skeletal_mesh / animation；空串 = 未分类（`import_assets`）。 */
     FString AssetType;
     /** 非空时只接受这些扩展名（小写、不含点）；不符的文件项逐项失败，不顺延到别的导入器。 */
@@ -536,6 +907,7 @@ static TSharedPtr<FJsonObject> RunImportRequest(const FMCPImportRequest& Request
     const bool bForceLegacy = Request.bForceLegacy;
     const bool bReplaceExisting = Request.bReplaceExisting;
     const bool bInspectMaterials = Request.bInspectMaterials;
+    const bool bClearPhysicsAsset = Request.bClearPhysicsAsset;
 
     if (SourcePaths.Num() == 0)
     {
@@ -695,39 +1067,137 @@ static TSharedPtr<FJsonObject> RunImportRequest(const FMCPImportRequest& Request
     // <目标目录>/<基名> 已存在时 —— 那是上面的规划检查已经拦下的情形；而对 316 骨模型探测一次
     // 就是 2 倍导入耗时（实测 65s/次）。真正剩下的假成功风险由下面的"判定"段兜住。
 
-    // 目标目录注册表快照（纯只读查询，不触发 load）。companion 的发现依据必须是"导入前/后快照的
+    // 目标目录资产快照（纯只读查询，不触发 load）。companion 的发现依据必须是"导入前/后快照的
     // 差集" —— 不能只看 task 的 GetObjects()（legacy FBX 只把主网格放进去，Skeleton / PhysicsAsset /
     // 自动材质由工厂另行产出），也不能看"该目录现在有什么"（那会把覆盖导入沿用的既有 Skeleton /
     // PhysicsAsset、以及目录里预先存在的无关资产算成本次产物，并诱发对它们的重复保存）。
     // 非递归：legacy 导入器的 companion 都落在目标目录本身，不必扫子树，也避免把子目录里别人的
     // 资产卷进差集。
-    auto SnapshotDestinationAssets = [&DestinationPath]() -> TMap<FString, FAssetData>
+    //
+    // 两个来源，MUST NOT 用"含内存资产"的注册表枚举（`bIncludeOnlyOnDiskAssets=false`）：那条路
+    // 会让引擎对内存里的**每个**对象回调 `GetAssetRegistryTags()`（AssetRegistry.cpp:2838 的
+    // EnumerateMemoryAssets，同文件 2906 行自述"这些调用多数还不是线程安全的"），目标目录里任何
+    // 畸形资产（实测：某份 FBX 重导后留下的网格，面/morph 缺失）都会把整条导入命令拖进引擎断言
+    // —— `Assertion failed: (Index >= 0) & (Index < ArrayNum)` / `Array index out of bounds: <负值>
+    // into an array of size 0`，且此后每次导入都在同一处再崩。所以：
+    //   ① 磁盘半边：bIncludeOnlyOnDiskAssets=true，只读注册表缓存；
+    //   ② 内存半边：扫对象表取"注册表磁盘侧还不知道的"内存资产 —— 导入工厂刚产出的 companion 正
+    //      落在其中（可能尚未写盘）。判据沿用引擎的 `UObject::IsAsset()`（非瞬态、非 CDO、outer 是
+    //      UPackage），与注册表口径一致。
+    struct FDestinationAsset
     {
+        FString ObjectPath;
+        FString ClassName;
+        UObject* Asset = nullptr;
+    };
+
+    auto SnapshotDestinationAssets = [&DestinationPath]() -> TMap<FString, FDestinationAsset>
+    {
+        TMap<FString, FDestinationAsset> Snapshot;
+
+        IAssetRegistry& Registry = IAssetRegistry::GetChecked();
+
         TArray<FAssetData> AssetList;
-        IAssetRegistry::GetChecked().GetAssetsByPath(FName(*DestinationPath), AssetList,
-            /*bRecursive=*/false, /*bIncludeOnlyOnDiskAssets=*/false);
-        TMap<FString, FAssetData> Snapshot;
+        Registry.GetAssetsByPath(FName(*DestinationPath), AssetList,
+            /*bRecursive=*/false, /*bIncludeOnlyOnDiskAssets=*/true);
         for (const FAssetData& Data : AssetList)
         {
-            Snapshot.Add(Data.GetObjectPathString(), Data);
+            FDestinationAsset Item;
+            Item.ObjectPath = Data.GetObjectPathString();
+            Item.ClassName = Data.AssetClassPath.GetAssetName().ToString();
+            Item.Asset = Data.GetAsset();
+            Snapshot.Add(Item.ObjectPath, Item);
+        }
+
+        const FString PathPrefix = DestinationPath + TEXT("/");
+        for (TObjectIterator<UObject> ObjectIt; ObjectIt; ++ObjectIt)
+        {
+            UObject* Object = *ObjectIt;
+            if (!Object || !Object->IsAsset() || !Object->GetOuter())
+            {
+                continue;
+            }
+
+            const UPackage* Package = Cast<UPackage>(Object->GetOuter());
+            if (!Package || Package->HasAnyFlags(RF_Transient))
+            {
+                continue;
+            }
+
+            // 非递归：包名必须正好是目标目录的直接子级。
+            const FString PackageName = Package->GetName();
+            if (!PackageName.StartsWith(PathPrefix))
+            {
+                continue;
+            }
+            const FString RelativeName = PackageName.RightChop(PathPrefix.Len());
+            if (RelativeName.IsEmpty() || RelativeName.Contains(TEXT("/")))
+            {
+                continue;
+            }
+
+            const FString ObjectPath = Object->GetPathName();
+            if (Snapshot.Contains(ObjectPath))
+            {
+                continue;
+            }
+
+            // 盘上已登记的不再重复收（那一半已经拿到 FAssetData）；只有注册表磁盘侧不认识的
+            // 内存资产才算"内存半边"，这样它与磁盘半边的语义严格互补。
+            if (Registry.GetAssetByObjectPath(FSoftObjectPath(ObjectPath), /*bIncludeOnlyOnDiskAssets=*/true).IsValid())
+            {
+                continue;
+            }
+
+            FDestinationAsset Item;
+            Item.ObjectPath = ObjectPath;
+            Item.ClassName = Object->GetClass()->GetName();
+            Item.Asset = Object;
+            Snapshot.Add(Item.ObjectPath, Item);
         }
         return Snapshot;
     };
 
     // 4. 正式导入，然后逐文件判定。
     const FDateTime ImportStartUtc = FDateTime::UtcNow();
-    const TMap<FString, FAssetData> BeforeAssets = SnapshotDestinationAssets();
+
+    // 等价性基线必须在**导入把资产换掉之前**取：导入跑完就只剩新数据了（这就是当初"缩小 100 倍"
+    // 只能靠事后另写脚本读 bounds 才发现的原因）。只对"覆盖导入的骨骼网格"取基线。
+    TMap<FString, TSharedPtr<FJsonObject>> BeforeMeshSnapshots;
+    TSet<FString> BeforeSnapshotUnavailable;
+    if (bReplaceExisting)
+    {
+        for (const FPlannedImport& Plan : Planned)
+        {
+            if (!Plan.Task || Plan.AssetPath.IsEmpty() || !UEditorAssetLibrary::DoesAssetExist(Plan.AssetPath))
+            {
+                continue;
+            }
+
+            if (const USkeletalMesh* Existing = Cast<USkeletalMesh>(UEditorAssetLibrary::LoadAsset(Plan.AssetPath)))
+            {
+                BeforeMeshSnapshots.Add(Plan.AssetPath, SnapshotSkeletalMesh(Existing));
+            }
+            else
+            {
+                // 同名资产在盘上，却读不出来（PIE 会拒某些类型）：记下来当 warning，不阻断导入。
+                BeforeSnapshotUnavailable.Add(Plan.AssetPath);
+            }
+        }
+    }
+
+    const TMap<FString, FDestinationAsset> BeforeAssets = SnapshotDestinationAssets();
     if (ImportTasks.Num() > 0)
     {
         AssetTools.ImportAssetTasks(ImportTasks);
     }
-    // 实测：导入刚结束、companion 还没写盘时，注册表里已经含全部条目 —— 差集在这里取得到。
-    const TMap<FString, FAssetData> AfterAssets = SnapshotDestinationAssets();
+    // 实测：导入刚结束、companion 还没写盘时，内存半边已经含全部条目 —— 差集在这里取得到。
+    const TMap<FString, FDestinationAsset> AfterAssets = SnapshotDestinationAssets();
 
-    // 本次导入在目标目录新增的注册表条目（After \ Before）。主网格等 task 产物也在其中，
+    // 本次导入在目标目录新增的资产（After \ Before）。主网格等 task 产物也在其中，
     // 稍后按 created_assets 剔除，剩下的就是 companion（design D1）。
-    TArray<FAssetData> NewRegistryAssets;
-    for (const TPair<FString, FAssetData>& Pair : AfterAssets)
+    TArray<FDestinationAsset> NewRegistryAssets;
+    for (const TPair<FString, FDestinationAsset>& Pair : AfterAssets)
     {
         if (!BeforeAssets.Contains(Pair.Key))
         {
@@ -834,6 +1304,57 @@ static TSharedPtr<FJsonObject> RunImportRequest(const FMCPImportRequest& Request
                                 TEXT("覆盖导入只更新网格，Skeleton/PhysicsAsset 沿用首次导入的数据（%s）。要真正换骨架需先清理 mesh+skeleton+physics 再导。"),
                                 *MismatchDetail));
                         }
+
+                        // 尺度/包围盒/槽位/morph 的前后快照与逐项判定：把"导入成功但资产已经不对"
+                        // 变成回包里的 warning/error，而不是留给调用方另外写脚本去发现。
+                        TSharedPtr<FJsonObject> BeforeSnapshot;
+                        if (const TSharedPtr<FJsonObject>* Found = BeforeMeshSnapshots.Find(Plan.AssetPath))
+                        {
+                            BeforeSnapshot = *Found;
+                        }
+                        Entry->SetObjectField(TEXT("equivalence"), BuildMeshEquivalence(
+                            BeforeSnapshot, ImportedMesh, BeforeSnapshotUnavailable.Contains(Plan.AssetPath)));
+
+                        // 覆盖导入 MUST 保住既有的 physics_asset：导入器重建网格时会把该引用写成
+                        // None（实测：create_physics_asset=false + replace_existing=true 之后
+                        // mesh.physics_asset 从 FeiYing_UE_PhysicsAsset 变成 None），而"别新建一个"
+                        // 并不等于"把原来那个清掉"。导入前快照里本来就有原值，直接回填；真要清空得
+                        // 显式传 clear_physics_asset=true。回填发生在下面的逐产物存盘之前，所以能落盘。
+                        if (USkeletalMesh* MeshToKeep = Cast<USkeletalMesh>(Primary))
+                        {
+                            TSharedPtr<FJsonObject> PhysicsBefore;
+                            if (const TSharedPtr<FJsonObject>* FoundSnapshot = BeforeMeshSnapshots.Find(Plan.AssetPath))
+                            {
+                                PhysicsBefore = *FoundSnapshot;
+                            }
+                            FString BeforePhysicsPath;
+                            if (PhysicsBefore.IsValid())
+                            {
+                                PhysicsBefore->TryGetStringField(TEXT("physics_asset_path"), BeforePhysicsPath);
+                            }
+
+                            if (bClearPhysicsAsset)
+                            {
+                                if (MeshToKeep->GetPhysicsAsset())
+                                {
+                                    MeshToKeep->Modify();
+                                    MeshToKeep->SetPhysicsAsset(nullptr);
+                                }
+                                TArray<TSharedPtr<FJsonValue>> ClearedJson;
+                                ClearedJson.Add(MakeShared<FJsonValueString>(TEXT("physics_asset")));
+                                Entry->SetArrayField(TEXT("cleared"), ClearedJson);
+                            }
+                            else if (!MeshToKeep->GetPhysicsAsset() && !BeforePhysicsPath.IsEmpty())
+                            {
+                                if (UPhysicsAsset* PreviousPhysics =
+                                    Cast<UPhysicsAsset>(FUnrealMCPCommonUtils::FindAsset(BeforePhysicsPath)))
+                                {
+                                    MeshToKeep->Modify();
+                                    MeshToKeep->SetPhysicsAsset(PreviousPhysics);
+                                    Entry->SetStringField(TEXT("physics_asset_restored"), BeforePhysicsPath);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -920,19 +1441,19 @@ static TSharedPtr<FJsonObject> RunImportRequest(const FMCPImportRequest& Request
     };
 
     TArray<FCompanion> Companions;
-    for (const FAssetData& Data : NewRegistryAssets)
+    for (const FDestinationAsset& Data : NewRegistryAssets)
     {
-        const FString ObjectPath = Data.GetObjectPathString();
+        const FString ObjectPath = Data.ObjectPath;
         if (AllCreatedPaths.Contains(ObjectPath))
         {
             continue;
         }
         FCompanion Item;
         Item.AssetPath = ObjectPath;
-        Item.ClassName = Data.AssetClassPath.GetAssetName().ToString();
-        // 快照不 load；落到这里的 companion 需要在存盘时拿到 UObject，此处按需解析（本就是刚导入的
-        // 内存态资产，解析不产生额外导入）。
-        Item.Asset = Data.GetAsset();
+        Item.ClassName = Data.ClassName;
+        // 快照不 load；落到这里的 companion 需要在存盘时拿到 UObject，此处用快照里已有的对象
+        // （磁盘半边来自注册表缓存、内存半边来自对象表，两边都是刚导入的内存态资产）。
+        Item.Asset = Data.Asset;
         Companions.Add(Item);
     }
 
@@ -1312,6 +1833,23 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetEditCommands::HandleImportSkeletalMesh(co
     if (Params->TryGetBoolField(TEXT("create_physics_asset"), bCreatePhysicsAsset))
     {
         Options.bCreatePhysicsAsset = bCreatePhysicsAsset;
+    }
+    bool bClearPhysicsAsset = false;
+    if (Params->TryGetBoolField(TEXT("clear_physics_asset"), bClearPhysicsAsset) && bClearPhysicsAsset)
+    {
+        if (!Options.PhysicsAssetPath.IsEmpty())
+        {
+            // 两个参数互相矛盾：一个说"绑这个物理资产"，一个说"留空"。结构化拒绝而不是悄悄选一个。
+            TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("conflicting_params"),
+                TEXT("'clear_physics_asset=true' and 'physics_asset' cannot be combined: one asks for an empty "
+                     "PhysicsAsset, the other binds a specific one"));
+            Error->SetNumberField(TEXT("imported_count"), 0);
+            return Error;
+        }
+
+        // "clear" 比"create_physics_asset=false"更强：既不让导入器产出物理资产，也不回填旧值。
+        Request.bClearPhysicsAsset = true;
+        Options.bCreatePhysicsAsset = false;
     }
 
     Request.ConfigureTask = [Options](UAssetImportTask* Task, const FString& SourcePath)

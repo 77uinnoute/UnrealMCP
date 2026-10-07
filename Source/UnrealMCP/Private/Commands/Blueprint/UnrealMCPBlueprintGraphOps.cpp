@@ -1448,53 +1448,27 @@ bool FUnrealMCPBlueprintGraphOps::ResolveClass(const FString& ClassName, UClass*
         return false;
     }
 
-    if (ClassName.StartsWith(TEXT("/")))
+    // One resolver for the whole plugin: full path first, then the global short-name lookup. The old
+    // body spelled the short-name lookup as FindObject<UClass>(ANY_PACKAGE, ...), which on 5.7 is a
+    // null outer - and a null outer only matches TOP-LEVEL packages (UObjectHash.cpp:1118), so no class
+    // ever resolved and the module whitelist below was papering over the failure. FindFirstObject
+    // (UObjectHash.cpp:1226) hashes on the object name alone, so it searches every package.
+    TArray<FString> TriedForms;
+    FString ResolvedPath;
+    OutClass = FUnrealMCPCommonUtils::ResolveUClass(ClassName, TriedForms, ResolvedPath);
+
+    // A caller who writes the C++ spelling of a class ("UK2Node_Event") names an object that does not
+    // exist: the UClass object itself carries no prefix. ResolveUClass adds the "U"/"A" spellings but
+    // never strips one, so that form is retried here.
+    if (!OutClass && ClassName.Len() > 1 &&
+        (ClassName.StartsWith(TEXT("U")) || ClassName.StartsWith(TEXT("A"))))
     {
-        OutClass = LoadObject<UClass>(nullptr, *ClassName);
-        if (!OutClass)
-        {
-            OutClass = LoadClass<UObject>(nullptr, *ClassName);
-        }
-        return OutClass != nullptr;
+        OutClass = FUnrealMCPCommonUtils::ResolveUClass(ClassName.RightChop(1), TriedForms, ResolvedPath);
     }
 
-    TArray<FString> NamesToTry;
-    NamesToTry.Add(ClassName);
-    if (ClassName.StartsWith(TEXT("U")) || ClassName.StartsWith(TEXT("A")))
+    if (OutClass)
     {
-        NamesToTry.Add(ClassName.RightChop(1));
-    }
-    NamesToTry.Add(FString(TEXT("U")) + ClassName);
-
-    for (const FString& Candidate : NamesToTry)
-    {
-        if (UClass* Found = FindObject<UClass>(UNREALMCP_ANY_PACKAGE, *Candidate))
-        {
-            OutClass = Found;
-            return true;
-        }
-    }
-
-    static const TArray<FString> CommonModules = {
-        TEXT("Engine"),
-        TEXT("Kismet"),
-        TEXT("UnrealEd"),
-        TEXT("BlueprintGraph"),
-        TEXT("EditorScriptingUtilities"),
-        TEXT("UMG")
-    };
-    for (const FString& ModuleName : CommonModules)
-    {
-        for (const FString& Candidate : NamesToTry)
-        {
-            UClass* Found = LoadObject<UClass>(nullptr,
-                *FString::Printf(TEXT("/Script/%s.%s"), *ModuleName, *Candidate));
-            if (Found)
-            {
-                OutClass = Found;
-                return true;
-            }
-        }
+        return true;
     }
 
     // Report near misses instead of a bare failure.
@@ -2186,7 +2160,7 @@ bool FUnrealMCPBlueprintGraphOps::CreateInputActionNode(UEdGraph* Graph, const F
 bool FUnrealMCPBlueprintGraphOps::ConnectNodes(UEdGraph* Graph, UEdGraphNode* SourceNode, const FString& SourcePinName,
                                                UEdGraphNode* TargetNode, const FString& TargetPinName,
                                                FString& OutErrorCode, FString& OutErrorMessage,
-                                               TArray<FString>& OutCandidates)
+                                               TArray<FString>& OutCandidates, TArray<FDisplacedLink>* OutDisplaced)
 {
     OutErrorCode.Reset();
     OutErrorMessage.Reset();
@@ -2229,6 +2203,26 @@ bool FUnrealMCPBlueprintGraphOps::ConnectNodes(UEdGraph* Graph, UEdGraphNode* So
         return false;
     }
 
+    // Snapshot BOTH pins before connecting. The schema breaks the side that cannot hold two wires
+    // (exec pins answer CONNECT_RESPONSE_BREAK_OTHERS_A), and that side is usually the SOURCE - the
+    // platformer round lost Tick -> Branch when Tick was re-connected to another node, and the receipt
+    // showed nothing because only the target side was ever inspected. See the FDisplacedLink comment.
+    TArray<TPair<UEdGraphPin*, UEdGraphPin*>> LinksBefore;
+    if (OutDisplaced)
+    {
+        OutDisplaced->Reset();
+        for (UEdGraphPin* Pin : {SourcePin, TargetPin})
+        {
+            for (UEdGraphPin* Linked : Pin->LinkedTo)
+            {
+                if (Linked)
+                {
+                    LinksBefore.Emplace(Pin, Linked);
+                }
+            }
+        }
+    }
+
     // NOTE: the schema legitimately breaks the source pin's existing links here (the K2 schema answers
     // CONNECT_RESPONSE_BREAK_OTHERS_A for exec output pins, which may only hold a single connection -
     // branching needs an explicit Sequence node). Do NOT "restore" them: that produces graphs the
@@ -2242,6 +2236,31 @@ bool FUnrealMCPBlueprintGraphOps::ConnectNodes(UEdGraph* Graph, UEdGraphNode* So
             *TargetPin->PinName.ToString(), *DescribePinType(TargetPin),
             *Response.Message.ToString());
         return false;
+    }
+
+    // Whatever was linked before and is not any more was dropped by the schema. Report it rather than
+    // letting the caller discover it later as an unreachable_node.
+    if (OutDisplaced)
+    {
+        for (const TPair<UEdGraphPin*, UEdGraphPin*>& Link : LinksBefore)
+        {
+            UEdGraphPin* OurPin = Link.Key;
+            UEdGraphPin* OtherPin = Link.Value;
+            if (!OurPin || !OtherPin || OurPin->LinkedTo.Contains(OtherPin))
+            {
+                continue;
+            }
+            UEdGraphNode* OurNode = OurPin->GetOwningNode();
+            UEdGraphNode* OtherNode = OtherPin->GetOwningNode();
+            FDisplacedLink Displaced;
+            Displaced.NodeId = OurNode ? OurNode->NodeGuid.ToString() : FString();
+            Displaced.NodeName = OurNode ? OurNode->GetName() : FString();
+            Displaced.PinName = OurPin->PinName.ToString();
+            Displaced.Direction = (OurPin->Direction == EGPD_Output) ? TEXT("output") : TEXT("input");
+            Displaced.LostNodeId = OtherNode ? OtherNode->NodeGuid.ToString() : FString();
+            Displaced.LostPinName = OtherPin->PinName.ToString();
+            OutDisplaced->Add(Displaced);
+        }
     }
 
     // Wildcard pins have to be resolved from the side they were linked to. UEdGraphSchema::
@@ -2288,6 +2307,24 @@ bool FUnrealMCPBlueprintGraphOps::ConnectNodes(UEdGraph* Graph, UEdGraphNode* So
     }
 
     MarkModified(Graph);
+    return true;
+}
+
+bool FUnrealMCPBlueprintGraphOps::TryBuildMultiValuePinHint(const TSharedPtr<FJsonValue>& Value, FString& OutHint)
+{
+    OutHint.Reset();
+
+    // Only a list value explains this failure. Measured: a scalar written to even an Array[Name] pin is
+    // ACCEPTED (it lands in the pin's DefaultValue); a JSON list is refused because the pin holds one value.
+    if (!Value.IsValid() || Value->Type != EJson::Array)
+    {
+        return false;
+    }
+
+    OutHint = TEXT("a pin default holds ONE value and this was a list. To feed several values, put a MakeArray "
+                   "node beside it, connect each element pin to this pin, and write the elements' defaults - the "
+                   "element pins are wildcard until they are connected (writing before that fails with a "
+                   "different error).");
     return true;
 }
 

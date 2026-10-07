@@ -11,7 +11,7 @@ command layer.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
 # Get logger
@@ -64,7 +64,8 @@ def register_python_api_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
 
     @mcp.tool()
-    def python_api_doc(ctx: Context, class_name: str, function: str) -> Dict[str, Any]:
+    def python_api_doc(ctx: Context, class_name: str, function: Optional[str] = None,
+                       function_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Signature and docstring of ONE member of an engine python-exposed class.
 
@@ -74,25 +75,32 @@ def register_python_api_tools(mcp: FastMCP):
         Args:
             class_name: Python class name, e.g. "IKRetargeterController".
             function: Member name, e.g. "set_preview_mesh".
+            function_name: Alias of `function` (the bridge parameter is named `function`); pass
+                either, not both - `function` wins.
 
         Returns:
-            Dict with class_name, function, module, signature, doc.
+            Dict with class_name, function, module, signature, doc. A missing/illegal parameter
+            comes back with an example call to copy.
         """
         from unreal_mcp_server import get_unreal_connection
 
+        member = function or function_name
         try:
-            if not class_name or not function:
+            if not class_name or not member:
                 return {"success": False, "error": "missing_parameter",
-                        "message": "class_name and function are both required"}
+                        "message": "class_name and function are both required "
+                                   "('function_name' is accepted as an alias of 'function')",
+                        "example": 'python_api_doc(class_name="IKRetargeterController", '
+                                   'function="reset_retarget_pose")'}
 
             unreal = get_unreal_connection()
             if not unreal:
                 logger.error("Failed to connect to Unreal Engine")
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-            logger.info(f"python_api_doc: {class_name}.{function}")
+            logger.info(f"python_api_doc: {class_name}.{member}")
             response = unreal.send_command(
-                "python_api_doc", {"class_name": class_name, "function": function})
+                "python_api_doc", {"class_name": class_name, "function": member})
             if not response:
                 logger.error("No response from Unreal Engine")
                 return {"success": False, "message": "No response from Unreal Engine"}

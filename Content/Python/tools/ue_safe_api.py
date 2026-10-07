@@ -115,9 +115,11 @@ def register_ue_safe_api_tools(mcp: FastMCP):
         ctx: Context,
         asset_name: str,
         package_path: str,
-        asset_class_name: str,
+        asset_class: Optional[str] = None,
         factory_name: Optional[str] = None,
-        recreate: bool = False
+        recreate: bool = False,
+        persist: bool = True,
+        asset_class_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create an asset WITHOUT the rename/replace modal dialog.
 
@@ -132,30 +134,107 @@ def register_ue_safe_api_tools(mcp: FastMCP):
         Args:
             asset_name: Asset name, e.g. "M_MyMaterial"
             package_path: Content path, e.g. "/Game/Materials"
-            asset_class_name: unreal class name, e.g. "Material", "MaterialFunction",
+            asset_class: unreal class name, e.g. "Material", "MaterialFunction",
                 "MaterialInstanceConstant", "ParticleSystem", "NiagaraSystem", "SoundCue"
             factory_name: Optional factory class override
                 (default: built-in mapping or "<class>FactoryNew" convention)
             recreate: Delete an existing asset first, then create (default False)
+            persist: Save the new asset's package (default True). The asset is created in memory and
+                marked dirty; without this it never reaches the disk and is silently lost when the
+                editor is killed or the current level is switched. Pass False only when batching
+                creates and flushing them yourself.
+            asset_class_name: Deprecated alias of `asset_class` (same meaning). Using it still works and
+                is reported back in `renamed_params`; give only one of the two.
 
         Returns:
             Dict with status success (result = created asset path) or a structured error
             (asset_exists / delete_pending / unknown_class / no_factory / create_failed)
         """
+        if asset_class and asset_class_name and asset_class != asset_class_name:
+            return {"status": "error", "error": "invalid_params",
+                    "detail": "'asset_class' and its deprecated alias 'asset_class_name' were both given with "
+                              "different values; pass only one of them"}
+        renamed_params = []
+        if not asset_class:
+            asset_class = asset_class_name
+            if asset_class:
+                renamed_params.append({"old": "asset_class_name", "new": "asset_class"})
+        if not asset_class:
+            return {"status": "error", "error": "invalid_params",
+                    "detail": "asset_class is required (the unreal class name, e.g. \"Material\")"}
+
         response = _bridge("create_asset_safe", {
             "asset_name": asset_name,
             "package_path": package_path,
-            "asset_class": asset_class_name,
+            "asset_class": asset_class,
             "factory": factory_name,
             "recreate": bool(recreate),
+            "persist": bool(persist),
         })
         data = _payload(response)
         if data.get("created"):
-            return {"status": "success", "result": data.get("asset_path")}
+            result = {"status": "success", "result": data.get("asset_path")}
+            if renamed_params:
+                result["renamed_params"] = renamed_params
+            return result
         reason = data.get("reason") or str(
             data.get("error_code") or data.get("error") or response.get("error") or "create_failed")
         return {"status": "error", "error": reason.split(":")[0],
                 "detail": data.get("asset_path") or data.get("delete_result")}
+    @mcp.tool()
+    def duplicate_asset_safe(
+        ctx: Context,
+        source_asset: str,
+        asset_name: Optional[str] = None,
+        package_path: Optional[str] = None,
+        overwrite: bool = False,
+        persist: bool = True
+    ) -> Dict[str, Any]:
+        """Copy an asset WITHOUT the IAssetTools::DuplicateAsset path.
+
+        DuplicateAsset runs CanCreateAsset, which fully-loads the destination package - the call
+        that froze the bridge when a name freed by a recent delete was reused. This command creates
+        the package itself and copies with StaticDuplicateObject, then saves. An existing
+        destination returns a structured 'asset_exists' instead of prompting; overwrite=True
+        silently saves and deletes the existing asset first.
+
+        Args:
+            source_asset: Asset to copy, e.g. "/Game/ProceduralWalkTutorial/ImprovedCompletedControlRig"
+            asset_name: New asset name (default "<source>_Copy")
+            package_path: Content directory (default: the source asset's folder)
+            overwrite: Save+delete an existing destination first (default False)
+            persist: Save the copy's package (default True); without it the copy is memory-only
+
+        Returns:
+            Dict with status success (result = new asset path, saved) or a structured error
+            (asset_not_found / asset_exists / blocked_by_referencers / package_file_locked /
+            delete_pending / duplicate_failed).
+
+            Replacing an asset in place only works while nothing holds it: overwrite=True on a
+            referenced or loaded destination comes back with the delete's own `reason` and a
+            `hint`. In-session replacement is not possible in that case - close the editor,
+            overwrite the same-named .uasset on disk, restart - or copy to a new name/folder.
+            The error payload carries delete_result.workarounds with the routes that do work.
+        """
+        response = _bridge("duplicate_asset_safe", {
+            "source_asset": source_asset,
+            "asset_name": asset_name or "",
+            "package_path": package_path or "",
+            "overwrite": bool(overwrite),
+            "persist": bool(persist),
+        })
+        data = _payload(response)
+        if data.get("created"):
+            return {"status": "success", "result": data.get("asset_path"),
+                    "source_asset": data.get("source_asset"),
+                    "saved": data.get("saved", False)}
+        reason = data.get("reason") or str(
+            data.get("error_code") or data.get("error") or response.get("error") or "duplicate_failed")
+        payload = {"status": "error", "error": reason.split(":")[0],
+                   "detail": data.get("asset_path") or data.get("delete_result")}
+        if data.get("hint"):
+            payload["hint"] = data.get("hint")
+        return payload
     @mcp.tool()
     def delete_asset_safe(
         ctx: Context,

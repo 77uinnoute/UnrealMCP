@@ -109,11 +109,12 @@ def register_reflection_tools(mcp: FastMCP):
     @mcp.tool()
     def set_object_property(
         ctx: Context,
-        object_path: str,
+        target: Optional[str] = None,
         property_name: Optional[str] = None,
         property_value: Optional[Any] = None,
         properties: Optional[Dict[str, Any]] = None,
         persist: bool = True,
+        object_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Write properties on any object path, including sub-objects python cannot reach.
@@ -142,7 +143,10 @@ def register_reflection_tools(mcp: FastMCP):
         requested path and the reflected leaf name in `property_path` / `property_name`.
 
         Args:
-            object_path: Asset path, class path/name, or sub-object path to write.
+            target: Asset path, class path/name, or sub-object path to write. Same word as reflect_probe's
+                selector, because these two are used as a pair (probe, then write).
+            object_path: Deprecated alias of `target` (same meaning); using it still works and the response
+                reports it in `renamed_params`. Give only one of the two.
             property_name: Single-property form: property name (snake_case resolves) or a property path.
             property_value: Single-property form: value in the shape reflect_probe reports.
             properties: Batch form: property name or path -> value. Same resolution and shapes as above.
@@ -169,6 +173,10 @@ def register_reflection_tools(mcp: FastMCP):
             logger.error("set_object_property called without a property to write")
             return {"success": False, "error_code": "invalid_params",
                     "error": "Pass 'property_name' + 'property_value', or a non-empty 'properties' object"}
+        if not target and not object_path:
+            logger.error("set_object_property called without an object to write")
+            return {"success": False, "error_code": "invalid_params",
+                    "error": "Pass 'target' (the object to write). Its old name 'object_path' still works."}
         if properties is not None and not isinstance(properties, dict):
             logger.error("set_object_property called with a non-object 'properties'")
             return {"success": False, "error_code": "invalid_params",
@@ -180,7 +188,13 @@ def register_reflection_tools(mcp: FastMCP):
                 logger.error("Failed to connect to Unreal Engine")
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-            params: Dict[str, Any] = {"object_path": object_path, "persist": bool(persist)}
+            # Forward the selector(s) exactly as given: the command owns the rename window and rejects
+            # "both given with different values" - the tool must not silently pick one.
+            params: Dict[str, Any] = {"persist": bool(persist)}
+            if target:
+                params["target"] = target
+            if object_path:
+                params["object_path"] = object_path
             if property_name:
                 params["property_name"] = property_name
                 if property_value is not None:
@@ -189,7 +203,7 @@ def register_reflection_tools(mcp: FastMCP):
                 params["properties"] = properties
 
             count = len(properties) if properties else 1
-            logger.info(f"Writing {count} propert(y/ies) on: {object_path}")
+            logger.info(f"Writing {count} propert(y/ies) on: {target or object_path}")
             response = unreal.send_command("set_object_property", params)
 
             if not response:

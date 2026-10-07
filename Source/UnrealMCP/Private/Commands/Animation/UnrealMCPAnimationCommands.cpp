@@ -2,18 +2,24 @@
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/UnrealMCPEditorCommands.h"
 #include "Core/MCPCommandRegistry.h"
+#include "Reflection/MCPPropertyReflector.h"
 
 #include "Animation/AnimCurveMetadata.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimTypes.h"
+#include "Animation/BlendSpace.h"
 #include "Animation/Skeleton.h"
+#include "Editor.h"
 #include "Engine/SkeletalMesh.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Toolkits/IToolkitHost.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "ScopedTransaction.h"
 #include "Misc/Char.h"
 #include "Misc/EngineVersion.h"
+#include "UObject/UnrealType.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUnrealMCPAnimationCommands, Log, All);
 
@@ -2061,12 +2067,504 @@ void FUnrealMCPAnimationCommands::RegisterCommands(FMCPCommandRegistry& Registry
             MCPParam(TEXT("section"), TEXT("string"), TEXT("Section to jump to")),
         }), MCPFlags(false, false, false),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("jump_to_section"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleJumpToSection(P); }); }));
+
+    MCP_REGISTER_COMMAND(Registry, "finalize_blend_space", "anim_sequence",
+        "Force a BlendSpace's runtime data (segment/triangle table) to be built and verify it by reading the samples back, then save. "
+        "A BlendSpace whose SampleData was written by script has no runtime data at all - the engine only rebuilds it from an asset editor - "
+        "so the blend output is empty (a T-pose) until this runs.",
+        (TArray<FMCPParamSpec>{
+            AssetPathParam(),
+            MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save the asset after a successful finalize; default true")),
+        }), MCPFlags(false, false, false, true),
+        ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("finalize_blend_space"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleFinalizeBlendSpace(P); }); }));
+
+    MCP_REGISTER_COMMAND(Registry, "set_blend_space_samples", "anim_sequence",
+        "Write a BlendSpace's sample list and (unless finalize=false) build the runtime segment/triangle table. "
+        "The array is replaced whole, so the request IS the final sample list; the reply reads the samples back from the "
+        "asset, so 'saved but not persisted' and 'persisted but no runtime data' cannot pass unnoticed.",
+        (TArray<FMCPParamSpec>{
+            AssetPathParam(),
+            MCPParam(TEXT("samples"), TEXT("array"),
+                TEXT("Whole sample list [{animation: <asset path>|null, sample_value: {x, y, z}}, ...]")),
+            MCPParamOpt(TEXT("finalize"), TEXT("bool"), TEXT("Rebuild the runtime data after writing; default true")),
+            MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save the asset after a successful write; default true")),
+        }), MCPFlags(false, true, false, true),
+        ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("set_blend_space_samples"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleSetBlendSpaceSamples(P); }); }));
+}
+
+// ---------------------------------------------------------------------------
+// BlendSpace runtime data
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    struct FBlendSpaceValidity
+    {
+        int32 SampleCount = 0;
+        int32 ValidSampleCount = 0;
+        int32 TriangleCount = 0;
+        TArray<FString> InvalidSamples;
+    };
+
+    FBlendSpaceValidity ReadBlendSpaceValidity(UBlendSpace* BlendSpace)
+    {
+        FBlendSpaceValidity Validity;
+        if (!BlendSpace)
+        {
+            return Validity;
+        }
+
+        // GetBlendSamples() is the public view of the protected SampleData array.
+        const TArray<FBlendSample>& Samples = BlendSpace->GetBlendSamples();
+        Validity.SampleCount = Samples.Num();
+        for (const FBlendSample& Sample : Samples)
+        {
+            if (Sample.bIsValid)
+            {
+                ++Validity.ValidSampleCount;
+            }
+            else
+            {
+                Validity.InvalidSamples.Add(Sample.Animation ? Sample.Animation->GetName() : FString(TEXT("<no animation>")));
+            }
+        }
+        Validity.TriangleCount = BlendSpace->GetBlendSpaceData().Triangles.Num();
+        return Validity;
+    }
+
+    /** Ready for the runtime: every sample usable and a triangle table built. */
+    bool IsBlendSpaceFinalized(const FBlendSpaceValidity& In)
+    {
+        return In.SampleCount > 0 && In.ValidSampleCount == In.SampleCount && In.TriangleCount > 0;
+    }
+
+    /**
+     * Slots a full cartesian coverage would have: the product of the distinct values per axis that
+     * actually varies (an axis with a single value is not a blend axis).
+     *
+     * Derived from the samples rather than from `BlendParameters[].GridNum` on purpose. GridNum is the
+     * grid the EDITOR snaps to, not what is authored: BS_Fei_Locomotion declares 8/4/4 (=225 slots) while
+     * its authored coverage is 9x3 = 27, so a GridNum-based check reports a mismatch on a perfectly
+     * healthy asset - i.e. it would be noise on every normal asset.
+     */
+    int32 ComputeSampleCoverage(const UBlendSpace* BlendSpace, TArray<int32>& OutValuesPerAxis)
+    {
+        OutValuesPerAxis.Reset();
+        if (!BlendSpace)
+        {
+            return 0;
+        }
+
+        const TArray<FBlendSample>& Samples = BlendSpace->GetBlendSamples();
+        int32 Product = 1;
+        int32 ActiveAxes = 0;
+
+        for (int32 Axis = 0; Axis < 3; ++Axis)
+        {
+            TSet<int32> DistinctValues;
+            for (const FBlendSample& Sample : Samples)
+            {
+                const double Value = Axis == 0 ? Sample.SampleValue.X
+                    : (Axis == 1 ? Sample.SampleValue.Y : Sample.SampleValue.Z);
+                // Hundredths of a unit: sample values are authored on grid steps, so rounding there keeps
+                // float noise from reading as a new distinct value.
+                DistinctValues.Add(FMath::RoundToInt(Value * 100.0));
+            }
+
+            OutValuesPerAxis.Add(DistinctValues.Num());
+            if (DistinctValues.Num() > 1)
+            {
+                Product *= DistinctValues.Num();
+                ++ActiveAxes;
+            }
+        }
+
+        return ActiveAxes > 0 ? Product : 0;
+    }
+
+    /** "" when the samples cover a full grid, otherwise a one-line description of how they do not. */
+    FString DescribeGridMismatch(const UBlendSpace* BlendSpace, int32 SampleCount)
+    {
+        TArray<int32> ValuesPerAxis;
+        const int32 Expected = ComputeSampleCoverage(BlendSpace, ValuesPerAxis);
+        if (Expected <= 0 || Expected == SampleCount)
+        {
+            return FString();
+        }
+
+        TArray<FString> Parts;
+        for (const int32 ValueCount : ValuesPerAxis)
+        {
+            Parts.Add(FString::FromInt(ValueCount));
+        }
+        return FString::Printf(
+            TEXT("%d samples where the authored axis values imply a full grid of %d (%s distinct values per axis)"),
+            SampleCount, Expected, *FString::Join(Parts, TEXT("/")));
+    }
+
+    /**
+     * Build the runtime segment/triangle table, and read it back.
+     *
+     * Rebuilding happens in the asset editor's construction path (SAnimationBlendSpace.cpp "Force a
+     * resampling of the data on construction"), which SampleData written by script never sees: the table
+     * stays empty, the blend output is nothing, i.e. a T-pose. ValidateSampleData + ResampleData are the
+     * same two calls that path makes, so they run directly first and the editor stays the fallback.
+     *
+     * bOutEditorOpened reports an editor this call opened - the caller owns closing it.
+     */
+    void FinalizeBlendSpaceInPlace(UBlendSpace* BlendSpace, FBlendSpaceValidity& OutValidity,
+                                   FString& OutResampleSource, bool& bOutEditorOpened)
+    {
+        bOutEditorOpened = false;
+        OutResampleSource = TEXT("direct");
+
+        BlendSpace->ValidateSampleData();
+        BlendSpace->ResampleData();
+        OutValidity = ReadBlendSpaceValidity(BlendSpace);
+
+        UAssetEditorSubsystem* EditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+        if (IsBlendSpaceFinalized(OutValidity) || !EditorSubsystem)
+        {
+            return;
+        }
+
+        OutResampleSource = TEXT("editor");
+        EditorSubsystem->OpenEditorForAsset(BlendSpace, EToolkitMode::Standalone, TSharedPtr<IToolkitHost>(),
+            /*bShowProgressWindow=*/ false);
+        bOutEditorOpened = EditorSubsystem->FindEditorForAsset(BlendSpace, /*bFocusIfOpen=*/ false) != nullptr;
+
+        // The editor's own construction may not have run yet within this command, so ask again explicitly
+        // instead of reporting a failure that the very next call would have passed.
+        BlendSpace->ValidateSampleData();
+        BlendSpace->ResampleData();
+        OutValidity = ReadBlendSpaceValidity(BlendSpace);
+    }
+
+    /** Executable next steps derived from the read-back, for a resample that did not take. */
+    void CollectFinalizeSuggestions(const UBlendSpace* BlendSpace, const FBlendSpaceValidity& Validity,
+                                    TArray<FString>& OutSuggestions)
+    {
+        OutSuggestions.Reset();
+
+        if (Validity.ValidSampleCount < Validity.SampleCount)
+        {
+            OutSuggestions.Add(FString::Printf(
+                TEXT("%d of %d samples hold no animation, or an animation outside this BlendSpace's own skeleton: "
+                     "rewrite them with set_blend_space_samples"),
+                Validity.SampleCount - Validity.ValidSampleCount, Validity.SampleCount));
+        }
+
+        if (Validity.ValidSampleCount == Validity.SampleCount && Validity.TriangleCount == 0)
+        {
+            OutSuggestions.Add(TEXT("every sample is valid but no triangle was built: each axis in use needs at least "
+                                    "two distinct sample values inside its min/max range"));
+        }
+
+        const FString GridMismatch = DescribeGridMismatch(BlendSpace, Validity.SampleCount);
+        if (!GridMismatch.IsEmpty())
+        {
+            OutSuggestions.Add(FString::Printf(
+                TEXT("%s: a full grid needs one sample per axis-value combination, so add the missing combinations "
+                     "or drop the extras"), *GridMismatch));
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleFinalizeBlendSpace(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"), TEXT("'asset_path' (string) is required"));
+    }
+
+    UObject* AssetObject = FUnrealMCPCommonUtils::FindAsset(AssetPath);
+    UBlendSpace* BlendSpace = Cast<UBlendSpace>(AssetObject);
+    if (!BlendSpace)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("asset_not_blend_space"),
+            FString::Printf(TEXT("'%s' resolved to %s, not a BlendSpace"),
+                *AssetPath, AssetObject ? *AssetObject->GetClass()->GetName() : TEXT("<nothing>")));
+    }
+
+    // Rebuilding the runtime table is done by the asset editor on construction (SAnimationBlendSpace.cpp
+    // "Force a resampling of the data on construction"), which SampleData written by script never sees:
+    // the table stays empty and the blend output is nothing, i.e. a T-pose. ValidateSampleData +
+    // ResampleData are the same two calls that path makes, so try them directly first and keep the
+    // editor as the fallback rather than the only way. Shared with set_blend_space_samples.
+    FBlendSpaceValidity Validity;
+    FString ResampleSource;
+    bool bEditorOpened = false;
+    FinalizeBlendSpaceInPlace(BlendSpace, Validity, ResampleSource, bEditorOpened);
+
+    const bool bFinalized = IsBlendSpaceFinalized(Validity);
+    const bool bPersist = FUnrealMCPCommonUtils::IsPersistRequested(Params);
+    bool bSaved = false;
+    if (bFinalized && bPersist)
+    {
+        bSaved = FUnrealMCPCommonUtils::SaveAssetForObject(BlendSpace);
+    }
+
+    if (bEditorOpened)
+    {
+        if (UAssetEditorSubsystem* EditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+        {
+            EditorSubsystem->CloseAllEditorsForAsset(BlendSpace);
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> InvalidJson;
+    for (const FString& Invalid : Validity.InvalidSamples)
+    {
+        InvalidJson.Add(MakeShared<FJsonValueString>(Invalid));
+    }
+
+    if (!bFinalized)
+    {
+        TSharedPtr<FJsonObject> Failure = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("resample_failed"),
+            FString::Printf(TEXT("'%s' still has no usable runtime data: %d/%d samples valid, %d triangles"),
+                *BlendSpace->GetName(), Validity.ValidSampleCount, Validity.SampleCount, Validity.TriangleCount));
+        Failure->SetNumberField(TEXT("sample_count"), Validity.SampleCount);
+        Failure->SetNumberField(TEXT("valid_sample_count"), Validity.ValidSampleCount);
+        Failure->SetNumberField(TEXT("triangle_count"), Validity.TriangleCount);
+        Failure->SetArrayField(TEXT("invalid_samples"), InvalidJson);
+        Failure->SetStringField(TEXT("resample_source"), ResampleSource);
+
+        TArray<FString> Suggestions;
+        CollectFinalizeSuggestions(BlendSpace, Validity, Suggestions);
+        TArray<TSharedPtr<FJsonValue>> SuggestionJson;
+        for (const FString& Suggestion : Suggestions)
+        {
+            SuggestionJson.Add(MakeShared<FJsonValueString>(Suggestion));
+        }
+        Failure->SetArrayField(TEXT("suggestions"), SuggestionJson);
+
+        Failure->SetStringField(TEXT("hint"),
+            TEXT("check that every sample points at an animation of this BlendSpace's own skeleton and that both axes have at least two distinct values"));
+        return Failure;
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeSuccessJson();
+    Result->SetStringField(TEXT("asset_path"), BlendSpace->GetPathName());
+    Result->SetBoolField(TEXT("samples_valid"), true);
+    Result->SetNumberField(TEXT("sample_count"), Validity.SampleCount);
+    Result->SetNumberField(TEXT("valid_sample_count"), Validity.ValidSampleCount);
+    Result->SetNumberField(TEXT("triangle_count"), Validity.TriangleCount);
+    Result->SetStringField(TEXT("resample_source"), ResampleSource);
+    Result->SetBoolField(TEXT("editor_opened"), bEditorOpened);
+    Result->SetBoolField(TEXT("saved"), bSaved);
+    Result->SetBoolField(TEXT("persist_requested"), bPersist);
+    return Result;
+}
+
+// set_blend_space_samples: the write and the finalize as ONE command.
+//
+// The raw path is three steps that each look successful on their own: python's set_editor_property
+// silently does not persist (save_asset still answers true), the reflector write does persist, and the
+// runtime segment/triangle table only appears after finalize_blend_space. A caller that stops early gets
+// an asset the editor reads back correctly and PIE renders as a T-pose (measured 2026-10-02).
+TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleSetBlendSpaceSamples(const TSharedPtr<FJsonObject>& Params)
+{
+    const FString AssetPath = GetStringParam(Params, TEXT("asset_path"));
+    if (AssetPath.IsEmpty())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(EUnrealMCPAnimError::InvalidParams,
+            TEXT("'asset_path' (string) is required"));
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* SamplesJson = nullptr;
+    if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("samples"), SamplesJson) || !SamplesJson
+        || SamplesJson->Num() == 0)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(EUnrealMCPAnimError::InvalidParams,
+            TEXT("'samples' must be a non-empty array of {animation: <asset path>|null, sample_value: {x, y, z}}"));
+    }
+
+    UObject* AssetObject = FUnrealMCPCommonUtils::FindAsset(AssetPath);
+    UBlendSpace* BlendSpace = Cast<UBlendSpace>(AssetObject);
+    if (!BlendSpace)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(EUnrealMCPAnimError::AssetNotBlendSpace,
+            FString::Printf(TEXT("'%s' resolved to %s, not a BlendSpace"), *AssetPath,
+                AssetObject ? *AssetObject->GetClass()->GetName() : TEXT("<nothing>")));
+    }
+
+    // Structural write: the sample array is replaced whole, and an open Persona tab holds raw pointers
+    // and indices into it.
+    if (UAssetEditorSubsystem* EditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
+    {
+        EditorSubsystem->CloseAllEditorsForAsset(BlendSpace);
+    }
+
+    // The reflector's container semantics REPLACE the array, so this request is the final sample list:
+    // every entry has to be spelled out, and a dropped entry is a removed sample.
+    TArray<TSharedPtr<FJsonValue>> SampleEntries;
+    SampleEntries.Reserve(SamplesJson->Num());
+    for (int32 Index = 0; Index < SamplesJson->Num(); ++Index)
+    {
+        const TSharedPtr<FJsonObject>* SampleObject = nullptr;
+        if (!(*SamplesJson)[Index].IsValid() || !(*SamplesJson)[Index]->TryGetObject(SampleObject)
+            || !SampleObject || !SampleObject->IsValid())
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(EUnrealMCPAnimError::InvalidParams,
+                FString::Printf(TEXT("samples[%d] is not an object"), Index));
+        }
+
+        // FBlendSample's own field names, with the tool-facing snake_case spelling accepted too.
+        const TSharedPtr<FJsonValue>* Animation = (*SampleObject)->Values.Find(TEXT("animation"));
+        if (!Animation)
+        {
+            Animation = (*SampleObject)->Values.Find(TEXT("Animation"));
+        }
+
+        const TSharedPtr<FJsonValue>* SampleValue = (*SampleObject)->Values.Find(TEXT("sample_value"));
+        if (!SampleValue)
+        {
+            SampleValue = (*SampleObject)->Values.Find(TEXT("SampleValue"));
+        }
+        if (!SampleValue || !SampleValue->IsValid())
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(EUnrealMCPAnimError::InvalidParams,
+                FString::Printf(TEXT("samples[%d] needs a 'sample_value' {x, y, z}"), Index));
+        }
+
+        TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+        // A missing/anonymous animation is written as an explicit null rather than as an absent field.
+        Entry->SetField(TEXT("Animation"),
+            (Animation && Animation->IsValid()) ? *Animation : MakeShared<FJsonValueNull>());
+        Entry->SetField(TEXT("SampleValue"), *SampleValue);
+        SampleEntries.Add(MakeShared<FJsonValueObject>(Entry));
+    }
+
+    FArrayProperty* SampleDataProperty = CastField<FArrayProperty>(
+        UBlendSpace::StaticClass()->FindPropertyByName(FName(TEXT("SampleData"))));
+    if (!SampleDataProperty)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(EUnrealMCPAnimError::WriteFailed,
+            TEXT("BlendSpace.SampleData is not reflected on this engine version; nothing was written"));
+    }
+
+    BlendSpace->Modify();
+    void* SampleDataAddress = SampleDataProperty->ContainerPtrToValuePtr<void>(BlendSpace);
+    const FWriteResult WriteResult = FMCPPropertyReflector::FromJson(
+        SampleDataProperty, SampleDataAddress, TEXT("SampleData"),
+        MakeShared<FJsonValueArray>(SampleEntries));
+
+    if (!WriteResult.bSuccess)
+    {
+        TSharedPtr<FJsonObject> Failure = FUnrealMCPCommonUtils::CreateErrorResponse(
+            WriteResult.ErrorCode.IsEmpty() ? FString(EUnrealMCPAnimError::WriteFailed) : WriteResult.ErrorCode,
+            WriteResult.ErrorMessage);
+        TArray<TSharedPtr<FJsonValue>> ShapesJson;
+        for (const FString& Shape : WriteResult.SupportedShapes)
+        {
+            ShapesJson.Add(MakeShared<FJsonValueString>(Shape));
+        }
+        Failure->SetArrayField(TEXT("supported_shapes"), ShapesJson);
+        if (WriteResult.FailedIndex != INDEX_NONE)
+        {
+            Failure->SetNumberField(TEXT("failed_index"), WriteResult.FailedIndex);
+        }
+        return Failure;
+    }
+
+    FPropertyChangedEvent ChangeEvent(SampleDataProperty);
+    BlendSpace->PostEditChangeProperty(ChangeEvent);
+
+    bool bFinalize = true;
+    Params->TryGetBoolField(TEXT("finalize"), bFinalize);
+
+    FBlendSpaceValidity Validity = ReadBlendSpaceValidity(BlendSpace);
+    FString ResampleSource = TEXT("skipped");
+    bool bEditorOpened = false;
+    if (bFinalize)
+    {
+        FinalizeBlendSpaceInPlace(BlendSpace, Validity, ResampleSource, bEditorOpened);
+        if (bEditorOpened)
+        {
+            if (UAssetEditorSubsystem* EditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
+            {
+                EditorSubsystem->CloseAllEditorsForAsset(BlendSpace);
+            }
+        }
+    }
+
+    // Read back from the asset, never echoed from the request.
+    const TArray<FBlendSample>& Samples = BlendSpace->GetBlendSamples();
+    int32 NoneCount = 0;
+    TArray<TSharedPtr<FJsonValue>> ReadbackJson;
+    for (int32 Index = 0; Index < Samples.Num(); ++Index)
+    {
+        const FBlendSample& Sample = Samples[Index];
+        if (!Sample.Animation)
+        {
+            ++NoneCount;
+        }
+
+        TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+        Item->SetNumberField(TEXT("index"), Index);
+        Item->SetStringField(TEXT("animation"),
+            Sample.Animation ? Sample.Animation->GetPathName() : FString(TEXT("None")));
+        Item->SetBoolField(TEXT("valid"), Sample.bIsValid);
+        Item->SetNumberField(TEXT("sample_value_x"), Sample.SampleValue.X);
+        Item->SetNumberField(TEXT("sample_value_y"), Sample.SampleValue.Y);
+        Item->SetNumberField(TEXT("sample_value_z"), Sample.SampleValue.Z);
+        ReadbackJson.Add(MakeShared<FJsonValueObject>(Item));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeSuccessJson();
+    Result->SetStringField(TEXT("asset_path"), BlendSpace->GetPathName());
+    Result->SetBoolField(TEXT("applied"), true);
+    Result->SetNumberField(TEXT("sample_count"), Samples.Num());
+    Result->SetNumberField(TEXT("none_count"), NoneCount);
+    Result->SetNumberField(TEXT("valid_sample_count"), Validity.ValidSampleCount);
+    Result->SetNumberField(TEXT("triangle_count"), Validity.TriangleCount);
+    Result->SetStringField(TEXT("resample_source"), ResampleSource);
+    Result->SetBoolField(TEXT("requires_finalize"), !IsBlendSpaceFinalized(Validity));
+    Result->SetArrayField(TEXT("samples"), ReadbackJson);
+
+    // Warnings only: the requested data IS written, these say what will look wrong at runtime.
+    TArray<TSharedPtr<FJsonValue>> WarningsJson;
+
+    const FString GridMismatch = DescribeGridMismatch(BlendSpace, Samples.Num());
+    if (!GridMismatch.IsEmpty())
+    {
+        TSharedPtr<FJsonObject> Warning = MakeShared<FJsonObject>();
+        Warning->SetStringField(TEXT("code"), TEXT("grid_sample_count_mismatch"));
+        Warning->SetStringField(TEXT("detail"), FString::Printf(
+            TEXT("%s; the samples were written as requested"), *GridMismatch));
+        WarningsJson.Add(MakeShared<FJsonValueObject>(Warning));
+    }
+
+    // A sequence of another skeleton compiles but never blends (ValidateSampleData marks it invalid).
+    const USkeleton* BlendSpaceSkeleton = BlendSpace->GetSkeleton();
+    for (int32 Index = 0; Index < Samples.Num(); ++Index)
+    {
+        const UAnimSequence* Animation = Samples[Index].Animation;
+        if (Animation && BlendSpaceSkeleton && Animation->GetSkeleton() != BlendSpaceSkeleton)
+        {
+            TSharedPtr<FJsonObject> Warning = MakeShared<FJsonObject>();
+            Warning->SetStringField(TEXT("code"), TEXT("sample_skeleton_mismatch"));
+            Warning->SetStringField(TEXT("detail"), FString::Printf(
+                TEXT("samples[%d] '%s' uses skeleton %s, this BlendSpace uses %s"),
+                Index, *Animation->GetName(),
+                Animation->GetSkeleton() ? *Animation->GetSkeleton()->GetPathName() : TEXT("<none>"),
+                *BlendSpaceSkeleton->GetPathName()));
+            WarningsJson.Add(MakeShared<FJsonValueObject>(Warning));
+        }
+    }
+
+    if (WarningsJson.Num() > 0)
+    {
+        Result->SetArrayField(TEXT("warnings"), WarningsJson);
+    }
+
+    return Result;
 }
 
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
-
 TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleAnimSelfCheck(const TSharedPtr<FJsonObject>& Params)
 {
     TSharedPtr<FJsonObject> Result = MakeSuccessJson();

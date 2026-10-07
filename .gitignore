@@ -11,6 +11,7 @@ Build/build_log.txt
 Build/build_out.txt
 Build/last_build_console.txt
 Build/last_editor_console.txt
+Build/ue57_buildplugin*.txt
 *.log
 
 # Local agent/tool state (not part of the plugin)

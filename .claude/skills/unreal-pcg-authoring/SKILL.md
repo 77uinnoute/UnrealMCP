@@ -1,6 +1,6 @@
 ---
 name: unreal-pcg-authoring
-description: "UE5（UnrealMCP）里读写 PCG（Procedural Content Generation）图与生成产物的方法：命令层（16 个工具）的用法 —— 看图（list_pcg_assets / get_pcg_graph / get_pcg_node）、看组件与产物（list_pcg_components / get_pcg_generated_output）、建图（create_pcg_graph）、改图（add_pcg_node / connect_pcg_pins / disconnect_pcg_pins / remove_pcg_node / set_pcg_node_property）、配网格生成器（set_pcg_mesh_selector_type / set_pcg_mesh_selector_entries）、装配到关卡（set_pcg_component_graph）、触发生成与清理（generate_pcg_component / cleanup_pcg_component）；引脚标签与 python 属性名两套写法的对应关系、instanced 只读子对象与网格选择器专门入口的区别、整数权重的坑、写后回读纪律、生成与读取必须拆步、逐段 TAP 二分定位丢点、以及批量脚本走 bridge 回环的做法。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— list_pcg_assets / get_pcg_graph / get_pcg_node / list_pcg_components / get_pcg_generated_output / create_pcg_graph / add_pcg_node / connect_pcg_pins / disconnect_pcg_pins / remove_pcg_node / set_pcg_node_property / set_pcg_mesh_selector_type / set_pcg_mesh_selector_entries / set_pcg_component_graph / generate_pcg_component / cleanup_pcg_component；以及任何涉及「查看/核对 PCG 图结构、PCG 节点属性名到底是什么、引脚标签该写哪个、从零建 PCG 图、改 PCG 图（加删节点、连断引脚、写节点属性）、给网格生成器配树种/权重、把 PCG 图挂到关卡组件上、PCG 生成结果出了多少点/属性分布如何、PCG 组件绑定的是哪张图、触发或清理 PCG 生成」的任务。材质/粒子/蓝图/动画各自走对应 Skill。"
+description: "UE5（UnrealMCP）里读写 PCG（Procedural Content Generation）图与生成产物的方法：命令层（命令名 = 工具名）的用法 —— 看图（list_pcg_assets / get_pcg_graph / get_pcg_node）、看组件与产物（list_pcg_components / get_pcg_generated_output）、建图（create_pcg_graph）、改图（add_pcg_node / connect_pcg_pins / disconnect_pcg_pins / remove_pcg_node / set_pcg_node_property）、配网格生成器（set_pcg_mesh_selector_type / set_pcg_mesh_selector_entries）、装配到关卡（set_pcg_component_graph）、触发生成与清理（generate_pcg_component / cleanup_pcg_component）；引脚标签与 python 属性名两套写法的对应关系、instanced 只读子对象与网格选择器专门入口的区别、整数权重的坑、写后回读纪律、生成与读取必须拆步、逐段 TAP 二分定位丢点、以及批量脚本走 bridge 回环的做法。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— list_pcg_assets / get_pcg_graph / get_pcg_node / list_pcg_components / get_pcg_generated_output / create_pcg_graph / add_pcg_node / connect_pcg_pins / disconnect_pcg_pins / remove_pcg_node / set_pcg_node_property / set_pcg_mesh_selector_type / set_pcg_mesh_selector_entries / set_pcg_component_graph / generate_pcg_component / cleanup_pcg_component；以及任何涉及「查看/核对 PCG 图结构、PCG 节点属性名到底是什么、引脚标签该写哪个、从零建 PCG 图、改 PCG 图（加删节点、连断引脚、写节点属性）、给网格生成器配树种/权重、把 PCG 图挂到关卡组件上、PCG 生成结果出了多少点/属性分布如何、PCG 组件绑定的是哪张图、触发或清理 PCG 生成」的任务。材质/粒子/蓝图/动画各自走对应 Skill。"
 metadata:
   version: "1.0.0"
   upstream: unreal-blueprint-authoring
@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP PCG 编写 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。PCG 插件（`D:\UE_5.5\Engine\Plugins\PCG`，beta）已在项目启用，本插件对它有**硬依赖**。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。PCG 插件（引擎自带，beta）已在项目启用，本插件对它有**硬依赖**。
 
 **环境注意**：改 `Plugins/UnrealMCP/Content/Python/**`（含工具描述）需**重启 unrealMCP server**；改插件 C++ 需编译 + 重启编辑器。禁用了 PCG 插件时本插件无法加载（硬依赖）。
 
@@ -19,7 +19,7 @@ metadata:
 
 | 用途 | 路径 |
 |---|---|
-| 看图结构 / 查属性真名 / 读生成产物 / 改图 / 写属性 / 触发与清理生成 | **MCP 工具（12 个，命令名 = 工具名）** —— 本节的主要接口 |
+| 看图结构 / 查属性真名 / 读生成产物 / 改图 / 写属性 / 触发与清理生成 | **MCP 工具（命令名 = 工具名）** —— 本节的主要接口 |
 | 批量脚本编排（一次调用里走多步） | python（`unreal.*` + `unreal.UnrealMCPPythonAPI.execute_mcp_command` 回环调同名命令） |
 
 写路径已经有命令层，**不要再裸调 `PCGGraph.add_node_of_type` 那套**：命令层做了事务、写后回读、成功即保存、结构化错误码四件事，裸调一件都没有。
@@ -39,9 +39,9 @@ print(g["edges"][0])   # {from_node, from_label, to_node, to_label}
 
 ---
 
-## 一、十二个工具
+## 一、命令层
 
-只读（5 个）：
+只读：
 
 | 工具 | 主要参数 | 关键返回 |
 |---|---|---|
@@ -51,7 +51,7 @@ print(g["edges"][0])   # {from_node, from_label, to_node, to_label}
 | `list_pcg_components` | `actor_label`（子串） | `components[]{actor_label, component_name, graph_path, graph_instance_path, generation_trigger, active, generating, generated, bounds_min/max, managed_resource_counts}` |
 | `get_pcg_generated_output` | `actor_label` 或 `component_name`、`attribute`、`max_samples`（1..64）、`include_attributes` | `tagged_data[]{tags, data_type, pin, is_point_data, point_count}`、`total_points`、`attributes[]`、`attribute_stats` |
 
-写（11 个，结构/属性写带 `saved` 回读）：
+写（结构/属性写带 `saved` 回读）：
 
 | 工具 | 主要参数 | 关键返回 |
 |---|---|---|

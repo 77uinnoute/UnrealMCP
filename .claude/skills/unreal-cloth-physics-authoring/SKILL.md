@@ -1,6 +1,6 @@
 ---
 name: unreal-cloth-physics-authoring
-description: "UE5（UnrealMCP）里给带裙摆的骨骼网格做「骨物理 + 布料」的 Skill：运动由谁造的分工表（AnimDynamics 造摆动 / 布料做面内褶皱与碰撞避让 / 腰带挂饰流苏必须物理化、需要被身体挡开的附属链走 PhysicsAsset + AnimGraphNode_RigidBody 路线）、legacy 布料（UClothingAssetCommon）的语义要点（MaxDistance 掩码 = 允许离开蒙皮姿势的距离、掩码 <0.1 的粒子被 Chaos 判为 kinematic 且 InvM=0、全 0 掩码等价蒙皮、球形约束只拉不回推、权重图缺失时 anim drive 取 Low、tether 由掩码派生、掩码有三份副本——LOD PointWeightMaps / PhysicalMeshData.WeightMaps / 渲染分段 static alpha，只有 ApplyParameterMasks + SkeletalMesh::Build 才让前三者一致生效）、可脚本化的掩码斜坡生成法（腰部置 0 做锚点、往下线性升到 N cm）、AnimDynamics 稳定化的三个真实来源（关节限制被输入姿势持续违反 = 抖动；per-body 定义不齐导致该骨无碰撞球 = 穿身体；PhysicsAsset 胶囊过肥 = 把布料顶鼓）、角度范围 ≥360° = 引擎跳过该约束（自由）vs 范围置 0 = 锁死在 0 旋转（刚体）、PA + RigidBody 路线的判据（`FKSphylElem` 长轴是形状自己的局部 Z，引擎按顶点包围盒把该轴旋到 X/Y ⇒ 算碰撞几何必须读到形状 `Rotation`，否则穿模量错一个数量级；引擎自动生成的胶囊按包围盒「虚胖」、会把模拟链顶出去；`gap = 线段距离 − (r链 + r挡块)` 为负 = 接触穿插、身体基线为 0 而链仍在动 = 链自身在摆、−0.3cm 且逐帧不变的稳态轻压 ≠ 深穿插；只让必要骨骼参与碰撞；链节/叶骨的胶囊方向要用自身在父骨空间的偏移反推；不是 UPROPERTY 的引擎数据（如 `CollisionDisableTable`）只能靠命令改）、以及不靠截图的自证表（PIE 里 ClothingSimulationInteractor 的动态/运动学粒子计数、apply_cloth_masks 回报的 pinned 计数与两套 skinned/cloth 映射、reflect_probe 属性路径读烘焙数据与 PhysicsAsset 胶囊）。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— set_object_property / reflect_probe（读写布料配置、掩码数组、PhysicsAsset 形体这类无 UFUNCTION 的属性）/ apply_cloth_masks / set_physics_asset_collision / list_physics_asset_bodies / add_physics_asset_body / add_physics_asset_constraint / set_blueprint_node_property（Node.PhysicsBodyDefinitions、SphericalLimits、GravityScale、Linear/AngularDampingOverride、NumSolverIterationsPreUpdate/PostUpdate、bDoUpdate）/ compile_blueprint / add_blueprint_node_by_class / delete_blueprint_nodes / connect_blueprint_pins / start_pie / stop_pie；以及任何涉及「裙子或裙摆不动、太硬、摆得不够、太抖、被撑大、掉到地上、穿模、捏皱成纸团、布料完全不动、掩码到底怎么刷、cloth 参数怎么写、AnimDynamics 关节限制该给多少、per-body 碰撞球、PhysicsAsset 胶囊收肥、挂饰/发梢要被身体挡开、实体碰撞不穿模、PA 上的碰撞对怎么关、只让部分骨参与碰撞、负间隙量测、挂在链上的抖到底是谁造成的、布料该不该删/该不该留」的任务。材质本身走 unreal-material-authoring，蓝图图结构与节点寻址走 unreal-blueprint-authoring，外部文件导入与骨骼网格替换走 unreal-asset-pipeline。"
+description: "UE5（UnrealMCP）里给带裙摆的骨骼网格做「骨物理 + 布料」的 Skill：运动由谁造的分工表（AnimDynamics 造摆动 / 布料做面内褶皱与碰撞避让 / 腰带挂饰流苏必须物理化、需要被身体挡开的附属链走 PhysicsAsset + AnimGraphNode_RigidBody 路线）、legacy 布料（UClothingAssetCommon）的语义要点（MaxDistance 掩码 = 允许离开蒙皮姿势的距离、掩码 <0.1 的粒子被 Chaos 判为 kinematic 且 InvM=0、全 0 掩码等价蒙皮、球形约束只拉不回推、权重图缺失时 anim drive 取 Low、tether 由掩码派生、掩码有三份副本——LOD PointWeightMaps / PhysicalMeshData.WeightMaps / 渲染分段 static alpha，只有 ApplyParameterMasks + SkeletalMesh::Build 才让前三者一致生效）、可脚本化的掩码斜坡生成法（腰部置 0 做锚点、往下线性升到 N cm）、AnimDynamics 稳定化的三个真实来源（关节限制被输入姿势持续违反 = 抖动；per-body 定义不齐导致该骨无碰撞球 = 穿身体；PhysicsAsset 胶囊过肥 = 把布料顶鼓）、角度范围 ≥360° = 引擎跳过该约束（自由）vs 范围置 0 = 锁死在 0 旋转（刚体）、PA + RigidBody 路线的判据（`FKSphylElem` 长轴是形状自己的局部 Z，引擎按顶点包围盒把该轴旋到 X/Y ⇒ 算碰撞几何必须读到形状 `Rotation`，否则穿模量错一个数量级；引擎自动生成的胶囊按包围盒「虚胖」、会把模拟链顶出去；`gap = 线段距离 − (r链 + r挡块)` 为负 = 接触穿插、身体基线为 0 而链仍在动 = 链自身在摆、−0.3cm 且逐帧不变的稳态轻压 ≠ 深穿插；只让必要骨骼参与碰撞；链节/叶骨的胶囊方向要用自身在父骨空间的偏移反推；不是 UPROPERTY 的引擎数据（如 `CollisionDisableTable`）只能靠命令改）、以及不靠截图的自证表（PIE 里 ClothingSimulationInteractor 的动态/运动学粒子计数、apply_cloth_masks 回报的 pinned 计数与两套 skinned/cloth 映射、reflect_probe 属性路径读烘焙数据与 PhysicsAsset 胶囊）。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— set_object_property / reflect_probe（读写布料配置、掩码数组、PhysicsAsset 形体这类无 UFUNCTION 的属性）/ apply_cloth_masks / set_physics_asset_collision / list_physics_asset_bodies / add_physics_asset_body / add_physics_asset_constraint / remove_physics_asset_body / remove_physics_asset_constraint / set_blueprint_node_property（Node.PhysicsBodyDefinitions、SphericalLimits、GravityScale、Linear/AngularDampingOverride、NumSolverIterationsPreUpdate/PostUpdate、bDoUpdate）/ compile_blueprint / add_blueprint_node_by_class / delete_blueprint_nodes / connect_blueprint_pins / start_pie / stop_pie；以及任何涉及「裙子或裙摆不动、太硬、摆得不够、太抖、被撑大、掉到地上、穿模、捏皱成纸团、布料完全不动、掩码到底怎么刷、cloth 参数怎么写、AnimDynamics 关节限制该给多少、per-body 碰撞球、PhysicsAsset 胶囊收肥、挂饰/发梢要被身体挡开、实体碰撞不穿模、PA 上的碰撞对怎么关、只让部分骨参与碰撞、负间隙量测、挂在链上的抖到底是谁造成的、布料该不该删/该不该留」的任务。材质本身走 unreal-material-authoring，蓝图图结构与节点寻址走 unreal-blueprint-authoring，外部文件导入与骨骼网格替换走 unreal-asset-pipeline。"
 metadata:
   version: "1.0.0"
   upstream: unreal-blueprint-authoring
@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP 服装物理（裙摆 / 挂饰）Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`。对象是**带裙摆的骨骼网格**（legacy 布料 = `UClothingAssetCommon`，非 ChaosClothAsset）。
+适用：本仓库 `Plugins/UnrealMCP`。对象是**带裙摆的骨骼网格**（legacy 布料 = `UClothingAssetCommon`，非 ChaosClothAsset）。
 本文只写**长期有效的做法、判据与引擎语义**。
 
 > 一句话判据：**布料的"目标"是蒙皮姿势**。骨不动 ⇒ 布料只能表现出重力垂坠（≈蒙皮，看不出差别）；
@@ -25,7 +25,7 @@ metadata:
 | 面内**褶皱/自碰撞/被腿顶开/贴腿** | 布料 | 它解的是面片；骨物理没有面内形变，也没有碰撞 |
 | 裙子下半"完全不动" | 先查**谁在驱动骨** | 若裙摆骨不在重定向链里（源没有对应骨），它的目标永远是静止姿势 |
 | 腰带**挂饰/流苏**（`tassel_*` 之类的附属链）"太硬" | 同样上 AnimDynamics | 它们通常没被任何节点驱动＝纯蒙皮刚性跟随；挂饰要会摆只能物理化（或烘焙），布料帮不上 |
-| 附属链**要被身体挡开**（真碰撞：被大腿/裙摆顶住、不被穿过） | **PhysicsAsset + `AnimGraphNode_RigidBody`**（§六） | AD 完全不认识 PhysicsAsset 与世界几何（§三.4）；布料会与 PA 胶囊求交，但那是解面片，骨链的二次运动+碰撞只能走 PA 路线 |
+| 附属链**要被身体挡开**（真碰撞：被大腿/裙摆顶住、不被穿过） | **PhysicsAsset + `AnimGraphNode_RigidBody`**（`unreal-cloth-physics-case-chain-rigidbody`） | AD 完全不认识 PhysicsAsset 与世界几何（§三.4）；布料会与 PA 胶囊求交，但那是解面片，骨链的二次运动+碰撞只能走 PA 路线 |
 
 - 判据：`AnimDynamics` 能用链的**输入姿势 + 关节限制 + 碰撞球**给出可见运动，**不需要** 掩码/权重烘焙；
   布料要发挥作用则必须先有"会动的目标 + 正确的 MaxDistance 掩码"。
@@ -158,9 +158,9 @@ metadata:
 | 想知道 | 怎么读 |
 |---|---|
 | 掩码是否真的进了模拟 | PIE 里 `ClothingSimulationInteractor.get_num_dynamic_particles()/get_num_kinematic_particles()`（应与掩码的 非0/0 计数一致） |
-| 掩码/tether/渲染分段是否生效 | `apply_cloth_masks` 回报：`max_distance_pinned_count`、tether 批数、`sections`（导入模型）与 `render_sections`（渲染）两套 skinned/cloth 计数 |
+| 掩码/tether/渲染分段是否生效 | `apply_cloth_masks`（**参数名是 `object_path`，不是 `asset_path`**）回报：`max_distance_pinned_count`、tether 批数、`sections`（导入模型）与 `render_sections`（渲染）两套 skinned/cloth 计数 |
 | 烘焙数据本体 | `reflect_probe` 的属性路径（如 `LodData[0].PhysicalMeshData.WeightMaps[1].Values`） |
-| PhysicsAsset 胶囊（含**形状轴**，算几何必须） | `reflect_probe` 读 `SkeletalBodySetups[i].AggGeom` —— `SphylElems[0].Radius/Length/Center/`**`Rotation`**；只拿半径+长度算穿模量会错一个数量级（见 §六.2） |
+| PhysicsAsset 胶囊（含**形状轴**，算几何必须） | `reflect_probe` 读 `SkeletalBodySetups[i].AggGeom` —— `SphylElems[0].Radius/Length/Center/`**`Rotation`**；只拿半径+长度算穿模量会错一个数量级（见 `unreal-cloth-physics-case-chain-rigidbody` §6.2） |
 | 某个 body 现在与谁不碰 | `list_physics_asset_bodies` 的 `collision_disabled_with`（禁用表本体不是 UPROPERTY，反射读不到） |
 | AnimDynamics 参数 | `reflect_probe(target=<ABP>, node_id=..., property='Node')` 读整坨，和**已调好的参考节点**逐项对照 |
 | 编辑器 world 里布料不跑 | interactor 存在但计数全 0 是正常的；要读数必须 PIE |
@@ -173,89 +173,9 @@ metadata:
 - **验收要有运动输入**：静止姿势下布料的可视结果 ≈ 蒙皮，看不出差别；走动/转身/被腿撞才看得出。
 - 观感一律由用户在编辑器视口判定；数据只用来排除"根本没生效"。
 - 掩码/权重这类烘焙数据用**脚本生成 + 落盘**（可重跑、可回归），不要手刷。
-- 碰撞类改动的验收靠**负间隙量测**（见 §六.4），不要靠"看着像穿了"下结论。
+- 碰撞类改动的验收靠**负间隙量测**（见 `unreal-cloth-physics-case-chain-rigidbody` §6.4），不要靠"看着像穿了"下结论。
 
 ---
 
-## 六、附属链走「PhysicsAsset + RigidBody」路线（要真碰撞时）
-
-适用：挂饰/流苏/尾巴/发梢这类**需要被身体挡开**的链。AD 做不到（§三.4：它不认识 PhysicsAsset，也不认世界几何）。
-前提是两件事：PA 上先有这条链的 body（引擎 UI，或 `add_physics_asset_body` / `add_physics_asset_constraint`），
-ABP 里再挂一个 `AnimGraphNode_RigidBody`（`Node.OverridePhysicsAsset` 指到该 PA）。
-
-### 6.1 先看句柄：这件事能不能直接写
-
-- **UPROPERTY ⇒ `set_object_property` 直接写，不用编译**。PA 上常用可写项：
-  `SkeletalBodySetups[i].AggGeom.SphylElems[0].Radius / Length / Center`、`(BodySetup).PhysicsType`、
-  `ConstraintSetup[i].DefaultInstance.*`。
-- **不是 UPROPERTY 的引擎内部数据**（或只有导出 C++、没有 UFUNCTION 的入口）⇒ 反射器连字段都看不到
-  （`unknown_property`，候选清单里就没有），python 也读不到 ⇒ **只能加命令**。已知两个：
-  `UPhysicsAsset::CollisionDisableTable`（任意一对 body 的碰撞开关，`DisableCollision/EnableCollision`，
-  `PhysicsAsset.h:256/332/335` → `set_physics_asset_collision`）与
-  `UClothingAssetCommon::ApplyParameterMasks`（→ `apply_cloth_masks`）。
-- 附带一句：反射器的 map 下标是"拿 key 文本去匹配**已存在的** key"，且只认数字 / FName / String / enum；
-  枚举表里没有的东西、以及"插入一个新条目"，都不要指望它。
-
-### 6.2 量几何：形状的 `Rotation` 必须拿到（否则数会错一个数量级）
-
-- `FKSphylElem` 的长轴是**它自己的局部 Z**（`SphylElem.h:28-50`），而引擎生成胶囊时按顶点包围盒把这个轴
-  **旋到 X 或 Y**（`PhysicsAssetUtils.cpp:707-733`；本项目 `thigh_l` 是 `Rotation=(0,176.5,-89.8)`，即局部 ±Y）。
-  ⇒ **"胶囊轴 = 骨的局部 Z"不能假设**，按错的轴算出来的"穿模量"看着合理但完全是假的。
-- 读法：`reflect_probe(target=PA, property="SkeletalBodySetups[i].AggGeom")` 一次拿到该 body 的
-  `SphylElems/SphereElems/BoxElems`（含 `Rotation`/`Center`/`Radius`/`Length`）；轴 = `Rotation` 作用在
-  `(0,0,1)` 上，再随骨变换到世界。`list_physics_asset_bodies` 只当"有哪些 body / 名字 / PhysicsType /
-  碰撞禁用表"的索引表。
-- python 读 PA 体表会失败（`Failed to find property 'skeletal_body_setups'`）。要找"预览网格/骨架"时：
-  `EditorAssetLibrary.list_assets('/Game/<dir>')` 里挑 `get_editor_property('physics_asset') == 目标 PA` 的
-  `SkeletalMesh`，由参考姿势（`AnimPoseExtensions.get_reference_pose`；
-  `AnimPoseSpaces` **只有 LOCAL 与 WORLD**，WORLD 就是组件空间）。
-
-### 6.3 自动生成的胶囊"虚胖"，它就是顶开模拟链的元凶
-
-引擎按**该骨主导顶点的包围盒**定尺寸（半径 = 另两轴最大 ×1.01，长度 = 最长轴 ×1.01）⇒ 四肢/头发/躯干都远粗于
-可见网格（本项目实测：`lowerarm_l` 半径 **8.11**（=16 cm 粗前臂）、`hand_l` 5.28、`spine_03` 11.03、
-`head` 16.44、`hair_*` 8.0+）。RigidBody 节点把**每个 body** 都当碰撞体，胖胶囊就会持续把链顶出去。
-
-做法：先按**真实围度**收（本项目取值：lowerarm→4.0、hand→3.5、upperarm→4.5、thigh→6.0、calf→5.0、
-spine_01→5.5、spine_03→8.0、head→11.5、hair→5.0），再用 §六.4 复验。
-**副作用要提前说**：这批 body 同时是布料求交的对象 ⇒ 收尺寸会一并改变裙摆贴合。
-
-### 6.4 判据：链"抖"的来源要分开量
-
-1. **与 kinematic 挡块持续穿插** ⇒ 求解器每帧往外推 ⇒ 一直在抖。判据 = 在 PIE 里算
-   `gap = 线段-线段距离 − (r_链 + r_挡块)`，负值即穿。**参考姿势干净 ≠ 运行时干净**：本项目参考姿势 0 穿，
-   PIE 待机 15 根链节里 11 根穿（−1.0），手臂那条 −5.9。
-2. **链在重力 + 软限下自己摆** ⇒ 身体完全静止时链仍在动。判据：**必须同时记驱动骨**（pelvis/spine/thigh）
-   的位移当基线。本项目基线 0.00 cm 而链 0.79 cm ⇒ 是链在动；没有基线就会把身体摆动记成抖动。
-3. **深穿插 ≠ 稳态轻压**：−5~−6 cm（胖挡块压进链）必须消；**−0.3 cm 且逐帧几乎不变**的是"链靠在大腿上"的
-   稳态轻压，不是抖的来源，不要为它牺牲几何真实性（也别为了它把挡块缩到脱离真实围度）。
-
-### 6.5 收窄碰撞集
-
-原则：**只让必要的骨参与碰撞**。与挂饰无关又虚胖的部位优先移出，但移出前先算中心距，判断"能不能靠缩半径解决"：
-本项目链到 `lowerarm_l` 轴线只有 ~4.7 cm，要不接触得把前臂压到 2.2 cm（比真手臂细）⇒ 只能移出碰撞集。
-用 `set_physics_asset_collision(bone_name=<链节>, other_bones=[...], disable=true)`，读回
-`collision_disabled_with` 验证（本项目 15/15 链节各排掉 6 根手臂骨）。
-
-### 6.6 链的起步参数
-
-- 链节 body：`PhysType_Simulated`；胶囊半径取链的视觉半径（本项目 2.0~2.5），长度取骨段长。
-- **叶骨方向要反推**：链末端没有子骨可推方向时，用"自身在父骨空间的偏移"转回本骨空间
-  （`Direction = T.Rotation.UnrotateVector(T.Translation)`，**不取反**；`T` = 该骨参考姿势的局部变换），
-  别退回默认 `(0,0,1)`——那会让末端胶囊横着戳出去 90°。判据：把胶囊的局部轴用骨的世界变换转出去，
-  应与世界空间的"父骨→本骨"方向**夹角 ≈ 0°**（本项目实测 0.0°；只看两个骨的**局部**轴不可比）。
-- 其余身体 body：`PhysType_Kinematic`（动画驱动，作挡块；碰撞开启）。
-- 链内关节：swing/twist 受限（本项目 25°/15°）、线性锁死、`bSoftConstraint` 开；链根接到躯干骨
-  （本项目 `pelvis`；需要中间骨如 `lower_body` 时先把它加回来）。
-- 阻尼在 `DefaultInstance.LinearDamping/AngularDamping`（本项目 1.5）。**半径同时是质量来源**（质量来自形状体积）
-  ⇒ 半径 2.5→2.0 大约让质量减半，链会变"活"；改尺寸时把这点算进去。
-- 抖还没清掉时，按代价排序的下一批旋钮：收窄关节角 → 角驱动（目标摇摆，"保初始造型"那一套）→ 再谈挡块。
-
-### 6.7 这类工作的方法学
-
-- 一个量测脚本同时做三件事：几何（`reflect_probe`）+ 姿势（PIE 组件，没有 PIE 就退参考姿势）+
-  **累计状态文件**。"抖"只能靠"与上一次采样比"得到，且必须带两个守卫：姿势空间切换（ref_pose ↔ PIE）
-  与**世界变更**（重启编辑器后世界原点变了，位移会是几百 cm ⇒ 直接丢弃该样本）。
-- 动手前先留一份基线（参考姿势 + PIE 待机各一份），否则无法归因是变好还是变坏。
-- 一轮只动一类（尺寸 / 碰撞集 / 关节参数），每轮重量同一条指标。
-
+> **这一节已拆成独立 skill**：`unreal-cloth-physics-case-chain-rigidbody`（附属链做真碰撞的完整配方）。
+> **这一节已拆成独立 skill**：`unreal-cloth-physics-case-ragdoll`（整具骨架变 ragdoll 的配方）。

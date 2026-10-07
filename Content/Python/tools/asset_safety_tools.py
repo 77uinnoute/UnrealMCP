@@ -2,8 +2,9 @@
 Asset Safety Tools for Unreal MCP.
 
 Provides the MCP tool surface for the bridge's asset-safety commands
-(safe_delete_asset / list_asset_blockers / asset_status / list_disk_only_assets /
-move_asset / move_directory / clear_blendables / remove_blendable / list_blendables).
+(safe_delete_asset / list_asset_blockers / list_broken_references / asset_status /
+list_disk_only_assets / move_asset / move_directory / clear_blendables / remove_blendable /
+list_blendables).
 These exist because scripted delete+create loops hit modal dialogs and
 redirector/reference deadlocks: every command stays modal-free and returns conflicts as
 structured JSON.
@@ -26,7 +27,8 @@ def register_asset_safety_tools(mcp: FastMCP):
     """Register asset safety tools with the MCP server."""
 
     @mcp.tool()
-    def safe_delete_asset(ctx: Context, asset_path: str, force: bool = False) -> Dict[str, Any]:
+    def safe_delete_asset(ctx: Context, asset_path: str, force: bool = False,
+                          dry_run: bool = False) -> Dict[str, Any]:
         """
         Delete an asset with zero modal dialogs: object redirectors pointing at
         the asset are deleted first; remaining referencers are reported as
@@ -41,19 +43,45 @@ def register_asset_safety_tools(mcp: FastMCP):
                 single delete order works. `detached[]` then lists exactly which
                 references were broken (level actor instances destroyed, in-asset
                 object properties cleared). Default false keeps the old behaviour
-                byte for byte. If a referencer cannot be detached (one that is only
-                on disk), the delete is refused with reason=referencers_not_detachable
-                and nothing is removed.
+                byte for byte. Before breaking anything, force runs a read-only
+                pre-flight and refuses with reason=would_fail_* when the delete
+                could not finish anyway (the package file is read-only, the asset
+                still has an open editor, or a live referencer sits outside every
+                package the command can clear) - it no longer clears references it
+                cannot finish deleting.
+            dry_run: Report only. `would_clear[]` lists exactly what a force call
+                would clear (referencer + would_clear_property:<path>), plus
+                `would_delete` and `would_fail`/`would_fail_reason` (the same verdict
+                the real call would hit - including world_partition_open /
+                world_partition_referenced / the pre-flight reasons); nothing is
+                modified, marked dirty, saved or deleted. This is the one safe_delete
+                call that still answers while a World Partition level is open (a real
+                delete is refused there), so it is how you price a delete in a WP
+                level. When the target IS a redirector this is also the difference
+                between a report and a trap: a REAL call runs the engine's
+                IAssetTools::FixupReferencers, which rewrites the referencing
+                packages and then opens a MODAL 'Redirector Update Report' window
+                that blocks the editor and this bridge until a human clicks it
+                (no unattended path, the dialog policy cannot suppress it) - the
+                dry run returns `requires_fixup`/`slow_operation` and touches
+                nothing. Use it before committing to a force delete.
 
         Returns:
-            Dict with deleted, was_redirector, blockers, detached ([] unless force) and,
-            when deleted is false, a `reason` naming the measured cause
-            (blocked_by_referencers / referencers_not_detachable / living_objects_in_package /
-            memory_pinned / package_file_locked) plus `referencers`. `deleted` is true only when
-            BOTH the package file is gone and the object is gone from memory (and the response
-            reports `registry_entry_remaining` so the three-way state is checkable) - a blueprint
-            that could not be removed is reported as deleted=false with the reason, never as a
-            silent success.
+            Dict with deleted, was_redirector, blockers, detached ([] unless force),
+            would_clear/would_delete/would_fail (dry_run) and, when deleted is false, a
+            `reason` naming the measured cause (blocked_by_referencers /
+            referencers_not_detachable / would_fail_package_file_read_only /
+            would_fail_asset_editor_open / would_fail_unreachable_referencers /
+            living_objects_in_package / memory_pinned / package_file_locked) plus
+            `referencers` and `workarounds[]` (the routes that do work: close the
+            editor, overwrite the files on disk, copy under another name). `deleted`
+            is true only when BOTH the package file is gone and the object is gone
+            from memory (and the response reports `registry_entry_remaining` so the
+            three-way state is checkable) - a blueprint that could not be removed is
+            reported as deleted=false with the reason, never as a silent success.
+            When the target itself is a redirector the command runs the engine's
+            referencer fixup instead (the single-asset form of the Content Browser's
+            "Fix Up Redirectors") and reports redirection_fixed.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -63,8 +91,8 @@ def register_asset_safety_tools(mcp: FastMCP):
                 logger.error("Failed to connect to Unreal Engine")
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
-            params = {"asset_path": asset_path, "force": force}
-            logger.info(f"Safely deleting asset: {asset_path} (force={force})")
+            params = {"asset_path": asset_path, "force": force, "dry_run": dry_run}
+            logger.info(f"Safely deleting asset: {asset_path} (force={force}, dry_run={dry_run})")
             response = unreal.send_command("safe_delete_asset", params)
 
             if not response:
@@ -112,6 +140,70 @@ def register_asset_safety_tools(mcp: FastMCP):
 
         except Exception as e:
             error_msg = f"Error listing asset blockers: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
+    def list_broken_references(ctx: Context, scope: str, kinds: list = None,
+                               load_missing: bool = False, max_results: int = 200) -> Dict[str, Any]:
+        """
+        List the references that no longer resolve, by content scope. The reverse of
+        list_asset_blockers: it answers "what do I point at that is gone", which the
+        referencer graph cannot. A deleted or renamed target leaves a null object
+        reference, and the asset itself stays healthy - the engine mentions it only in an
+        editor log line ("has a sample with no/invalid animation").
+
+        Domains (kinds): blendspace (samples without an animation, plus a sample whose
+        animation belongs to another skeleton), anim_blueprint (playback node assets in
+        anim graphs), anim_montage (non-empty segments with no animation, a segment whose
+        animation belongs to another skeleton, and bone tracks the montage's skeleton
+        cannot resolve), anim_sequence (bone tracks that do not exist on the sequence's
+        skeleton - the shape a "flattened" animation leaves behind: the engine drops those
+        tracks at load time and every reference is still intact), skeletal_mesh_comp
+        (loaded level components that run an AnimClass but have no mesh - that
+        combination is what an unresolved mesh reference leaves).
+
+        Read-only: nothing is modified, marked dirty or saved. Only assets already in
+        memory are scanned unless load_missing is set, because loading a content
+        directory to answer "is anything broken" stalls the editor.
+
+        Args:
+            scope: Content directory to scan, e.g. "/Game/MMD/FeiYing".
+            kinds: Subset of ["blendspace", "anim_blueprint", "anim_montage",
+                "anim_sequence", "skeletal_mesh_comp"]; default all. An unknown name is an
+                error, not a silent skip.
+            load_missing: Load assets that are not in memory (default False).
+            max_results: Cap on reported entries (default 200).
+
+        Returns:
+            Dict with broken (owner_asset / owner_kind / field / path_hint / was /
+            severity / detail), broken_count, scanned, assets_in_scope, truncated,
+            loaded_only, kinds. Errors: invalid_params (scope unknown, unknown kind).
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            params: Dict[str, Any] = {"scope": scope, "load_missing": load_missing,
+                                      "max_results": max_results}
+            if kinds:
+                params["kinds"] = kinds
+
+            logger.info(f"Listing broken references in: {scope}")
+            response = unreal.send_command("list_broken_references", params)
+
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+
+            return response
+
+        except Exception as e:
+            error_msg = f"Error listing broken references: {e}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
@@ -205,7 +297,7 @@ def register_asset_safety_tools(mcp: FastMCP):
     @mcp.tool()
     def move_asset(ctx: Context, asset_path: str, new_path: str, update_referencers: bool = True,
                    refresh_registry: bool = True, search_paths: list = None,
-                   dry_run: bool = False) -> Dict[str, Any]:
+                   dry_run: bool = False, answer_dialogs: bool = False) -> Dict[str, Any]:
         """
         Rename or move an asset, and fix the packages that reference it.
 
@@ -245,6 +337,14 @@ def register_asset_safety_tools(mcp: FastMCP):
             search_paths: Paths to refresh, default ["/Game"]. Costs < 1s for all of
                 /Game on this project; narrow it on a huge project.
             dry_run: Report only - no move, no save, no directory creation.
+            answer_dialogs: Answer engine confirmation boxes affirmatively instead of
+                with their default, and record each one in `auto_answered_dialogs[]`.
+                Default false: a box returns its default value without ever building a
+                window, so the bridge cannot freeze - but for a confirmation that
+                default is "abort", which surfaces as a `rename_failed` refusal
+                carrying the hint that names this flag. Answering affirmatively is a
+                real decision (an auto-checkout prompt would be answered with "check
+                it out"), which is why it is opt-in.
 
         Returns:
             Dict with renamed, source, destination, new_path_loaded, in_memory_after,
@@ -252,7 +352,7 @@ def register_asset_safety_tools(mcp: FastMCP):
             map_package / loadable), referencers_saved, referencers_failed, unstorable,
             redirector_left, redirector_created_by_command, old_path_resolves (measured by
             resolving the old path, not inferred), old_path_target, registry_refreshed,
-            loaded_scan_packages. Refusals
+            loaded_scan_packages, dialog_policy, auto_answered_dialogs. Refusals
             carry an error code: destination_exists / source_missing / invalid_destination /
             source_load_failed / in_pie / rename_failed.
         """
@@ -270,6 +370,7 @@ def register_asset_safety_tools(mcp: FastMCP):
                 "update_referencers": update_referencers,
                 "refresh_registry": refresh_registry,
                 "dry_run": dry_run,
+                "answer_dialogs": answer_dialogs,
             }
             if search_paths:
                 params["search_paths"] = search_paths
@@ -290,7 +391,7 @@ def register_asset_safety_tools(mcp: FastMCP):
     @mcp.tool()
     def move_directory(ctx: Context, dir: str, new_dir: str, update_referencers: bool = True,
                        refresh_registry: bool = True, search_paths: list = None,
-                       dry_run: bool = False) -> Dict[str, Any]:
+                       dry_run: bool = False, answer_dialogs: bool = False) -> Dict[str, Any]:
         """
         Move a whole content directory (subdirectories included) to a new directory,
         running every contained asset through the same referencer fixup as
@@ -316,14 +417,20 @@ def register_asset_safety_tools(mcp: FastMCP):
             refresh_registry: Re-scan search_paths first (default true).
             search_paths: Paths to refresh, default ["/Game"].
             dry_run: Report only - nothing is moved, saved or created.
+            answer_dialogs: Answer engine confirmation boxes affirmatively instead of
+                with their default, and record each one in `auto_answered_dialogs[]`.
+                Default false: a box returns its default value without building a
+                window, so the bridge cannot freeze, but the answer is then whatever
+                the engine picked. Same opt-in decision as `move_asset`.
 
         Returns:
             Dict with source, destination, asset_count, moved_count, moved (new object
             paths), failed (asset + reason), the aggregated referencers_found /
             referencers_saved / referencers_failed / unstorable, redirector_left,
             source_dir_exists / source_dir_removed / destination_dir_exists (all measured
-            after the whole move), and assets[] with the full per-asset result. Refusals:
-            destination_exists / source_missing / invalid_destination / in_pie.
+            after the whole move), dialog_policy, auto_answered_dialogs, and assets[] with
+            the full per-asset result. Refusals: destination_exists / source_missing /
+            invalid_destination / in_pie.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -339,6 +446,7 @@ def register_asset_safety_tools(mcp: FastMCP):
                 "update_referencers": update_referencers,
                 "refresh_registry": refresh_registry,
                 "dry_run": dry_run,
+                "answer_dialogs": answer_dialogs,
             }
             if search_paths:
                 params["search_paths"] = search_paths

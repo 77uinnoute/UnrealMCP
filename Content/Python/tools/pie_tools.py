@@ -8,6 +8,10 @@ Thin pass-throughs to the bridge's `pie` commands. The contract that matters liv
     whole MCP channel.
   - get_actor_pose reports unknown bone names in `missing[]` instead of falling back to the actor
     transform (that fallback is what turns a typo into a plausible constant pose).
+  - inject_key pushes the event through the game viewport like a physical key. It reports the
+    viewport's raw return value (`viewport_handled`), which reads false for a key that feeds an
+    axis mapping. There is no same-frame delivery readback - the event is processed later in the
+    frame - so the only proof is reading the game's own state back.
 """
 
 import logging
@@ -129,5 +133,59 @@ def register_pie_tools(mcp: FastMCP):
 
         except Exception as e:
             error_msg = f"Error reading actor pose: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
+    def inject_key(ctx: Context, key: str, event: str = "tap") -> Dict[str, Any]:
+        """
+        Press / release / tap a KEY in the running PIE session.
+
+        This sits on the key side of a key->action binding, which makes it the injection that
+        proves the MAPPING. An action-level inject only proves the action reaches logic; the key
+        is what proves the binding itself. Events go through the game viewport - the same door a
+        physical key uses, SetIgnoreInput gate included - so a UI-focused or input-ignoring state
+        blocks them exactly as it blocks a person.
+
+        `viewport_handled` is only the viewport's return value, and it reads FALSE for a key that
+        feeds an axis mapping even though the input is used (measured: W returned false on a
+        DefaultPawn and the pawn then flew) - never read it as success. There is also no same-frame
+        delivery readback: the event is processed later in the frame, so anything read during this
+        call reflects the state from BEFORE it (measured: false on the press frame, true on the
+        release frame, while the input worked both times). Which binding reacted is not knowable
+        from here: read the game's own state back (`get_actor_pose`, the pawn's location, a
+        gameplay readout) - that is the only proof.
+
+        Args:
+            key: FKey name - the key, not the mapped action. e.g. "W", "SpaceBar",
+                "LeftMouseButton".
+            event: press / release / tap (default tap = press then release).
+
+        Returns:
+            Dict with key, event, viewport_handled, events[] (per-event viewport_handled),
+            player_input_class, frame, world_time_seconds. Outside a play session:
+            error=not_in_pie; a name that is not an FKey: error=unknown_key.
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            if not key:
+                return {"success": False, "error": "invalid_params",
+                        "message": "key is required (the FKey name, e.g. \"W\")"}
+
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            logger.info(f"inject_key: {key} ({event})")
+            response = unreal.send_command("inject_key", {"key": key, "event": event})
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+            return response
+
+        except Exception as e:
+            error_msg = f"Error injecting key: {e}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}

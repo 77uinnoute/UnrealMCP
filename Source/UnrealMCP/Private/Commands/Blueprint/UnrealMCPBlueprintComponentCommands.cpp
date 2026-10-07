@@ -106,6 +106,26 @@ namespace
         Obj->SetStringField(TEXT("component_template"),
             Node->ComponentTemplate ? Node->ComponentTemplate->GetPathName() : FString());
 
+        // Relative location of the component TEMPLATE - the construction script's rest value - in the
+        // same frame the entry already reports through `parent` / `parent_inherited`. Read from the
+        // template rather than from a generated-class instance: the template is what this command
+        // already hands out as `component_template`, and an uncompiled blueprint has no usable instance.
+        // A component with no transform (a plain UActorComponent) gets an explicit null instead of a
+        // missing field, so "no transform" stays distinguishable from "this build forgot the field".
+        if (const USceneComponent* SceneTemplate = Cast<USceneComponent>(Node->ComponentTemplate))
+        {
+            const FVector Location = SceneTemplate->GetRelativeLocation();
+            TArray<TSharedPtr<FJsonValue>> LocationJson;
+            LocationJson.Add(MakeShared<FJsonValueNumber>(Location.X));
+            LocationJson.Add(MakeShared<FJsonValueNumber>(Location.Y));
+            LocationJson.Add(MakeShared<FJsonValueNumber>(Location.Z));
+            Obj->SetArrayField(TEXT("relative_location"), LocationJson);
+        }
+        else
+        {
+            Obj->SetField(TEXT("relative_location"), MakeShared<FJsonValueNull>());
+        }
+
         // Effective parent: an SCS parent node, or - for a component hanging under an inherited one
         // (a native component such as ACharacter::Mesh, or a parent blueprint's SCS component, e.g.
         // BP_ThirdPersonCharacter's CameraBoom under the native capsule) - the name recorded on the node
@@ -312,6 +332,24 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleGetBlueprintComponent
     ResultObj->SetNumberField(TEXT("root_count"), RootNames.Num());
     ResultObj->SetBoolField(TEXT("unique_root"), RootNames.Num() == 1);
     ResultObj->SetArrayField(TEXT("duplicate_components"), MakeStringArray(Duplicates));
+
+    // How many entries carry no transform, so "every entry is null" can be told apart from "this
+    // response has no such field" without a caller walking every entry by hand.
+    int32 NoTransformCount = 0;
+    for (const TSharedPtr<FJsonValue>& ComponentValue : Components)
+    {
+        const TSharedPtr<FJsonObject>* ComponentObject = nullptr;
+        if (!ComponentValue.IsValid() || !ComponentValue->TryGetObject(ComponentObject) || !ComponentObject)
+        {
+            continue;
+        }
+        const TSharedPtr<FJsonValue> LocationField = (*ComponentObject)->TryGetField(TEXT("relative_location"));
+        if (!LocationField.IsValid() || LocationField->IsNull())
+        {
+            ++NoTransformCount;
+        }
+    }
+    ResultObj->SetNumberField(TEXT("no_transform_count"), NoTransformCount);
     return ResultObj;
 }
 
@@ -797,6 +835,9 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetComponentCollision
     ResultObj->SetNumberField(TEXT("failed_count"), Failed.Num());
     ResultObj->SetObjectField(TEXT("collision"), CollisionObj);
     AppendCompileResult(Blueprint, ResultObj);
+    // Same consequence as set_component_property: the write landed on the SCS template, and the instances
+    // already standing in the level keep their own collision instead of following it.
+    FUnrealMCPCommonUtils::AddTemplateInstanceReport(Blueprint, ResultObj);
     return ResultObj;
 }
 

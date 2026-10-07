@@ -242,6 +242,7 @@ def register_asset_pipeline_tools(mcp: FastMCP):
         skeleton_path: Optional[str] = None,
         create_physics_asset: Optional[bool] = None,
         physics_asset: Optional[str] = None,
+        clear_physics_asset: bool = False,
         import_morph_targets: bool = True,
     ) -> Dict[str, Any]:
         """
@@ -252,9 +253,18 @@ def register_asset_pipeline_tools(mcp: FastMCP):
         importer default); import_morph_targets (default True) brings blend shapes in as morph
         targets - without it the morph curves of any animation have nothing to drive.
 
+        A replace_existing import that replaces a mesh KEEPS its existing physics_asset: the
+        importer writes None onto the new mesh, and "do not create one" is not "clear mine", so
+        the command restores the previous value and reports physics_asset_restored. Pass
+        clear_physics_asset=True to really leave it empty (that combination is reported as
+        cleared=["physics_asset"]); combining it with physics_asset is refused as conflicting_params.
+
         Response: the import_assets envelope plus asset_type ("skeletal_mesh") and
         supported_extensions; sibling assets (Skeleton / PhysicsAsset / auto materials) show up in
-        companion_assets and are read back from disk.
+        companion_assets and are read back from disk. Each replaced file item also carries
+        `equivalence` with slot/material drift: slots_added / slots_removed / slots_renamed /
+        materials_lost / materials_changed (a re-import that cannot line the slot names up keeps the
+        slot and drops the material instance - that is what materials_lost reports).
         """
         params = {
             "paths": paths,
@@ -269,6 +279,8 @@ def register_asset_pipeline_tools(mcp: FastMCP):
             params["create_physics_asset"] = create_physics_asset
         if physics_asset:
             params["physics_asset"] = physics_asset
+        if clear_physics_asset:
+            params["clear_physics_asset"] = clear_physics_asset
         return _forward_import("import_skeletal_mesh", paths, params)
 
     @mcp.tool()

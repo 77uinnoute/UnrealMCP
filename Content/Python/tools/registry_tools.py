@@ -43,8 +43,8 @@ def register_registry_tools(mcp: FastMCP):
           - enum-valued parameters accept both the C++ spelling and the python snake_case one
           - import_assets defaults to replace_existing=false; a same-name target fails per file and
             the pre-existing asset is never reported as this import's product
-          - deferred=True turns execute_python_* into a job; only use it for work that provably
-            exceeds the client timeout (the tool's own docs spell out what deferred costs)
+          - execute_python_* are strictly synchronous (no job mode): the call must finish inside
+            the client timeout, so heavy work has to be split into several short calls
 
         Args:
             category: Optional filter, e.g. "material", "particle", "blueprint_node", "asset", "mcp".

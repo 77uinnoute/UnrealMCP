@@ -293,9 +293,68 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             _unreal_connection = None
         logger.info("Unreal MCP server shut down")
 
+# Text the MCP client receives on initialize (MCP protocol `instructions`). Kept short on
+# purpose: it is injected into every session, so it carries only the lay of the land plus the
+# three escape hatches - everything else is invisible at load time, where a client shows tool
+# NAMES and nothing more.
+SERVER_INSTRUCTIONS = """\
+UnrealMCP —— UE 编辑器控制面：300+ 条命令经本地 TCP bridge(127.0.0.1:55557) 打到运行中的编辑器。
+会话加载时你只会拿到工具「名字」加这一段；正文要用 search_tool 现取。
+
+【域与条数】（快照，实时值以 list_mcp_commands(category=...) 为准）
+  anim_sequence 78  动画序列：骨骼轨道/曲线/Notify/NotifyTrack/SyncMarker/段/帧率/压缩/加权/采样回读（建序列必须走 C++ 命令）
+  anim_montage  54  蒙太奇：section/slot/segment/branching point/notify track/blend in-out
+  blueprint     33  蓝图资产与组件层级：变量、函数图与签名、接口、组件增删/换根/挂接、比对、存在性检查
+  blueprint_node 32 图节点：事件/函数/变量/常量节点、引脚默认值、连线与拆线、Cast/Switch/Comment、拆合引脚
+  umg           33  控件蓝图：控件树与槽、属性、绑定、控件动画、加入 PIE 视口
+  material      23  材质图：表达式、连线、Custom HLSL 校验、后处理 blendable、单节点预览、重编译
+  particle      19  Cascade 粒子：emitter/module/属性与分布曲线/LOD
+  pcg           16  程序化生成：图节点、mesh selector、组件生成与清理
+  editor        17  关卡 actor：增删查改、变换、视口聚焦、控制台变量、截图、资产编辑器开关
+  asset         12  资产生命周期：create/delete/move(_directory)、引用阻断者、磁盘孤儿、后处理 blendable
+  asset_edit     6  导入与资产属性：import_assets/texture/skeletal_mesh/animation、inspect_skeletal_mesh、set_asset_properties
+  physics        6  PhysicsAsset：body/constraint 增删、碰撞设置、body 清单
+  reflection     3  通用属性反射：reflect_probe / set_object_property / list_enum_values
+  pie            3  PIE：start_pie / stop_pie / get_actor_pose
+  mcp            4  python 执行（execute_python_command/file）、list_mcp_commands、ping
+  python-api     2  引擎编辑器 python API 层：python_api_index / python_api_doc
+  project        1  create_input_mapping（写 Config/DefaultInput.ini）
+  cloth          1  apply_cloth_masks
+
+【三个逃生口，分工不同、不可互相替代】
+  1) 命令面 list_mcp_commands(category?)：权威清单，带 params(含 required) 与 policy flags
+     （loopback_forbidden=回环禁用 / mutates_graph / persist_after_success / hidden）。查名字优先于猜名字。
+  2) 属性面 reflect_probe / set_object_property：通用反射读写。target 可收资产 / 子对象路径 / 类（读 CDO）/
+     蓝图图节点 / SCS 组件模板 / 材质表达式；property 可收路径 A[0].B[2].C（数组下标、映射键）。
+     裸 UPROPERTY、Transient、只读（VisibleInstanceOnly）字段只有它能读——例：UPhysicsAsset.SkeletalBodySetups
+     读不到就换它拿子对象路径（…:SkeletalBodySetup_0），再用 python 批量读子对象属性。
+  3) python 面 python_api_index(class) / python_api_doc(class, function)：引擎编辑器 python API 的成员与签名，
+     命中失败时回最近候选名。list_mcp_commands 看不到这一层。
+
+【命令面状态】少数内部/诊断用命令被有意摘出工具面（搜不到，但仍可经 bridge 直调）：见服务端 HIDDEN_TOOLS。
+
+【硬约束（违反会冻死整条 bridge 或崩编辑器）】
+  - 资产别手搓 unreal.EditorAssetLibrary.create_asset / delete_asset：脏资产或重名会弹模态框卡死 MCP 通道；
+    用 create_asset_safe / delete_asset_safe（后者先静默保存再删，重名回结构化 asset_exists）。
+  - 导入必须走 import_assets（手搓 AssetImportTask 命中 Interchange 会崩编辑器）。
+  - 结构性写（AnimGraph / SCS 组件树 / 材质图 / 蒙太奇）先 close_asset_editors。
+  - 长脚本落盘再 execute_python_file；>30 行不要塞内联字符串（传输层会截断/损坏）。
+  - python 里不要 sleep / 轮询阻塞 GameThread；等待拆成多次短派发。命令一律同步（没有 deferred/job 模式）：
+    必须能在客户端超时（~90s）内跑完，重活拆成多次短调用，慢活用 timeout<=600 拉长等待。
+  - 协议：命令带 4 字节大端长度前缀，回执有 bytes_received 校验；返回 payload_corrupted 时直接重发即可。
+  - dirty：set_editor_property() 本身已触发 PostEditChangeProperty；表达式/材质上没有 post_edit_change()、
+    也没有 mark_package_dirty()（调了会在写入之后才抛 AttributeError）。
+  - 通用：先读回执 status 再往下走；蓝图结构改动后编译；材质连线只在收尾 recompile_material 一次。
+
+【流程】动手前按域加载对应 skill（material→unreal-material-authoring、blueprint→unreal-blueprint-authoring、
+umg/particle/pcg/asset-pipeline/animation/cloth/retarget/level 同理）。改了
+Plugins/UnrealMCP/Content/Python/** 必须重启 unrealMCP server。\
+"""
+
 # Initialize server
 mcp = FastMCP(
     "UnrealMCP",
+    instructions=SERVER_INSTRUCTIONS,
     lifespan=server_lifespan
 )
 
@@ -335,6 +394,39 @@ register_registry_tools(mcp)
 register_python_api_tools(mcp)
 register_pie_tools(mcp)
 
+# Curated tool surface. Names listed here are withdrawn from what an MCP client is offered, while
+# staying callable over the bridge (list_mcp_commands keeps reporting them). Keep the list short
+# and justified: most commands ARE part of a documented skill workflow, and withdrawing one of
+# those removes the capability outright - a client cannot search for a tool that is not registered.
+HIDDEN_TOOLS = (
+    "anim_self_check",             # liveness probe for the animation domain - same role as ping
+    "asset_status",                # read-only asset triage; does_asset_exist + list_asset_blockers cover the daily case
+    "get_source_files",            # import provenance, rarely needed after the import itself
+    "list_disk_only_assets",       # orphan .uasset scan, hand-run only
+    "prune_widget_bindings",       # only reports leftovers; the fix is a graph edit
+    "set_actor_custom_depth_safe",  # custom depth / stencil, niche
+)
+
+
+def _hide_tools(names):
+    """Withdraw the curated names from the advertised tool surface (best effort, never fatal)."""
+    manager = getattr(mcp, "_tool_manager", None)
+    if manager is None or not hasattr(manager, "remove_tool"):
+        logger.warning("Tool surface curation skipped: ToolManager.remove_tool is unavailable")
+        return
+    for name in names:
+        try:
+            manager.remove_tool(name)
+        except Exception as exc:  # not registered, or already withdrawn
+            logger.warning("Tool %s left on the surface (%s)", name, exc)
+    try:
+        logger.info("Tool surface: %d tools advertised after curation", len(manager.list_tools()))
+    except Exception:
+        pass
+
+
+_hide_tools(HIDDEN_TOOLS)
+
 def _collect_registered_tools() -> str:
     """反射汇总 FastMCP 实际注册的工具清单，杜绝 info() 与注册表漂移。"""
     try:
@@ -352,167 +444,21 @@ def _collect_registered_tools() -> str:
 
 @mcp.prompt()
 def info():
-    """Information about available Unreal MCP tools and best practices."""
+    """List the Unreal MCP tools currently registered with this server."""
     return f"""
-    # Unreal MCP Server Tools and Best Practices
+    # Unreal MCP Server Tools
 
-    ## Registered Tools (auto-generated from the live registry — always accurate)
+    ## Registered Tools (auto-generated from the live registry - always accurate)
     {_collect_registered_tools()}
 
-    ## Best Practices (CRITICAL — violating these froze the whole MCP bridge in practice)
-
-    ### Asset Safety
-    - NEVER call `unreal.EditorAssetLibrary.create_asset`/`delete_asset` directly inside
-      `execute_python_command`: dirty assets or name conflicts pop MODAL DIALOGS that block
-      the editor GameThread and freeze the entire MCP bridge (90s tool timeouts, WinError 10053).
-      Always use the `create_asset_safe` / `delete_asset_safe` tools instead.
-    - `delete_asset_safe` silently saves dirty assets first (no save prompt), then deletes;
-      duplicate names return a structured `asset_exists` error instead of a rename dialog.
-
-    ### Asset Import
-    - Import source files with `import_assets(paths, destination_path)` — NEVER hand-roll
-      `unreal.AssetImportTask` + `asset_tools.import_asset_tasks` inside execute_python_*.
-      Interchange (the UE5 default texture importer) drains the GameThread task queue from
-      inside the import and hits `Assertion failed: ++Queue(QueueIndex).RecursionGuard == 1`
-      (TaskGraph.cpp:677) — the EDITOR CRASHES, it is not an error return.
-    - `import_assets` disables the Interchange feature flag for the requested extensions and
-      READS IT BACK before importing; a readback mismatch aborts with `cvar_override_failed`
-      and nothing is imported. The flags stay off for the rest of the session, so later imports
-      of those extensions also take the legacy importer — `cvar_overrides` records what changed.
-    - Generic asset property writes (texture srgb / lod_group / compression / mip_gen / filter)
-      belong in `set_asset_properties(asset_path, props)`: friendly property names, enum members
-      matched ignoring case and underscores, per-item errors instead of python exceptions.
-      Always check `failed_count`; nothing is rolled back.
-    - Expression output names must not be guessed when connecting: read the `outputs` array
-      returned by `create_material_expression`, or the `available_outputs` in a failed connect.
-      `TextureSample` exposes RGB/R/G/B/A; VectorParameter / TextureCoordinate / every
-      single-output node exposes "" (empty string, not "RGB" or "UV").
-
-    ### Long-running Python
-    - Do NOT `time.sleep()`/poll inside `execute_python_command`: it blocks the GameThread,
-      and the event you are waiting for (render, file write) needs the GameThread to tick —
-      a deadlock. Split waits into multiple short commands instead.
-    - Scripts longer than ~30 lines MUST use `execute_python_file`: write the script to a
-      local .py file (e.g. Saved/MCPScripts/x.py) and pass the absolute path. Long inline
-      strings have historically been corrupted upstream of the bridge (random
-      middle-of-payload loss → SyntaxError); file execution is immune to this.
-    - Execution is SYNC BY DEFAULT; `deferred=True` is the EXCEPTION. Use it only when the work
-      provably exceeds the client tool timeout (~90s): bulk writes across dozens of assets,
-      heavy compiles/imports, long batch loops. For merely slow calls widen the sync wait with
-      `timeout=<seconds>` (<=600s) instead — do not go async "to be safe".
-      What deferred costs: while the job holds the GameThread the whole MCP channel is frozen
-      (`poll_python_job` itself may time out — Saved/MCPJobs/<job_id>.json on disk is the
-      fallback), the job file is written ONLY on completion (so 'pending' cannot distinguish
-      queued / running / editor-already-dead), and there is no progress or cancellation. Prefer
-      several short IDEMPOTENT jobs over one long one, and pass a `description` to label it.
-    - Prefer an existing tool over a hand-rolled script: call `list_mcp_commands` (optionally
-      with a category) before writing python. Re-implementing an engine path the plugin already
-      wraps is how editors die — asset import is the canonical case (`import_assets` disables
-      Interchange and reads the flag back; a raw AssetImportTask crashes the editor).
-    - Do NOT use top-level `return` in the python code (executed as a file); print() results.
-
-    ### Python API pitfalls (prefer the safe wrappers)
-    - Create assets: `unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, path, cls, factory)`
-      (`EditorAssetLibrary.create_asset` does NOT exist). To rebuild an existing asset use
-      `create_asset_safe(..., recreate=True)` (silent save+delete first, no modal).
-    - Shading model enum is `unreal.MaterialShadingModel.MSM_UNLIT` (there is no `unreal.ShadingModel`).
-      Enum member names differ in 5.5 — probe with `list_enum_values` before hardcoding.
-    - Connect expressions: `MaterialEditingLibrary.connect_material_expressions(src, '', dst, 'InputName')`
-      (`FExpressionInput` is not python-constructible; '' = first input/output; input names are
-      C++ member names like A/B/Alpha/ExponentIn; Custom node inputs use their declared input_name).
-      NOTE: `MaterialEditingLibrary` has NO get_material_expression(index) in UE 5.5 — the
-      `connect_material_expressions_safe` tool resolves indices via list_material_expressions +
-      load_object; don't hand-roll index lookups in scripts.
-      `list_material_expressions` returns each expression's `object_path`, and the entries'
-      `inputs` are structured as `{{input_name, expression, output_index, connected}}` (read
-      `input_name`, not a bare string, when matching pins).
-      In python, get an expression object with `unreal.load_object(mat, '<ExprName>')` — the
-      outer must be the material object; a package-rooted object path returns None.
-    - Custom HLSL: run `validate_custom_hlsl(code, output_type)` before writing it;
-      `set_material_expression_property(property="code")` runs the same C++ rule set and refuses
-      the write on errors (naming a shader parameter struct such as `SceneTexturesStruct`/
-      `*UniformParameters` crashes the editor at draw time, not at compile time). The check lives
-      in the bridge, so it also guards scripts that write `code` themselves - see the
-      `unreal-material-authoring` skill.
-    - Custom node input pins bind to the code by NAME: create the node with its pins in ONE call
-      (`create_material_expression(asset_path, 'MaterialExpressionCustom', code=..., inputs=['In_Base', ...])`,
-      linted before the node exists), add/remove a pin on an EXISTING node with
-      `add_custom_input(asset_path, expression_name, input_name)` /
-      `remove_custom_input(asset_path, expression_name, input_name)` (both keep the other pins'
-      wiring — never assign the whole `inputs` array, which rebuilds the elements and drops it),
-      rename a pin with
-      `set_custom_input_name(asset_path, expression_name, old_name, new_name)`, rename the
-      matching HLSL variable in the same pass, then run `validate_custom_expression(asset_path, expression_name)`
-      to cross-check pins against code before compiling. Pins have no type of their own —
-      type comes from whatever is connected upstream, so `inputs` takes names only.
-      A pin that was added but never wired shows up at compile time as
-      `Custom material <node> missing input N (X)`, decoded under `error_details` of
-      `get_material_compile_errors`.
-    - Whole-graph cleanup (leftover orphan nodes inflate `count` and can hold names): use
-      `wipe_material_graph(asset_path)` and check `remaining` is 0. Announcing "empty" from a
-      single bulk delete is wrong — the engine's bulk delete removes from the array it iterates,
-      so one pass only clears part of the graph (observed 102 -> 50 -> 24 -> 11).
-    - Compile diagnostics: judge the CURRENT state ONLY by `errors_by_feature_level`. The log
-      fallback is split into `log_errors_this_compile` / `log_errors_historical` by the time of
-      the last graph-changing MCP command (`boundary_source`), because the log tail still holds
-      intermediate-state failures from earlier edits.
-    - Wiring does NOT compile any more: `connect_material_expressions_safe` / `connect_material_pin` /
-      `disconnect_material_property` only wire (a recompile used to ride along and cost ~250ms per
-      connect, i.e. ~2.4s for a 10-node graph — measured). Finish a material with
-      `recompile_material(asset_path, save=True)` ONCE: it does the material-level refresh that makes
-      the viewport pick expression-only edits up, plus one recompile. Skip it and the asset reads back
-      correct while the viewport keeps drawing the old shader.
-    - Deleting a throwaway/probe asset MUST go through `safe_delete_asset`: engine
-      `EditorAssetLibrary.delete_asset` on an asset that is still referenced fails, leaves the package
-      flagged `potentially corrupt`, and the editor then AVs on a later refresh (logged crash).
-    - Material expression operations MUST use current `name` or `desc`; expression `index` is diagnostic only and globally deprecated as an operation argument. Duplicate or missing locators return candidates without modifying the material. The addressing keys are exactly `expression_name` / `expression_desc` / `expression_type` (`name` / `desc` / `type` are NOT read — a misspelled key comes back with `unknown_keys` + `did_you_mean`). Use `delete_material_expressions` for independent batch deletion; it continues per item, does not inspect references or roll back, and reports `failed_count` / `partial` next to a `success` that reflects the items.
-    - PostProcessVolume blendables: `PostProcessSettings.blendables` is read-protected; only
-      `volume.add_or_update_blendable(mat, weight)` works, AND you must toggle `enabled`
-      False->True afterwards or the binding has no visual effect — use `add_blendable_to_post_volume`.
-    - Custom depth: set `render_custom_depth=True` + `custom_depth_stencil_value` on components
-      (NOT `custom_stencil_value`), and the project needs `r.CustomDepth=3` (check via
-      `get_console_variable` — python has no cvar read API).
-    - `set_actor_location` needs explicit sweep arg: `actor.set_actor_location(loc, False, False)`.
-    - Selection: `EditorLevelLibrary.get_selected_level_actors()` + `actor.set_editor_property('selected', False)`.
-
-    ### Asset editors (closing them without side effects)
-    - To close an asset's editors use the `close_asset_editors(asset_path)` TOOL, not
-      `AssetEditorSubsystem.close_all_editors_for_asset` from python. The engine records
-      the asset's next open location when its tab closes (`[AssetEditorToolkitTabLocation]`),
-      so a raw close rewrites where the user sees that asset: with the default
-      `AssetEditorOpenLocation`, the asset silently becomes a standalone floating window
-      (and a tiny one when no layout file has been saved yet). `close_asset_editors`
-      restores the record (dropping the key when it never existed) and reports
-      `closed_editors` / `tab_location_before` / `tab_location_restored`.
-    - You still MUST close the editors before scripted graph edits (an open material editor
-      keeps its own graph nodes + undo stack and will roll the changes back).
-
-    ### Dirty marking and notifications from python
-    - `set_editor_property(...)` already fires `PostEditChangeProperty`; there is NO
-      `post_edit_change()` method on expression/material objects and NO `mark_package_dirty()`
-      on materials — calling them raises AttributeError AFTER the write already happened.
-    - To dirty a package from python either rely on `set_editor_property`, or call
-      `asset.modify()`, or `unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=True)`
-      when you actually want it written to disk. Save return values are not proof: read the value
-      back and assert on it.
-    - A python command that fails may already have produced writes before raising (the traceback
-      is reported, the side effects are not rolled back). Read the asset back to establish what
-      actually landed instead of assuming the previous step was a no-op.
-
-    ### Protocol integrity
-    - Commands are sent with a 4-byte big-endian length prefix; the bridge echoes `bytes_received`
-      which is verified against the sent length. If a command returns
-      `{{"status": "error", "error": "payload_corrupted"}}`, simply resend it.
-
-    ### General
-    - Check command responses for `status` before proceeding; errors are returned directly.
-    - Compile blueprints after structural changes; recompile materials after wiring changes.
-    - Use `take_screenshot` with an absolute .png path for visual verification (filename is
-      honored; unlike the HighResShot console route it never black-frames or renames files).
-    - Keep the viewport focused/visible for reliable screenshots.
+    ## Guidance
+    Per-tool guidance lives in each tool's own description and in the matching skill
+    (unreal-material-authoring, unreal-blueprint-authoring, ...). Read it there: call
+    list_mcp_commands for the authoritative list, or the tool itself when a call fails.
+    This prompt deliberately carries no duplicate prose.
     """
 
-# Run the server
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unreal MCP server")
     parser.add_argument("--recv-timeout", type=float, default=10.0,

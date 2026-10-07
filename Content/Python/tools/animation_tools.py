@@ -2209,3 +2209,39 @@ def register_animation_tools(mcp: FastMCP):
             Errors: section_not_found with `candidates`, editor_not_open.
         """
         return send_command("jump_to_section", {"asset_path": asset_path, "section": section})
+
+    # ------------------------------------------------------------------
+    # BlendSpace samples
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    def set_blend_space_samples(ctx: Context, samples: List[Dict[str, Any]], asset_path: str = "",
+                                finalize: bool = True, persist: bool = True) -> Dict[str, Any]:
+        """
+        Write a BlendSpace's sample list and build its runtime data, in one call.
+
+        The sample array is REPLACED whole, so `samples` is the final list - a sample left out is
+        a sample removed. Every entry is {animation: <asset path>|null, sample_value: {x, y, z}}.
+
+        Two failures this closes that the raw path leaves open: writing SampleData from python
+        (set_editor_property) silently does not persist even though save_asset returns True, and a
+        BlendSpace whose samples were written by script has no runtime segment/triangle table until
+        finalize_blend_space runs - the blend output is empty (a T-pose in PIE) until it does.
+
+        Args:
+            samples: Whole list, in any order: [{"animation": "/Game/.../Fei_Idle",
+                "sample_value": {"x": 0, "y": 0, "z": 0}}, ...]. `animation: null` clears a sample.
+            asset_path: BlendSpace asset path
+            finalize: Rebuild the runtime data after writing (default True). With False the reply
+                carries requires_finalize: true and the caller must call finalize_blend_space.
+            persist: Save the asset after a successful write (default True)
+
+        Returns:
+            Dict with applied, sample_count, none_count, valid_sample_count, triangle_count,
+            resample_source (direct / editor / skipped), requires_finalize, saved, the per-sample
+            readback (index / animation / valid / sample_value_*), and `warnings` for a sample count
+            that does not match the axis grids or a sample animation from another skeleton.
+            Errors: asset_not_blend_space, invalid_params, write_failed.
+        """
+        return send_command("set_blend_space_samples", {"asset_path": asset_path, "samples": samples,
+                                                        "finalize": finalize, "persist": persist})

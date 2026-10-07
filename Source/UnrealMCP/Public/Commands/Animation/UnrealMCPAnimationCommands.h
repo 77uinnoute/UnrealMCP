@@ -39,6 +39,7 @@ namespace EUnrealMCPAnimError
     inline const TCHAR* IncompatibleFrameRate = TEXT("incompatible_frame_rate");
     inline const TCHAR* UnsupportedProperty  = TEXT("unsupported_property");
     inline const TCHAR* WriteFailed          = TEXT("write_failed");
+    inline const TCHAR* AssetNotBlendSpace   = TEXT("asset_not_blend_space");
 
     // montage
     inline const TCHAR* AssetNotAnimMontage  = TEXT("asset_not_anim_montage");
@@ -799,4 +800,6 @@ private:
     TSharedPtr<FJsonObject> HandlePlayPreview(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleStopPreview(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleJumpToSection(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleFinalizeBlendSpace(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetBlendSpaceSamples(const TSharedPtr<FJsonObject>& Params);
 };

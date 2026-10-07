@@ -102,7 +102,13 @@ TSharedPtr<FJsonObject> FMCPCommandRegistry::Execute(const FString& Name, const 
         }
         FUnrealMCPCommonUtils::FMCPPersistScope PersistScope(bPersist);
 
-        return Entry->Handler(Params);
+        TSharedPtr<FJsonObject> Result = Entry->Handler(Params);
+
+        // Editor/PIE context on EVERY reply, injected once here rather than by each handler: a caller has
+        // to be able to tell "no such asset" from "PIE is running and this type cannot load in play mode",
+        // and a per-handler convention would leave gaps exactly where nobody remembered.
+        FUnrealMCPCommonUtils::AddEditorState(Result);
+        return Result;
     }
 
     // Same message as the hand-written fallback this replaced, plus the error_code the result

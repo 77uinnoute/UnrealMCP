@@ -20,6 +20,7 @@ class UFunction;
 class UMaterial;
 class UMaterialFunction;
 class USCS_Node;
+class UWorld;
 
 /**
  * Common utilities for UnrealMCP commands
@@ -32,6 +33,58 @@ public:
     // Error response carrying a machine-readable code in addition to the message
     static TSharedPtr<FJsonObject> CreateErrorResponse(const FString& ErrorCode, const FString& Message);
     static TSharedPtr<FJsonObject> CreateSuccessResponse(const TSharedPtr<FJsonObject>& Data = nullptr);
+
+    // True while a play session (PIE or simulate-in-editor) is live. Read from the editor every call:
+    // a cached flag goes stale exactly when it matters (the caller decides whether a null asset means
+    // "missing" or "not loadable in play mode").
+    static bool IsPlaySessionRunning();
+
+    /**
+     * How many instances of a Blueprint's generated class are placed in the world the user is looking
+     * at, plus which world that was (OutWorldKind = "editor" or "pie").
+     *
+     * This is what a command writing an SCS component TEMPLATE has to report: a level instance keeps
+     * its own copy of the property values and does NOT follow the template, so "the template changed"
+     * and "the thing standing in the level changed" are two different statements. Counting in the play
+     * world while PIE runs is deliberate - that is the world whose behaviour the caller is looking at.
+     */
+    static int32 CountPlacedInstances(const UBlueprint* Blueprint, FString& OutWorldKind);
+
+    /**
+     * Attach the SCS-template consequence to a response: `placed_instances` + `counted_in`, and - when
+     * there is at least one - a `hint` saying the placed instances do NOT follow the template and naming
+     * the three routes that do change them. One place for the wording, so both template-writing commands
+     * say the same thing.
+     */
+    static void AddTemplateInstanceReport(const UBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Response);
+
+    /**
+     * Null when a requested actor name is free, otherwise a structured `name_taken` response.
+     *
+     * Uses the SAME test the spawn path uses - StaticFindObjectFast(nullptr, Level, Name), which sees
+     * pending-kill objects (LevelActor.cpp:575) - because actor listings skip them. Without this the request
+     * reaches the engine's Fatal branch ("Cannot generate unique name") and kills the whole editor.
+     */
+    static TSharedPtr<FJsonObject> MakeNameTakenResponseIfTaken(UWorld* World, const FString& ActorName);
+
+    /**
+     * Attach `editor_state {pie_running, simulating_in_editor, world, level_name}` to a response.
+     *
+     * Called from both response factories, so every command answers it without each one remembering to.
+     * This is what makes "the asset does not exist" separable from "PIE is running and this asset type
+     * cannot be loaded in play mode" - a conflation that has already produced a wrong decision.
+     */
+    static void AddEditorState(const TSharedPtr<FJsonObject>& Response);
+
+    /**
+     * Error code to use when a path did not resolve: "load_failed_in_pie" when a play session is
+     * running AND the asset registry knows the package (so the asset exists, it just cannot be loaded
+     * in play mode), otherwise an empty string, which means "keep the existing code".
+     *
+     * Conservative on purpose: renaming every play-mode load failure would turn real path typos into
+     * "PIE's fault", which is worse than the conflation this fixes.
+     */
+    static FString ClassifyAssetLoadFailure(const FString& AssetPath);
     // Set a string-array field, omitting it entirely when empty (keeps "nothing to report" out of the JSON)
     static void AddStringArrayField(const TSharedPtr<FJsonObject>& Object, const TCHAR* FieldName,
                                     const TArray<FString>& Values);
@@ -173,7 +226,7 @@ public:
      * CanCreateAsset calls UPackageTools::HandleFullyLoadingPackages, which synchronously fully loads
      * a package that is not loaded yet. For a path whose package was deleted earlier in the same
      * editor session the file is gone, and that load never finishes - the game thread stops inside
-     * the deferred job (measured: `MCPCREATE: create-asset-begin` with no `create-asset-end`). The
+     * the MCP call (measured: `MCPCREATE: create-asset-begin` with no `create-asset-end`). The
      * conflict check that step performs is what the callers do themselves (FindAsset + disk check),
      * so the direct sequence is used instead.
      */

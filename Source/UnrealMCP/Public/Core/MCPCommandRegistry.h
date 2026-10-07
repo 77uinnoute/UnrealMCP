@@ -43,9 +43,6 @@ struct FMCPCommandFlags
      * that used to consult FUnrealMCPCommonUtils::IsPersistedBlueprintCommand() now reads this.
      */
     bool bPersistAfterSuccess = false;
-
-    /** Runs python in the editor: its work can be queued as a deferred job (`params.deferred`). */
-    bool bPythonExecution = false;
 };
 
 /** One registered command: the only place its name, parameters and policy are declared. */

@@ -1,5 +1,5 @@
 """建运行时重定向 AnimBP：工厂带 target_skeleton -> AnimGraph 加 RetargetPoseFromMesh
--> 写 IKRetargeterAsset / bUseAttachedParent -> Pose -> Root.Result -> 编译断言 -> 换 actor anim_class。
+-> 写 IKRetargeterAsset（源网格模式用默认的 RetargetFrom）-> Pose -> Root.Result -> 编译断言 -> 换 actor anim_class。
 
 **必须用工厂带 skeleton 建新资产**（重定向 SKILL §三⑥）：先建空 ABP 再事后
 `set_editor_property('target_skeleton')` + 重编译的类在 PIE 里会**静默输出 rest pose**
@@ -13,7 +13,8 @@ NAME = 'ABP_GanyuRT2'
 DIR = '/Game/Blueprints'
 SKELETON = '/Game/MCP/Ganyu/Gan_n2_Skeleton'
 RTG = '/Game/MCP/Ganyu/RTG_Ganyu'
-USE_ATTACHED_PARENT = True
+# 源网格模式（5.7 = RetargetFrom/ERetargetSourceMode）默认就是"沿 attach 父链找"，脚本不再写它；
+# 要改成自定义源网格组件就把 RetargetFrom 设为 CustomSkeletalMeshComponent 并写 SourceMeshComponent。
 RETARGET_ACTOR_LABEL = 'RT_Target_Ganyu'     # 顺便把关卡里目标 actor 的 anim_class 换成新类（可留空串跳过）
 LEVEL_SAVE = True
 # --------------------------------------
@@ -43,9 +44,11 @@ r = lib.add_node_by_class(ag, 'AnimGraphNode_RetargetPoseFromMesh', 320, 0)
 node = r.node
 inner = node.get_editor_property('node')      # 节点对象 -> FAnimNode 结构
 inner.set_editor_property('ik_retargeter_asset', EA.load_asset(RTG))
-inner.set_editor_property('bUseAttachedParent', USE_ATTACHED_PARENT)
+# 源网格模式：5.7 是 RetargetFrom(ERetargetSourceMode)，默认 ParentSkeletalMeshComponent 已经就是
+# USE_ATTACHED_PARENT 的语义。老的 bUseAttachedParent 现在是 bUseAttachedParent_DEPRECATED（UPROPERTY()，
+# 只在 PostSerialize 读旧资产时消费一次）⇒ 写它不影响运行时，这里不再写。
 node.set_editor_property('node', inner)
-print('node_cfg', inner.get_editor_property('ik_retargeter_asset'), inner.get_editor_property('bUseAttachedParent'))
+print('node_cfg', inner.get_editor_property('ik_retargeter_asset'), inner.get_editor_property('retarget_from'))
 print('connect', lib.connect_pins(node, 'Pose', root, 'Result').success)
 
 res = lib.compile_blueprint_checked(bp)

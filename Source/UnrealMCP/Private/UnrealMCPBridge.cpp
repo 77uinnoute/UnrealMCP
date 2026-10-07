@@ -93,7 +93,7 @@
 #define MCP_SERVER_PORT 55557
 
 // Registered by Initialize() but defined further down this file.
-static TSharedPtr<FJsonObject> PollPythonJob(const TSharedPtr<FJsonObject>& Params);
+static TSharedPtr<FJsonObject> HandleExecutePythonCommand(const TSharedPtr<FJsonObject>& Params);
 static TSharedPtr<FJsonObject> HandleListMCPCommands(const TSharedPtr<FJsonObject>& Params);
 
 UUnrealMCPBridge::UUnrealMCPBridge()
@@ -114,6 +114,7 @@ UUnrealMCPBridge::UUnrealMCPBridge()
     PhysicsAssetCommands = MakeShared<FUnrealMCPPhysicsAssetCommands>();
     PythonAPICommands = MakeShared<FUnrealMCPPythonAPICommands>();
     PIECommands = MakeShared<FUnrealMCPPIECommands>();
+    LiveCodingCommands = MakeShared<FUnrealMCPLiveCodingCommands>();
 }
 
 UUnrealMCPBridge::~UUnrealMCPBridge()
@@ -129,6 +130,8 @@ UUnrealMCPBridge::~UUnrealMCPBridge()
     ParticleCommands.Reset();
     AnimationCommands.Reset();
     PCGCommands.Reset();
+    PIECommands.Reset();
+    LiveCodingCommands.Reset();
 }
 
 // Initialize subsystem
@@ -163,41 +166,26 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
         }});
 
     FMCPCommandFlags PythonCommandFlags = MCPFlags(true);
-    PythonCommandFlags.bPythonExecution = true;
     Registry.Register({
         TEXT("execute_python_command"),
         TEXT("mcp"),
-        TEXT("Run python in the editor; params.deferred queues it as a pollable job."),
+        TEXT("Run python in the editor (synchronous; the call must finish within the timeout)."),
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("command"), TEXT("string"), TEXT("Python source to execute")),
-            MCPParamOpt(TEXT("deferred"), TEXT("bool"), TEXT("Queue it and return job_id instead of waiting")),
         }),
         PythonCommandFlags,
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleExecutePythonCommand(Params); }});
 
     FMCPCommandFlags PythonFileFlags = MCPFlags(true);
-    PythonFileFlags.bPythonExecution = true;
     Registry.Register({
         TEXT("execute_python_file"),
         TEXT("mcp"),
-        TEXT("Run a local .py file in the editor; params.deferred queues it as a pollable job."),
+        TEXT("Run a local .py file in the editor (synchronous; the call must finish within the timeout)."),
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("file_path"), TEXT("string"), TEXT("Absolute path to a .py file on this machine")),
-            MCPParamOpt(TEXT("deferred"), TEXT("bool"), TEXT("Queue it and return job_id instead of waiting")),
         }),
         PythonFileFlags,
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleExecutePythonFile(Params); }});
-
-    Registry.Register({
-        TEXT("poll_python_job"),
-        TEXT("mcp"),
-        TEXT("Read the result of a deferred python job."),
-        (TArray<FMCPParamSpec>{
-            MCPParam(TEXT("job_id"), TEXT("string"), TEXT("Job id returned by a deferred execution")),
-            MCPParamOpt(TEXT("cleanup"), TEXT("bool"), TEXT("Delete the job file once read")),
-        }),
-        MCPFlags(true),
-        [this](const TSharedPtr<FJsonObject>& Params) { return PollPythonJob(Params); }});
 
     Registry.Register({
         TEXT("list_mcp_commands"),
@@ -226,6 +214,7 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
     PhysicsAssetCommands->RegisterCommands(Registry);
     PythonAPICommands->RegisterCommands(Registry);
     PIECommands->RegisterCommands(Registry);
+    LiveCodingCommands->RegisterCommands(Registry);
 
     Registry.Seal();
 
@@ -434,193 +423,6 @@ static TSharedPtr<FJsonObject> ExecutePythonCode(const FString& PyCode, const FS
     return ResultJson;
 }
 
-// 顶层错误信封（deferred 入口在 promise 机制之外，需要自行组包）
-static FString MakeSimpleErrorResponse(const FString& Message)
-{
-    TSharedPtr<FJsonObject> ErrorJson = MakeShareable(new FJsonObject);
-    ErrorJson->SetStringField(TEXT("status"), TEXT("error"));
-    ErrorJson->SetStringField(TEXT("error"), Message);
-    FString Out;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-    FJsonSerializer::Serialize(ErrorJson.ToSharedRef(), Writer);
-    return Out;
-}
-
-// Deferred python 命令：立即排队到 GameThread 并马上返回 job_id，
-// 调用方随后用 poll_python_job 轮询结果，避免长脚本阻塞 MCP 客户端。
-// 结果 JSON 落盘到 <ProjectSaved>/MCPJobs/<job_id>.json（带可选 description/file_path）。
-static FString QueueDeferredPythonJob(const FString& PyCommand, const FString& Description, const FString& SourceFilePath)
-{
-    const FString JobId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-
-    AsyncTask(ENamedThreads::GameThread, [PyCommand, JobId, Description, SourceFilePath]()
-    {
-        TSharedPtr<FJsonObject> ResultJson = ExecutePythonCode(PyCommand,
-            SourceFilePath.IsEmpty() ? FString(TEXT("<mcp_command>")) : SourceFilePath);
-
-        TSharedPtr<FJsonObject> JobJson = MakeShareable(new FJsonObject);
-        JobJson->SetStringField(TEXT("job_id"), JobId);
-        if (!Description.IsEmpty())
-        {
-            JobJson->SetStringField(TEXT("description"), Description);
-        }
-        if (!SourceFilePath.IsEmpty())
-        {
-            JobJson->SetStringField(TEXT("file_path"), SourceFilePath);
-        }
-        if (ResultJson.IsValid())
-        {
-            for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : ResultJson->Values)
-            {
-                JobJson->Values.Add(Pair.Key, Pair.Value);
-            }
-        }
-
-        FString JobText;
-        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JobText);
-        FJsonSerializer::Serialize(JobJson.ToSharedRef(), Writer);
-
-        const FString JobDir = FPaths::ProjectSavedDir() / TEXT("MCPJobs");
-        IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-        PlatformFile.CreateDirectoryTree(*JobDir);
-        const FString JobFile = JobDir / (JobId + TEXT(".json"));
-        if (!FFileHelper::SaveStringToFile(JobText, *JobFile))
-        {
-            UE_LOG(LogTemp, Warning, TEXT("UnrealMCPBridge: Failed to write python job file %s"), *JobFile);
-        }
-    });
-
-    TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject);
-    ResponseJson->SetStringField(TEXT("status"), TEXT("success"));
-    TSharedPtr<FJsonObject> ResultObj = MakeShareable(new FJsonObject);
-    ResultObj->SetStringField(TEXT("job_id"), JobId);
-    ResultObj->SetStringField(TEXT("state"), TEXT("queued"));
-    if (!Description.IsEmpty())
-    {
-        ResultObj->SetStringField(TEXT("description"), Description);
-    }
-    ResponseJson->SetObjectField(TEXT("result"), ResultObj);
-
-    FString Out;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-    FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
-    return Out;
-}
-
-// Deferred 入口：execute_python_command（command 字符串）与 execute_python_file
-// （file_path 读盘）共用同一 job 队列。
-// 哪个命令读盘由注册表里的参数规格决定（声明了 file_path 的就读盘），不再在这里比名字。
-static bool CommandTakesFilePath(const FString& CommandType)
-{
-    const FMCPCommandEntry* Entry = FMCPCommandRegistry::Get().Find(CommandType);
-    return Entry && Entry->Params.ContainsByPredicate([](const FMCPParamSpec& Spec)
-    {
-        return Spec.Name == TEXT("file_path");
-    });
-}
-
-static FString ExecuteDeferredPythonCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
-{
-    FString PyCommand;
-
-    if (CommandTakesFilePath(CommandType))
-    {
-        FString FilePath;
-        if (!Params->TryGetStringField(TEXT("file_path"), FilePath))
-        {
-            return MakeSimpleErrorResponse(TEXT("Missing 'file_path' parameter"));
-        }
-        if (!FPaths::GetExtension(FilePath).Equals(TEXT("py"), ESearchCase::IgnoreCase))
-        {
-            return MakeSimpleErrorResponse(TEXT("'file_path' must end with .py"));
-        }
-        if (!FFileHelper::LoadFileToString(PyCommand, *FilePath))
-        {
-            return MakeSimpleErrorResponse(FString::Printf(TEXT("Failed to read file: %s"), *FilePath));
-        }
-    }
-    else if (!Params->TryGetStringField(TEXT("command"), PyCommand))
-    {
-        return MakeSimpleErrorResponse(TEXT("Missing 'command' parameter"));
-    }
-
-    FString Description;
-    Params->TryGetStringField(TEXT("description"), Description);
-
-    // 文件模式下 job 带上 file_path 便于区分排队任务；命令模式传空
-    FString SourceFilePath;
-    if (CommandTakesFilePath(CommandType))
-    {
-        Params->TryGetStringField(TEXT("file_path"), SourceFilePath);
-    }
-
-    return QueueDeferredPythonJob(PyCommand, Description, SourceFilePath);
-}
-
-// 轮询一个 deferred python job：读 Saved/MCPJobs/<job_id>.json。
-// job_id 只允许十六进制字符与连字符（GUID），防止路径穿越。
-static TSharedPtr<FJsonObject> PollPythonJob(const TSharedPtr<FJsonObject>& Params)
-{
-    TSharedPtr<FJsonObject> ResultJson = MakeShareable(new FJsonObject);
-    ResultJson->SetBoolField(TEXT("success"), true);
-
-    FString JobId;
-    if (!Params->TryGetStringField(TEXT("job_id"), JobId))
-    {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'job_id' parameter"));
-    }
-
-    bool bValidId = !JobId.IsEmpty() && JobId.Len() <= 64;
-    for (const TCHAR C : JobId)
-    {
-        const bool bIsHexDigit = (C >= TEXT('0') && C <= TEXT('9')) || (C >= TEXT('a') && C <= TEXT('f')) || (C >= TEXT('A') && C <= TEXT('F'));
-        if (!bIsHexDigit && C != TEXT('-'))
-        {
-            bValidId = false;
-            break;
-        }
-    }
-    if (!bValidId)
-    {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid job_id"));
-    }
-
-    bool bCleanup = true;
-    Params->TryGetBoolField(TEXT("cleanup"), bCleanup);
-
-    const FString JobFile = FPaths::ProjectSavedDir() / TEXT("MCPJobs") / (JobId + TEXT(".json"));
-    IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-    if (!PlatformFile.FileExists(*JobFile))
-    {
-        ResultJson->SetStringField(TEXT("state"), TEXT("pending"));
-        return ResultJson;
-    }
-
-    FString JobText;
-    if (!FFileHelper::LoadFileToString(JobText, *JobFile))
-    {
-        ResultJson->SetStringField(TEXT("state"), TEXT("pending"));
-        return ResultJson;
-    }
-    if (bCleanup)
-    {
-        PlatformFile.DeleteFile(*JobFile);
-    }
-
-    ResultJson->SetStringField(TEXT("state"), TEXT("done"));
-    TSharedPtr<FJsonObject> JobObj;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JobText);
-    if (FJsonSerializer::Deserialize(Reader, JobObj) && JobObj.IsValid())
-    {
-        ResultJson->SetObjectField(TEXT("job"), JobObj);
-    }
-    else
-    {
-        ResultJson->SetStringField(TEXT("raw"), JobText);
-    }
-    return ResultJson;
-}
-
 // Bridge-local command bodies. They live here (rather than inline in the dispatch chain) because the
 // registry binds handlers, and the chain is being retired.
 TSharedPtr<FJsonObject> UUnrealMCPBridge::HandleExecutePythonCommand(const TSharedPtr<FJsonObject>& Params)
@@ -706,7 +508,6 @@ static TSharedPtr<FJsonObject> HandleListMCPCommands(const TSharedPtr<FJsonObjec
         FlagsJson->SetBoolField(TEXT("mutates_graph"), Entry.Flags.bMutatesGraph);
         FlagsJson->SetBoolField(TEXT("hidden"), Entry.Flags.bHidden);
         FlagsJson->SetBoolField(TEXT("persist_after_success"), Entry.Flags.bPersistAfterSuccess);
-        FlagsJson->SetBoolField(TEXT("python_execution"), Entry.Flags.bPythonExecution);
 
         TSharedPtr<FJsonObject> CommandJson = MakeShareable(new FJsonObject);
         CommandJson->SetStringField(TEXT("name"), Entry.Name);
@@ -732,17 +533,6 @@ static TSharedPtr<FJsonObject> HandleListMCPCommands(const TSharedPtr<FJsonObjec
 FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
 {
     UE_LOG(LogTemp, Display, TEXT("UnrealMCPBridge: Executing command: %s"), *CommandType);
-
-    // Deferred python job：立即返回 job_id，代码在 GameThread 上排队执行，
-    // 结果落盘供 poll_python_job 轮询（长任务不阻塞客户端）。
-    // 哪些命令可延迟由注册表的 bPythonExecution 决定，不在链上比名字。
-    bool bDeferred = false;
-    const FMCPCommandEntry* CommandEntry = FMCPCommandRegistry::Get().Find(CommandType);
-    if (CommandEntry && CommandEntry->Flags.bPythonExecution
-        && Params.IsValid() && Params->TryGetBoolField(TEXT("deferred"), bDeferred) && bDeferred)
-    {
-        return ExecuteDeferredPythonCommand(CommandType, Params);
-    }
 
     // Create a promise to wait for the result
     TPromise<FString> Promise;

@@ -30,6 +30,38 @@ private:
     TSharedPtr<FJsonObject> HandleStopPIE(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetActorPose(const TSharedPtr<FJsonObject>& Params);
 
+    /**
+     * Push a key event through the game viewport, the same door a physical key uses.
+     *
+     * This is the only route that exercises the whole input chain (viewport -> player input ->
+     * mappings -> bindings), including the SetIgnoreInput gate that UPlayerInput::InputKey sits
+     * behind. The event is processed later in the same frame, so nothing read during the call can
+     * say whether it landed: the viewport's return value is reported for the record but reads
+     * FALSE for a key that feeds an axis mapping, and a pressed-state read returns the state from
+     * before the event (both measured on a DefaultPawn that then flew). Proving the effect is the
+     * caller's read-back of the game's own state.
+     */
+    TSharedPtr<FJsonObject> HandleInjectKey(const TSharedPtr<FJsonObject>& Params);
+
     /** The PIE world, or null when the editor is not playing. Never the editor world. */
     static UWorld* GetPlayWorld();
+
+    /**
+     * Blueprints sitting in BS_Error, each with the messages its graph nodes carry.
+     *
+     * PIE refuses to start while one exists and asks with a modal dialog. Nothing suppresses that
+     * dialog plugin-wide (the unattended scopes live in the asset commands), so from the outside the
+     * session simply never appears. This preflight is what turns that silence into a named blocker.
+     */
+    static void CollectCompileErrorBlueprints(TArray<TSharedPtr<FJsonValue>>& OutBlueprints);
+
+    /**
+     * The most recent session-log lines mentioning any of the given asset names.
+     *
+     * The RigVM / Kismet compiler writes its real messages to LogBlueprint (prefixed [AssetLog])
+     * and only some of them also land on a graph node, so the log is the only place the text is
+     * complete. Lines from earlier failed compiles can still be in range - this is a tail, not a
+     * per-request slice.
+     */
+    static void CollectBlueprintLogErrors(const TArray<FString>& AssetNames, TArray<FString>& OutLines);
 };

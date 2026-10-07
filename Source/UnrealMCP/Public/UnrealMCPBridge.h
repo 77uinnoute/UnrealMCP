@@ -23,6 +23,7 @@
 #include "Commands/Physics/UnrealMCPPhysicsAssetCommands.h"
 #include "Commands/UnrealMCPReflectionCommands.h"
 #include "Commands/UnrealMCPPythonAPICommands.h"
+#include "Commands/UnrealMCPLiveCodingCommands.h"
 #include "Commands/UnrealMCPPIECommands.h"
 #include "UnrealMCPBridge.generated.h"
 
@@ -91,4 +92,5 @@ private:
     TSharedPtr<FUnrealMCPPhysicsAssetCommands> PhysicsAssetCommands;
     TSharedPtr<FUnrealMCPPythonAPICommands> PythonAPICommands;
     TSharedPtr<FUnrealMCPPIECommands> PIECommands;
+    TSharedPtr<FUnrealMCPLiveCodingCommands> LiveCodingCommands;
 }; 

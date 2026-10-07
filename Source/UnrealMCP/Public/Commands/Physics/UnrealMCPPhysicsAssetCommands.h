@@ -40,5 +40,7 @@ private:
     TSharedPtr<FJsonObject> HandleAddBody(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddConstraint(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetCollision(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveBody(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveConstraint(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleListBodies(const TSharedPtr<FJsonObject>& Params);
 };

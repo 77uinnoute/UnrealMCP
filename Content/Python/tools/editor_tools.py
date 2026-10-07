@@ -166,8 +166,24 @@ def register_editor_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
     
     @mcp.tool()
-    def delete_actor(ctx: Context, name: str) -> Dict[str, Any]:
-        """Delete an actor by name."""
+    def delete_actor(ctx: Context, name: str, flush: bool = False) -> Dict[str, Any]:
+        """
+        Delete an actor by name.
+
+        Destroy() only marks the actor pending-kill: it leaves every actor listing at once, but its name
+        stays taken until garbage collection. So spawning a same-name actor right after this call is a
+        hard engine Fatal ("Cannot generate unique name"), and saving the level writes the deleted actor
+        back. The response reports `pending_kill` (probed on the object graph, because the actor list is
+        already clean) and explains that in `hint` when it is true.
+
+        Args:
+            name: Name of the actor to destroy.
+            flush: Garbage-collect before returning so the name is actually free and `pending_kill`
+                reflects that (default False).
+
+        Returns:
+            Dict with deleted_actor, pending_kill, hint (when pending_kill), flushed (when flush).
+        """
         from unreal_mcp_server import get_unreal_connection
         
         try:
@@ -177,7 +193,8 @@ def register_editor_tools(mcp: FastMCP):
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
                 
             response = unreal.send_command("delete_actor", {
-                "name": name
+                "name": name,
+                "flush": flush,
             })
             return response or {}
             
@@ -389,7 +406,7 @@ def register_editor_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
 
     @mcp.tool()
-    def execute_python_command(ctx: Context, command: str, timeout: float = None, deferred: bool = False, description: str = None) -> Dict[str, Any]:
+    def execute_python_command(ctx: Context, command: str, timeout: float = None) -> Dict[str, Any]:
         """Execute arbitrary Python code inside the Unreal Editor Python environment (requires Python Editor Script Plugin).
 
         SKILLS: if the task matches an available skill's description (e.g. Unreal material work ->
@@ -400,24 +417,17 @@ def register_editor_tools(mcp: FastMCP):
 
         NOTE: Executed as a file (ExecuteFile mode). Do NOT use top-level 'return'; output via print() instead.
         NOTE: Do NOT time.sleep()/poll inside the code — it blocks the editor GameThread and
-        deadlocks. Split waits into multiple short commands, or use deferred=True.
+        deadlocks. Split waits into multiple short commands.
         NOTE: For scripts longer than ~30 lines prefer execute_python_file (write the script to
         disk, execute by path) — long inline strings have historically been corrupted upstream
         of the bridge (MCP transport / generation), causing random middle-of-payload loss.
 
-        SYNC BY DEFAULT — deferred is the exception, not the norm:
-        - SYNC (the default) is right for anything that finishes inside the client tool timeout
-          (~90s), which is almost every single operation: the result (and the structured error
-          envelope) comes back in-band, there is no polling, no orphan job file, and the editor
-          keeps answering other commands.
-        - deferred=True ONLY for work that provably exceeds that budget: bulk writes over dozens
-          of assets, heavy compiles/imports, long batch loops. Know what it costs: while the job
-          holds the GameThread the whole MCP channel is frozen (poll_python_job itself can time
-          out — read Saved/MCPJobs/<job_id>.json from disk instead), the job file appears only on
-          completion, and there is no progress or cancellation. Prefer several short idempotent
-          jobs over one long one.
-        - Before reaching for deferred, try widening the sync wait with timeout=<seconds>
-          (<=600s): a merely slow call is not a reason to go async.
+        ALWAYS SYNCHRONOUS — there is no job/queue mode:
+        - The result (and the structured error envelope) comes back in-band; the editor answers
+          other commands again as soon as the call returns.
+        - A call must therefore FINISH inside the client tool timeout (~90s). Split heavier work
+          into several short idempotent calls, and widen the wait for a merely slow one with
+          timeout=<seconds> (<=600s).
         - Prefer a dedicated tool over hand-rolled python whenever one exists — introspect with
           list_mcp_commands first. Asset import is the hard example: it MUST go through
           import_assets (a hand-rolled AssetImportTask hits Interchange and crashes the editor).
@@ -429,16 +439,10 @@ def register_editor_tools(mcp: FastMCP):
             ctx: The MCP context
             command: Python code to execute in the editor (multi-line allowed)
             timeout: Response receive timeout in seconds (default: server recv-timeout)
-            deferred: If True, queue the code on the GameThread and return immediately
-                with a job_id; poll the result with poll_python_job(job_id). Use this
-                for long-running scripts (recompile / save / many nodes) so they don't
-                hit the tool-layer timeout.
-            description: Optional label stored in the job file (visible in poll results)
 
         Returns:
             Dict with 'status': 'success' carries 'result' (with 'success', evaluation 'result',
             and 'log' entries); on failure 'status': 'error' with the traceback in 'error'.
-            With deferred=True returns {'status': 'success', 'deferred': True, 'job_id': ...}.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -449,11 +453,7 @@ def register_editor_tools(mcp: FastMCP):
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
             params = {"command": command}
-            if deferred:
-                params["deferred"] = True
-                if description:
-                    params["description"] = description
-            elif timeout is not None:
+            if timeout is not None:
                 # Keep the C++ GameThread wait in sync with the client receive
                 # timeout so long-running compiles are not killed at 120s on
                 # one layer while the other waits longer.
@@ -465,13 +465,6 @@ def register_editor_tools(mcp: FastMCP):
                 return {"success": False, "message": "No response from Unreal Engine"}
 
             logger.info(f"Execute python command response: {response}")
-
-            if deferred:
-                result_obj = response.get("result") or {}
-                job_id = result_obj.get("job_id")
-                if response.get("status") == "success" and job_id:
-                    return {"status": "success", "deferred": True, "job_id": job_id}
-                return response
 
             # Fallback: older bridge builds report success even when the Python command
             # raised — the traceback only shows up as Error entries in result.log.
@@ -502,7 +495,7 @@ def register_editor_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
 
     @mcp.tool()
-    def execute_python_file(ctx: Context, file_path: str, timeout: float = None, deferred: bool = False, description: str = None) -> Dict[str, Any]:
+    def execute_python_file(ctx: Context, file_path: str, timeout: float = None) -> Dict[str, Any]:
         """Execute a local Python FILE inside the Unreal Editor (recommended for scripts > ~30 lines).
 
         SKILLS: if the task matches an available skill's description (e.g. Unreal material work ->
@@ -513,12 +506,9 @@ def register_editor_tools(mcp: FastMCP):
         Because only the short file path travels over the wire, this route is immune to the
         upstream long-string corruption issues seen with inline commands.
 
-        SYNC BY DEFAULT (same policy as execute_python_command): pass deferred=True ONLY for work
-        that provably exceeds the client tool timeout (~90s) — dozens of asset writes, heavy
-        compiles/imports, long batch loops. Note that while a deferred job holds the GameThread
-        the MCP channel is frozen (polling can time out; Saved/MCPJobs/<job_id>.json is the
-        fallback), the job file lands only on completion, and nothing reports progress. Use
-        timeout=<seconds> (<=600s) for merely slow sync calls instead, and always prefer an
+        ALWAYS SYNCHRONOUS (same policy as execute_python_command): the call must FINISH inside
+        the client tool timeout (~90s). Split heavier work into several short idempotent calls;
+        widen the wait for a merely slow one with timeout=<seconds> (<=600s). Always prefer an
         existing tool (list_mcp_commands) over a hand-rolled script — asset import must use
         import_assets, never AssetImportTask.
 
@@ -527,15 +517,10 @@ def register_editor_tools(mcp: FastMCP):
             file_path: ABSOLUTE path to a .py file on this machine (e.g.
                 "E:/proj/Saved/MCPScripts/build_material.py")
             timeout: Response receive timeout in seconds (default: server recv-timeout)
-            deferred: If True, queue the file for execution and return immediately with a
-                job_id; poll with poll_python_job(job_id). Recommended for scripts that
-                compile/save assets or touch many nodes.
-            description: Optional label stored in the job file (visible in poll results)
 
         Returns:
             Same shape as execute_python_command; additionally result carries file_path
-            and code_bytes. With deferred=True returns {'status': 'success', 'deferred':
-            True, 'job_id': ...}.
+            and code_bytes.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -546,11 +531,7 @@ def register_editor_tools(mcp: FastMCP):
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
 
             params = {"file_path": file_path}
-            if deferred:
-                params["deferred"] = True
-                if description:
-                    params["description"] = description
-            elif timeout is not None:
+            if timeout is not None:
                 params["timeout_ms"] = int(timeout * 1000)
             response = unreal.send_command("execute_python_file", params, recv_timeout=timeout)
 
@@ -559,13 +540,6 @@ def register_editor_tools(mcp: FastMCP):
                 return {"success": False, "message": "No response from Unreal Engine"}
 
             logger.info(f"Execute python file response: {response}")
-
-            if deferred:
-                result_obj = response.get("result") or {}
-                job_id = result_obj.get("job_id")
-                if response.get("status") == "success" and job_id:
-                    return {"status": "success", "deferred": True, "job_id": job_id}
-                return response
 
             # Surface hidden errors (same fallback as execute_python_command)
             if response.get("status") == "success":
@@ -594,53 +568,8 @@ def register_editor_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
 
     @mcp.tool()
-    def poll_python_job(ctx: Context, job_id: str, cleanup: bool = True) -> Dict[str, Any]:
-        """Poll the result of a deferred execute_python_command job.
-
-        The deferred code runs on the editor GameThread and writes its result to
-        Saved/MCPJobs/<job_id>.json. Keep polling (state='pending') until the job is done.
-
-        Notes:
-        - The job file is written only when the job FINISHES, so 'pending' cannot distinguish
-          queued / running / editor-already-dead. If it stays pending far longer than the work
-          should take, check the editor itself (e.g. the bridge port) rather than polling forever.
-        - Polling is a bridge command too: while a long job hogs the GameThread this call can time
-          out. In that case read Saved/MCPJobs/<job_id>.json from disk (the file is the source of
-          truth) and come back for the payload.
-        - cleanup=True (default) DELETES the job file after a successful read, so a second poll of
-          the same job_id reports 'pending' forever. Read once, or pass cleanup=False.
-
-        Args:
-            ctx: The MCP context
-            job_id: Job id returned by execute_python_command(deferred=True)
-            cleanup: Delete the job file after reading (default True)
-
-        Returns:
-            Dict with result.state: 'pending' (still running) or 'done' with
-            result.job carrying the same success/result/log/error payload as
-            synchronous execution.
-        """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            response = unreal.send_command("poll_python_job", {
-                "job_id": job_id,
-                "cleanup": cleanup
-            })
-            return response or {}
-
-        except Exception as e:
-            error_msg = f"Error polling python job: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
-
-    @mcp.tool()
-    def take_screenshot(ctx: Context, filepath: str, source: str = "level_viewport") -> Dict[str, Any]:
+    def take_screenshot(ctx: Context, filepath: str, source: str = "level_viewport",
+                        asset_path: Optional[str] = None) -> Dict[str, Any]:
         """Capture a PNG file (synchronous).
 
         source="level_viewport" (default) reads the active level viewport backbuffer. That
@@ -650,6 +579,12 @@ def register_editor_tools(mcp: FastMCP):
         widgets added to the viewport ARE in it. Needs a running PIE (pie_not_running
         otherwise). Use it for UI layout triage only (hit areas, scaling, clipping); it is
         not an acceptance verdict - the user judges the result in the viewport.
+        source="asset_editor" reads an asset editor's preview viewport (Persona, the material
+        editor, ...). With asset_path the command focuses THAT asset's editor first and then
+        captures its viewport; the editor is never opened for you (editor_not_open lists the
+        open_* commands otherwise). Without asset_path it uses the focused asset editor
+        viewport; several candidates with no focus come back as viewport_ambiguous with the
+        list instead of a guess. Also triage only, not an acceptance verdict.
 
         Writes to the EXACT path given — unlike unreal.AutomationLibrary.take_high_res_screenshot
         / the HighResShot console command, the filename is honored (no
@@ -661,11 +596,14 @@ def register_editor_tools(mcp: FastMCP):
             filepath: ABSOLUTE output path ending in .png, e.g.
                 "E:/proj/Saved/shot.png" (relative paths resolve against the
                 editor working directory and are unreliable)
-            source: "level_viewport" (default) or "pie"
+            source: "level_viewport" (default), "pie" or "asset_editor"
+            asset_path: With source="asset_editor": the asset whose editor to capture, e.g.
+                "/Game/MMD/FeiYing/Animation/Clips/Fei_Idle".
 
         Returns:
             Dict with status success and result carrying filepath, width, height,
-            file_size (bytes), source
+            file_size (bytes), source and (for asset_editor) editor_name /
+            resolved_viewport / focused
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -676,6 +614,8 @@ def register_editor_tools(mcp: FastMCP):
                 return {"status": "error", "error": "Failed to connect to Unreal Engine"}
 
             params = {"filepath": filepath, "source": source}
+            if asset_path:
+                params["asset_path"] = asset_path
             response = unreal.send_command("take_screenshot", params)
             if not response or response.get("status") != "success":
                 return response or {"status": "error", "error": "No response from Unreal Engine"}
@@ -754,6 +694,70 @@ def register_editor_tools(mcp: FastMCP):
 
         except Exception as e:
             error_msg = f"Error setting console variable: {e}"
+            logger.error(error_msg)
+            return {"status": "error", "error": error_msg}
+
+    @mcp.tool()
+    def live_coding_compile(ctx: Context, wait: bool = True) -> Dict[str, Any]:
+        """Hot reload C++ edits through Live Coding (the editor's Ctrl+Alt+F11, driven from MCP).
+
+        Use this after editing project C++ instead of killing and restarting the editor. It only
+        applies to function bodies: adding a UCLASS/UPROPERTY, changing a class layout or adding a
+        new class still needs a full editor restart.
+
+        The compile runs on the GameThread, so a waiting call keeps the MCP channel busy; pass
+        wait=False when the patch may take long, then poll `live_coding_status`.
+
+        Args:
+            wait: Block until the compile finishes and report its outcome (default True).
+
+        Returns:
+            Dict with the result envelope; the fields that matter are under result.data:
+              outcome     - success / no_changes / failure / cancelled / not_started / in_progress
+              is_compiling- whether a compile is still running when this reply was built
+              duration_ms - how long the call took (wait=True only)
+              log_tail    - the LogLiveCoding lines captured for this request
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
+
+            logger.info(f"live_coding_compile requested (wait={wait})")
+            return unreal.send_command("live_coding_compile", {"wait": wait}) or {}
+
+        except Exception as e:
+            error_msg = f"Error requesting a Live Coding compile: {e}"
+            logger.error(error_msg)
+            return {"status": "error", "error": error_msg}
+
+    @mcp.tool()
+    def live_coding_status(ctx: Context) -> Dict[str, Any]:
+        """Read Live Coding state: availability, session enablement, whether a compile is running.
+
+        This is the poll target for `live_coding_compile(wait=False)`. When the outstanding request
+        has stopped compiling, this call finalises it and reports the outcome it read from the
+        captured LogLiveCoding output (the engine only reports a result to the call that waited).
+
+        Returns:
+            Dict with result.data carrying available / has_started / enabled_for_session /
+            is_compiling / request_pending / outcome / outcome_source / log_tail.
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
+
+            return unreal.send_command("live_coding_status", {}) or {}
+
+        except Exception as e:
+            error_msg = f"Error reading Live Coding status: {e}"
             logger.error(error_msg)
             return {"status": "error", "error": error_msg}
 

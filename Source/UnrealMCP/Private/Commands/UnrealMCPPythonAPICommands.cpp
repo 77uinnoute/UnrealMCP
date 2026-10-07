@@ -183,7 +183,13 @@ TSharedPtr<FJsonObject> FUnrealMCPPythonAPICommands::HandlePythonAPIDoc(const TS
     }
     if (!Params->TryGetStringField(TEXT("function"), FunctionName) || FunctionName.IsEmpty())
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'function' parameter"));
+        // The name of this parameter is a measured trap (callers reach for `function_name`), so the
+        // error says which name it is AND what a correct call looks like.
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(
+            TEXT("missing_parameter: 'function' is required (the member name parameter is 'function', not 'function_name')"));
+        Error->SetStringField(TEXT("example"),
+            TEXT("python_api_doc(class_name=\"IKRetargeterController\", function=\"reset_retarget_pose\")"));
+        return Error;
     }
     if (!IsSafeIdentifier(ClassName) || !IsSafeIdentifier(FunctionName))
     {

@@ -43,8 +43,178 @@
 #include "Factories/Factory.h"
 #include "Math/Vector4.h"
 #include "Math/Color.h"
+#include "Editor.h"
+#include "Engine/World.h"
+#include "Engine/Level.h"
+#include "EngineUtils.h"
+#include "Modules/ModuleManager.h"
 
 // JSON Utilities
+bool FUnrealMCPCommonUtils::IsPlaySessionRunning()
+{
+    return GEditor && (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor);
+}
+
+int32 FUnrealMCPCommonUtils::CountPlacedInstances(const UBlueprint* Blueprint, FString& OutWorldKind)
+{
+    OutWorldKind.Reset();
+    if (!Blueprint)
+    {
+        return 0;
+    }
+
+    UClass* InstanceClass = Blueprint->GeneratedClass;
+    if (!InstanceClass)
+    {
+        return 0;
+    }
+
+    // The play world wins while PIE runs: that is the world whose behaviour the caller is judging. The
+    // editor world's instances are just the saved placements.
+    UWorld* World = nullptr;
+    if (GEditor && GEditor->PlayWorld)
+    {
+        World = GEditor->PlayWorld;
+        OutWorldKind = TEXT("pie");
+    }
+    else if (GEditor && GEditor->GetEditorWorldContext().World())
+    {
+        World = GEditor->GetEditorWorldContext().World();
+        OutWorldKind = TEXT("editor");
+    }
+    if (!World)
+    {
+        return 0;
+    }
+
+    int32 Count = 0;
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+        AActor* Actor = *It;
+        // A destroyed-but-not-collected actor is still in the level array; it is not a placed instance
+        // any more, and counting it would report an instance the caller cannot see.
+        if (IsValid(Actor) && Actor->IsA(InstanceClass))
+        {
+            ++Count;
+        }
+    }
+    return Count;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::MakeNameTakenResponseIfTaken(UWorld* World, const FString& ActorName)
+{
+    if (!World || ActorName.IsEmpty())
+    {
+        return nullptr;
+    }
+
+    // StaticFindObjectFast takes a non-const outer, and the engine passes its spawn level the same way.
+    ULevel* Level = World->GetCurrentLevel();
+    if (!Level)
+    {
+        return nullptr;
+    }
+
+    // The engine's own uniqueness test (LevelActor.cpp:575). It has to be this one: StaticFindObjectFast sees
+    // pending-kill objects, which is exactly what an actor listing hides - and what used to make the spawn path
+    // reach the engine's Fatal branch and take the editor with it.
+    if (!StaticFindObjectFast(nullptr, Level, FName(*ActorName)))
+    {
+        return nullptr;
+    }
+
+    TSharedPtr<FJsonObject> Refusal = CreateErrorResponse(TEXT("name_taken"),
+        FString::Printf(TEXT("an object named '%s' already occupies that name in '%s'"),
+                        *ActorName, *Level->GetName()));
+    Refusal->SetStringField(TEXT("hint"),
+        TEXT("a destroyed actor keeps its name until garbage collection: it is invisible to actor listings but "
+             "still owns the name - which is why this is refused instead of spawning (the engine's own answer to "
+             "that shape is a Fatal that takes the editor down). Delete it and collect garbage (delete_actor with "
+             "flush=true does both), then spawn the name in a LATER command: the level only stops resolving the "
+             "old name on a new frame. Or pick another name."));
+    return Refusal;
+}
+
+void FUnrealMCPCommonUtils::AddTemplateInstanceReport(const UBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Response)
+{
+    if (!Response.IsValid())
+    {
+        return;
+    }
+
+    FString WorldKind;
+    const int32 Instances = CountPlacedInstances(Blueprint, WorldKind);
+    Response->SetNumberField(TEXT("placed_instances"), Instances);
+    if (!WorldKind.IsEmpty())
+    {
+        Response->SetStringField(TEXT("counted_in"), WorldKind);
+    }
+    if (Instances > 0)
+    {
+        Response->SetStringField(TEXT("hint"),
+            FString::Printf(TEXT("this changed the component TEMPLATE: the %d instance(s) in the %s world do not "
+                                 "follow it, because a placed instance keeps its own copy of the property values. "
+                                 "To change behaviour that is already standing in the level, change the blueprint "
+                                 "graph (every instance runs it), write the property on each instance, or re-spawn "
+                                 "them."),
+                Instances, *WorldKind));
+    }
+}
+
+void FUnrealMCPCommonUtils::AddEditorState(const TSharedPtr<FJsonObject>& Response)
+{
+    if (!Response.IsValid())
+    {
+        return;
+    }
+
+    const bool bPieRunning = GEditor && GEditor->PlayWorld != nullptr;
+    const bool bSimulating = GEditor && GEditor->bIsSimulatingInEditor;
+
+    TSharedPtr<FJsonObject> State = MakeShared<FJsonObject>();
+    State->SetBoolField(TEXT("pie_running"), bPieRunning);
+    State->SetBoolField(TEXT("simulating_in_editor"), bSimulating);
+    State->SetStringField(TEXT("world"), bPieRunning ? TEXT("pie") : TEXT("editor"));
+
+    // The editor world, deliberately not GEditor->GetWorld(): that one answers with the play world
+    // during PIE, which would name the level after the PIE-prefixed duplicate.
+    if (UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext(/*bEnsureIsGWorld=*/false).World() : nullptr)
+    {
+        State->SetStringField(TEXT("level_name"),
+            FPackageName::GetShortName(EditorWorld->GetOutermost()->GetName()));
+    }
+
+    Response->SetObjectField(TEXT("editor_state"), State);
+}
+
+FString FUnrealMCPCommonUtils::ClassifyAssetLoadFailure(const FString& AssetPath)
+{
+    if (!IsPlaySessionRunning() || !AssetPath.StartsWith(TEXT("/")))
+    {
+        return FString();
+    }
+
+    // Strip any sub-object part first: the registry indexes packages, not ":Sub.Name" leaves.
+    FString ObjectPath = AssetPath;
+    int32 ColonIndex = INDEX_NONE;
+    if (ObjectPath.FindChar(TEXT(':'), ColonIndex))
+    {
+        ObjectPath = ObjectPath.Left(ColonIndex);
+    }
+
+    const FString PackageName = FPackageName::ObjectPathToPackageName(ObjectPath);
+    if (PackageName.IsEmpty())
+    {
+        return FString();
+    }
+
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+    TArray<FAssetData> AssetsInPackage;
+    AssetRegistryModule.Get().GetAssetsByPackageName(FName(*PackageName), AssetsInPackage);
+
+    return AssetsInPackage.Num() > 0 ? FString(TEXT("load_failed_in_pie")) : FString();
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::CreateErrorResponse(const FString& Message)
 {
     TSharedPtr<FJsonObject> ResponseObject = MakeShared<FJsonObject>();
@@ -57,6 +227,15 @@ TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::CreateErrorResponse(const FString
 {
     TSharedPtr<FJsonObject> ResponseObject = CreateErrorResponse(Message);
     ResponseObject->SetStringField(TEXT("error_code"), ErrorCode);
+
+    // Canned next step per code, in one place: the codes whose remedy is always the same should not
+    // depend on each handler remembering to add it.
+    if (ErrorCode == TEXT("load_failed_in_pie"))
+    {
+        ResponseObject->SetStringField(TEXT("hint"),
+            TEXT("A play session is running and this asset could not be loaded in play mode; call stop_pie and retry"));
+    }
+
     return ResponseObject;
 }
 
@@ -69,7 +248,7 @@ TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::CreateSuccessResponse(const TShar
     {
         ResponseObject->SetObjectField(TEXT("data"), Data);
     }
-    
+
     return ResponseObject;
 }
 

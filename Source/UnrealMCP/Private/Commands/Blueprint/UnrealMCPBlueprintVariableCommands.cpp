@@ -490,6 +490,58 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetBlueprintVariableT
         return TypeErrorObj;
     }
 
+    // Everything below this point is refused when the variable is already used by graph nodes.
+    //
+    // ChangeMemberVariableType rebuilds the pins of every referencing node, and on that shape the
+    // call has been measured to freeze the game thread dead: the editor stays alive, the port keeps
+    // listening, no further log line appears and the client times out (Docs/MCP_Findings_2026-10-06
+    // _platformer-round.md section 3). Whether the engine put up a modal or looped internally is
+    // still unknown, so there is nothing here that could be answered or timed out - refusing before
+    // the call is the only containment there is: force=true was tried and removed (measured - it did not
+    // apply the change, it put the dialog up anyway, and answering that dialog by hand did not apply it
+    // either), and the dialog turned out NOT to travel through FCoreDelegates::ModalMessageDialog, so the
+    // auto-answer scope could not take it. Nothing can be answered here; refusal is absolute.
+
+    TArray<TSharedPtr<FJsonValue>> ReferencingNodes;
+    TArray<UEdGraph*> AllGraphs;
+    Blueprint->GetAllGraphs(AllGraphs);
+    for (UEdGraph* Graph : AllGraphs)
+    {
+        if (!Graph)
+        {
+            continue;
+        }
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            const UK2Node_Variable* VariableNode = Cast<UK2Node_Variable>(Node);
+            if (VariableNode && VariableNode->VariableReference.GetMemberName() == FName(*VariableName))
+            {
+                TSharedPtr<FJsonObject> NodeJson = MakeShared<FJsonObject>();
+                NodeJson->SetStringField(TEXT("graph"), Graph->GetName());
+                NodeJson->SetStringField(TEXT("node"), Node->GetName());
+                NodeJson->SetStringField(TEXT("node_class"), Node->GetClass()->GetName());
+                ReferencingNodes.Add(MakeShareable(new FJsonValueObject(NodeJson)));
+            }
+        }
+    }
+
+    if (ReferencingNodes.Num() > 0)
+    {
+        TSharedPtr<FJsonObject> Refusal = FUnrealMCPCommonUtils::CreateErrorResponse(
+            EUnrealMCPGraphError::VariableReferencedByNodes,
+            FString::Printf(TEXT("'%s' is referenced by %d graph node(s). Changing a referenced variable's type "
+                                 "has been measured to put up a modal dialog that holds the editor's game thread "
+                                 "until a human clicks it (the MCP bridge stops answering meanwhile), and the "
+                                 "retype does not take effect even then. Remove the variable and re-add it with "
+                                 "the target type instead, then rebuild the referencing nodes."),
+                            *VariableName, ReferencingNodes.Num()));
+        Refusal->SetArrayField(TEXT("referencing_nodes"), ReferencingNodes);
+        Refusal->SetStringField(TEXT("hint"),
+            TEXT("remove_blueprint_variable (it clears the referencing nodes too) -> add_blueprint_variable with "
+                 "the target type -> rebuild the nodes that used it"));
+        return Refusal;
+    }
+
     FBlueprintEditorUtils::ChangeMemberVariableType(Blueprint, FName(*VariableName), PinType);
 
     const FBPVariableDescription* Variable = FindMutableMemberVariable(Blueprint, FName(*VariableName));
@@ -502,6 +554,16 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetBlueprintVariableT
         ResultObj->SetObjectField(TEXT("variable"), MakeVariableJson(*Variable, Blueprint));
         ResultObj->SetStringField(TEXT("type"), Variable->VarType.PinCategory.ToString());
         ResultObj->SetStringField(TEXT("container"), MakeContainerName(Variable->VarType));
+        if (Variable->VarType.PinCategory != PinType.PinCategory)
+        {
+            // The engine can drop the change and still hand back a clean compile (measured: a referenced
+            // variable kept its old type while the receipt carried compiled=true). Say it outright instead
+            // of letting that read as a retype.
+            ResultObj->SetBoolField(TEXT("type_change_not_applied"), true);
+            ResultObj->SetStringField(TEXT("hint"),
+                TEXT("the engine did not apply the type change; use remove_blueprint_variable -> "
+                     "add_blueprint_variable with the target type -> rebuild the referencing nodes"));
+        }
     }
     AppendCompileResult(Blueprint, ResultObj);
     return ResultObj;

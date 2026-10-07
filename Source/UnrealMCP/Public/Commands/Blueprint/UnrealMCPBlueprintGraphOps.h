@@ -60,6 +60,13 @@ namespace EUnrealMCPGraphError
     inline const TCHAR* EventNameInUse            = TEXT("custom_event_name_in_use");
     /** A requested variable default did not reach the class default object after compiling. */
     inline const TCHAR* DefaultValueNotApplied    = TEXT("default_value_not_applied");
+    /**
+     * Changing the type of a variable that graph nodes already reference. Measured to freeze the
+     * game thread dead: ChangeMemberVariableType rebuilds those nodes' pins and the call never
+     * returned (editor alive, port still listening, no further log line, client timeout twice -
+     * see Docs/MCP_Findings_2026-10-06_platformer-round.md section 3). Refused unless force=true.
+     */
+    inline const TCHAR* VariableReferencedByNodes = TEXT("variable_referenced_by_nodes");
     /** A Set node was asked for a property the owner class exposes as BlueprintReadOnly. */
     inline const TCHAR* PropertyNotWritable       = TEXT("property_not_writable");
     /** Removing this component would drop child components the caller did not ask to remove. */
@@ -359,9 +366,36 @@ public:
 
     // --- Mutation --------------------------------------------------------------
 
+    /**
+     * One existing connection the schema broke to make room for a new one.
+     *
+     * The K2 schema answers CONNECT_RESPONSE_BREAK_OTHERS_A for exec pins, so connecting a second
+     * wire to a single-connection pin silently drops the first one - measured in the platformer round
+     * (Docs/MCP_Findings_2026-10-06_platformer-round.md section 4), where the dropped wire only
+     * showed up later as an unreachable_node.
+     */
+    struct FDisplacedLink
+    {
+        /** The pin that lost a connection, and its owner. */
+        FString NodeId;
+        FString NodeName;
+        FString PinName;
+        FString Direction;
+
+        /** The far end that is no longer connected to it. */
+        FString LostNodeId;
+        FString LostPinName;
+    };
+
+    /**
+     * Connect two pins. When OutDisplaced is given it receives every connection that existed before
+     * the call and is gone after it (both ends are snapshotted, because the schema breaks the side
+     * that cannot hold two wires).
+     */
     static bool ConnectNodes(UEdGraph* Graph, UEdGraphNode* SourceNode, const FString& SourcePinName,
                              UEdGraphNode* TargetNode, const FString& TargetPinName,
-                             FString& OutErrorCode, FString& OutErrorMessage, TArray<FString>& OutCandidates);
+                             FString& OutErrorCode, FString& OutErrorMessage, TArray<FString>& OutCandidates,
+                             TArray<FDisplacedLink>* OutDisplaced = nullptr);
 
     static bool SetPinDefaultValue(UEdGraphNode* Node, const FString& PinName,
                                    const TSharedPtr<FJsonValue>& Value,
@@ -373,6 +407,18 @@ public:
                                              const FString& Value, const FString& ValueKind,
                                              FString& OutErrorCode, FString& OutErrorMessage,
                                              TArray<FString>& OutCandidates);
+
+    /**
+     * When a pin write fails because the caller handed a LIST to a pin that holds one value, fill OutHint
+     * with the recipe that does work: build the values with a MakeArray node, connect its element pins to
+     * this pin, and write each element's default - the element pins are wildcard until connected.
+     *
+     * Measured: a scalar written to an Array[Name] pin SUCCEEDS (it lands in the pin's DefaultValue), so
+     * the failure is about the value's shape, not about the pin being a container. One place for the
+     * wording, so both entry points (creating a node with params, and set_blueprint_pin_default) hand the
+     * caller the same next step.
+     */
+    static bool TryBuildMultiValuePinHint(const TSharedPtr<FJsonValue>& Value, FString& OutHint);
 
     static bool DisconnectPin(UEdGraphNode* Node, const FString& PinName,
                               const FString& LinkedNodeId, const FString& LinkedPinName,

@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP 材质编写 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
 目标：用 MCP 工具 + python 脚本**可重复、可验证**地建/改材质（含后处理材质与 Custom HLSL）。
 
 > 本文只写**可复用的做法与接口**；不收录具体配方、踩坑记录与工具缺陷。
@@ -105,7 +105,17 @@ MEL.connect_material_property(表达式, 输出名, unreal.MaterialProperty.MP_B
 
 返回 False 时，把两端节点的类名、`get_outputs()` 名字、目标 pin 名一起打出来自查。
 
+### 3b. 节点布局（交付纪律）
+
+材质图和其他图一样**是给人看的**：不要把所有 `MaterialExpression` 堆在原点附近。
+
+- **按语义分行**：`y` 分行（贴图采样 / 阶调 / 描边 / 输出各成一行或一列），`x` 沿数据流递增（每步 ~250–350）；
+- **加注释框**把区域标出来（`Comment` 类型的表达式，写 `Text`/`Desc` 并摆到该区域上方）；
+- **位置字段**：`MaterialExpression` 的 `NodePosX` / `NodePosY`（用 `set_material_expression_property` 写，写后从 `get_material_graph` 回读确认；`add_*` 类命令的 node_position 不一定生效 —— 与 K2 图同样的坑，K2 侧实测只有 `add_blueprint_event_node` 生效）；
+- 摆好再交：一次成批写位置，别留"点状云"。
+
 ### 4. Custom 节点的输入 pin
+
 
 **首选：一次调用把节点、`code`、引脚全建好**（MCP 工具）：
 
@@ -197,7 +207,7 @@ get_material_compile_errors(asset_path)      # 可选 since=<ISO-8601 或 epoch 
 
 ### 7. 批量脚本
 
-长脚本写到 `Saved/MCPScripts/*.py` → `execute_python_file(file_path=..., deferred=True)` → `poll_python_job(job_id)`。脚本内用 `print()` 输出中间状态；需要等待就直接拆成多次调用。
+长脚本写到 `Saved/MCPScripts/*.py` → `execute_python_file(file_path=..., timeout=...)`（同步；重活拆成多次短调用）。脚本内用 `print()` 输出中间状态；需要等待就直接拆成多次调用。
 
 ### 8. 在 python 脚本里调 MCP 命令（bridge 回环）
 
@@ -226,7 +236,7 @@ bridge("create_material_expression", asset_path=MAT,
   读取失败时把 `r` 整个打出来 —— 错误信息可能在 `r["error"]` 里，而数据可能在 `result["error"]` 里。
 - 参数可传裸对象，也可传 TCP 风格 `{"command": ..., "params": {...}}`（`command` 字段被忽略，第一个实参决定命令）。
 - **无排队、无 future 等待**（同一个同步 dispatcher），一个脚本里连续几十次调用是安全的。
-- 回环禁用名单：`execute_python_command` / `execute_python_file` / `poll_python_job` / `take_screenshot` → `{"status":"error","error":"reentry_forbidden"}`（这四个只有 TCP 路径可用）。其他失败形态：`wrong_thread` / `bridge_unavailable` / `invalid_params_json`。
+- 回环禁用名单：`execute_python_command` / `execute_python_file` / `take_screenshot` → `{"status":"error","error":"reentry_forbidden"}`（这三个只有 TCP 路径可用）。其他失败形态：`wrong_thread` / `bridge_unavailable` / `invalid_params_json`。
   - 该名单来自命令注册表的 `loopback_forbidden` flag（不是代码里的手写清单）；要看全量命令名/参数/策略，用自省工具 `list_mcp_commands`（可选 `category="material"`）。
 
 **命令名 = MCP 工具名（多数）**，少数不同：
@@ -253,9 +263,9 @@ bridge("create_material_expression", asset_path=MAT,
 
 **批处理纪律**：`set_material_expression_property` / `set_custom_input_name` / `set_material_parameters` / `add_custom_input` / `remove_custom_input` 的 `recompile` 默认 **false** —— 批内全部保持 false。**连线类命令（`connect_material_expression` / `connect_material_pin` / `disconnect_material_property`）不再自行重编**，所以批量建图的做法是：先把整张图连完，再对每个材质调一次 `recompile_material(asset_path, save=true)` 收口（它同时做"材质级刷新"，缺了它资产对但视口不变）—— 每次重编都是一次完整 shader 编译，逐步重编是纯浪费。
 
-> 连线命令去掉强制重编的实测账（每根线 ~250ms、10 根线 ≈2.4s/材质，且编的还是半成品图）：见 `Docs/MCP_Findings_2026-09-27_*.md` 与 `Docs/MCP_Tool_Improvement_Proposals_2026-09-27.md`。
+> 连线命令去掉强制重编的理由：每根线 ~250ms、10 根线 ≈2.4s/材质，且编的还是半成品图。
 
-> 临时夹具（探针材质）**删除必须走 `safe_delete_asset`**：用 `EditorAssetLibrary.delete_asset` 删"仍被引用"的刚建资产会失败并把包标记为 `potentially corrupt`，随后编辑器在刷新时 AV。证据见 `Docs/MCP_Findings_2026-09-27_asset-delete-corrupt-package.md`。
+> 临时夹具（探针材质）**删除必须走 `safe_delete_asset`**：用 `EditorAssetLibrary.delete_asset` 删"仍被引用"的刚建资产会失败，并把包标记为 `potentially corrupt`，随后编辑器在刷新时 AV。
 
 **注意**：直接调底层命令会跳过 `connect_material_expressions_safe` 那层保护（它自己会先 `list_material_expressions` 解析、连完再 `get_material_graph` 回验），所以命令里的 `source_name` / `target_name` 必须是 `list_material_expressions` 返回的**精确 name**。写 `code` 仍会被服务端 lint 拦下（`invalid_custom_hlsl`，材质不变）；数组属性（Custom 的 `inputs`）**整表写**被拒（`unsupported_property_type`）—— 新建节点用 `create_material_expression` 的 `inputs` 参数一次建好，已有节点用 `add_custom_input` / `remove_custom_input` 单元素增删，或 python 侧 `set_editor_property("inputs", pins)`。
 
@@ -278,7 +288,7 @@ bridge("create_material_expression", asset_path=MAT,
 
 - `VertexNormalWS` / `CameraVectorWS` 这类**只存在于像素着色器的 shortcut 名，写进 Custom 代码会让 `errors_by_feature_level.SM6` 非空**（`use of undeclared identifier`，且只炸在 `FLumenCardVS` / `FDebugViewModeVS` 这类排列里，编译"看起来部分成功"）。法线、相机向量要**从输入引脚接进来**（`MaterialExpressionVertexNormalWS` / `MaterialExpressionCameraVectorWS`），HLSL 里只用引脚名。
 - **不要点名着色器参数结构体**（`View` / `ResolvedView` / 各 UB struct）：本仓库有实测记录，这么做会撞 `RHICoreShader.cpp:52` 的 uniform buffer 布局断言、**直接把编辑器关掉** —— 能编译 ≠ 绘制时安全。
-- 要主光方向时：UE 5.5 **没有** `GetPrimaryLightDirection()`（探针实测 `use of undeclared identifier`）；`ResolvedView.DirectionalLightDirection` 编译干净（它**指向光源**，`dot(N, L)` 不取负），但要承担上一条的风险 —— **首选**把 `MaterialExpressionAtmosphericLightVector` 的输出接到引脚（引擎表达式，不需要同步，见 §五.3）；它不可用时才退回 `VectorParameter("LightDir")`（代价：默认值要自己取关卡太阳的反向 `-DirectionalLight.forward`，且太阳转动后不会跟随）。
+- 要主光方向时：引擎**没有** `GetPrimaryLightDirection()`（探针实测 `use of undeclared identifier`）；`ResolvedView.DirectionalLightDirection` 编译干净（它**指向光源**，`dot(N, L)` 不取负），但要承担上一条的风险 —— **首选**把 `MaterialExpressionAtmosphericLightVector` 的输出接到引脚（引擎表达式，不需要同步，见 `unreal-material-case-mmd-toon-outline` 的光方向那节）；它不可用时才退回 `VectorParameter("LightDir")`（代价：默认值要自己取关卡太阳的反向 `-DirectionalLight.forward`，且太阳转动后不会跟随）。
 - `pin.Fetch(offset)` 的 offset 是**视图像素**（default UV / texel 步长 / clamp 引擎都处理），所以 stencil 过滤可以直接写 `stencilTex.Fetch(off).r >= StencilValue - 0.25`。
 
 ---
@@ -389,113 +399,5 @@ unreal.EditorAssetLibrary.save_asset("/Game/MCP/Pond/T_mask_r", only_if_is_dirty
 
 ---
 
-## 五、MMD 材质 → UE 阶调 toon（可复用）
-
-导入的 MMD 角色"有贴图但没有二次元感"时的判据与做法（甘雨 19 个材质全套实测）。
-
-### 1. 先分清是"掉观感"还是"掉贴图"
-
-逐个读材质图：若每个材质都是**单节点 `TextureSample → BaseColor`、`MSM_DEFAULT_LIT`、`BLEND_OPAQUE`、单面**，那是导入器丢掉了 MMD 的 toon 语义，贴图本身没丢（核 `srgb` / `compression_no_alpha`）。"补观感"只需改这 N 个材质本身，**网格槽位不用动**、不用重导。
-
-### 2. 源头判据：blend / 双面去读 PMX，别凭观感猜
-
-`Saved/MCPScripts/pmx_texdump.py <模型.pmx>` 直接解出每个材质的贴图、**no-cull 标志（0x01 = 双面）**、shared toon 索引（`-1` = 无阶调）、`diffuse.a`、edge 颜色/粗细；`png_alpha_stats.py` 看每张贴图**是否真有 alpha 通道**。据此定：
-
-- **双面**：照抄 PMX 的 no-cull（本例 19/19 全双面）。
-- **blend**：只有**有 alpha 通道**的贴图才谈得上 Masked（`OpacityMask` 取贴图 alpha）；贴图无 alpha 通道的槽设 Masked 毫无意义（alpha 恒 1）→ Opaque；alpha **全部 < 0.5** 的柔和叠加层（腮红类）只能用 Translucent（Masked 会把整块剪掉）。
-- toon 索引 `-1` 的槽（眼睛/眼白）用 `Bands=1 + ShadowTint=(1,1,1)` 还原"无阶调"，不需要额外节点分支。
-- **PMX 的 `dif.a` 不能当"透不透明"的依据**：它常是 1.0，而美术意图藏在**贴图 alpha** 里。判据取「该材质 UV 框内的 alpha 统计」（不是整张贴图）：`>=128` 占多数 ⇒ Masked 合适；**全部 `<128`** ⇒ Masked 会把整块剪掉、只能 Translucent（本例 `脸红`：`dif.a=1.0` 但框内 alpha 100% `<128`、均值 21.9/255 ⇒ 柔和叠加层）。整张贴图的统计会误导：`表情.png` 全图 98.5% 的 alpha 为 0，看着像"没有 alpha 可用"。
-- "某槽引用了看起来不对的贴图"（如 `目` 采发丝图）：**先解 PMX 再判**——本例证实源模型就是这么配的 ⇒ 不该改。
-
-### 3. 阶调怎么建（UE 5.5 没有 toon shading model）
-
-**光方向这一项不要用参数同步**：接引擎的 `MaterialExpressionAtmosphericLightVector`（= `ResolvedView.AtmosphereLightDirection[0]` = `-DirectionalLight.forward`，指向光源），太阳转动**自动**跟随，不需要 MPC / 蓝图 / 编辑器期重跑。同族节点里只有这一个可用：
-
-| 节点 | 能不能用 |
-|---|---|
-| `MaterialExpressionAtmosphericLightVector` | **能**（unlit 里也有效；`SceneRendering.cpp:1381,1526` 给的是 `-GetDirection()`） |
-| `MaterialExpressionLightVector` | **不能**：基 pass 里 `Parameters.LightVector = 0`（`MaterialTemplate.ush:4439`），unlit 恒为 0 |
-| `MaterialExpressionObjectOrientation` | **不能当"朝向"**：它是**局部 Z 轴**（`PrimitiveUniformShaderParametersBuilder.h:388`），不是角色正前方 |
-| 裸 `ResolvedView.DirectionalLightDirection` 写进 Custom | **禁止**（本仓库有 uniform buffer 断言崩编辑器的先例，见 §一） |
-
-**换空间要用 `Transform` 节点，注意两个枚举成员名不对称**：source 是 `EMaterialVectorCoordTransformSource`（成员 `TRANSFORMSOURCE_*`），destination 是 `EMaterialVectorCoordTransform`（成员 `TRANSFORM_*`）；写错回 `unknown_enum_member` + 可用成员表。World→Local 的向量变换只支持 Surface 域（`HLSLMaterialTranslator.cpp:10952-10966`）。
-
-**给导入模型做"脸部/局部方向"类效果前，先标定模型自己的局部坐标轴**：本例（MMD 甘雨）脸在局部 **+Y**（眼骨局部 `y≈+21.8`）、局部单位 cm、网格 z∈[0,159.2]；旧代码里那个 `(x,0,z)` 投影"丢掉 Y"其实就是沿脸平面法线压平 —— 不标定就不知道自己在压哪个轴。标定脚本与数据：`Saved/MCPScripts/toon_face_centre.py` / `.txt`。
-
-
-`MSM_UNLIT` + 一个 Custom 节点直连 `EmissiveColor`：`NdotL = saturate(dot(N, L))` → 量化 `floor(NdotL*bands)/max(bands-1,1)` → `tex*BaseTint*lerp(ShadowTint,1,ramp) + spec + rim`。参数只有阶调类：`Bands` / `ShadowTint` / `SpecularStrength` / `RimStrength` / `BaseTint` —— **光方向不是参数**，`In_LightDir` 由上面的引擎节点直接喂（法线、相机走输入引脚，见 §一 补充）。节点数是可预算的（本例 **10 节点/材质**），拿来当幂等断言；`wipe_material_graph` 的 `remaining` 必须为 0。取舍要明说：UNLIT 不吃场景光照/阴影。
-
-**阶调的边缘要"量化 + 窄窗软化"，不要纯 `floor`**：纯 `floor` 会在阶跃处产生锯齿并在运动时闪烁；做法是先量化再只在每个 band 的最后一小段（本例 6%）`smoothstep`。这样既能拿到硬边界，又不抖。
-
-**高光要单独做成 cel 高光**（这条最容易翻车）：直接搬图形学教科书的 Blinn-Phong `spec = pow(saturate(dot(N,H)), 32) * strength` 会立刻读成"塑料感"，因为它叶内连续衰减、边缘很宽、还会在背光面亮一块。二次元高光的要求恰好相反 —— **硬边、内部平坦、只在受光侧**：
-
-| 病征 | 改法 |
-|---|---|
-| 叶内渐变 | `smoothstep(0.955, 0.995, NdotH)`：块内恒为 1，边缘只有 ~2–3 px |
-| 爬到暗面 | 乘一个 `NdotL` 闸门，如 `smoothstep(0.02, 0.15, lit)` |
-| 想给某些槽关掉阶调（`Bands=1`）时 | 闸门**不能**复用 `ramp`：`Bands=1` 时 `ramp ≡ 0`，会把这些槽的高光整个抹掉。用 `N·L` 独立判定 |
-
-`SpecularStrength` 仍做成标量参数（逐槽可调亮度），但块的**形状与位置不做旋钮** —— 要让用户调的是"亮不亮"，不是"软不软"。
-
-**暗贴图会被"乘法阴影"压成看着是黑**：阴影项是 `tex × lerp(ShadowTint, 1, ramp)`，所以源贴图本身就暗的槽（本例 `角`：它的 UV 区域内 mean 亮度只有 72、最暗 31，而可见的 UV 岛是暗的那半）在阴影片里掉到 ~25/255 —— 视口里就是一块死黑。
-
-- **判断（离线，不用渲染）**：解 PMX 拿该材质的 UV 范围，再用 PIL 采贴图在该范围内的统计（`pmx_uv_region.py`；它还给 V 翻转后的区域，用来排除"上下翻错"）。本例角区域**两个方向都不是黑的** ⇒ 排除贴图/UV，锁定"乘法把暗部压死"。
-- **修法（按代价从低到高）**：① 只给这一个槽把 `ShadowTint` **抬高到中性灰**（本例 0.85 ⇒ 72×0.85≈61/255）——保留阶调与随光移动的边界，只是不再压死；② 彻底去掉乘法（`ShadowTint=(1,1,1)`，观感变成"不随光变暗"的平贴图）。**不要去动全局默认值**——每个槽有自己的材质，改它只影响它自己。实测 0.35→25/255（视口里就是黑）、0.75→54、0.85→61、1.0→72；两个候选值都能"看着正常"，选哪个取决于要不要保留明暗响应。
-- **要"自发光感"先看现有参数够不够**：UNLIT + 直连 `EmissiveColor` 的 toon 材质里，"常亮"= 去掉阶调（`Bands=1`）且去掉阴影乘法（`ShadowTint` 全白）——平坦输出与自发光等价，**不必新增节点**（新增会破节点数幂等断言）。代价：该槽从此完全不参与明暗。
-- **逐槽微调不必整批重建**：`set_material_parameters` + `recompile_material(refresh=true, save=true)` 即可（`refresh` 那步缺了视口不更新）；但**构建脚本的批次表必须同步改成真值**，否则下次重建静默退回旧观感。
-- **排查顺序**：`数学没错但看着是黑` 时，先怀疑乘法阴影，**不要**先怀疑法线/UV。判"是不是这个槽的材质在画"最省事的办法：把该槽换成纯色自发光材质（一眼看出是哪块几何），再换成纯 `TextureSample → Emissive` 对照（贴图 vs 数学，两个变量一次切开）。
-
-### 4. 描边（后处理 + CustomDepth/Stencil）
-
-`MD_POST_PROCESS` 材质 + 4 个 `SceneTexture` 节点，PPI id 实测：`1 = SceneDepth`、`13 = CustomDepth`、`14 = PostProcessInput0`、`25 = CustomStencil`。用 `pin.Fetch(像素偏移)` 做邻域（偏移是**视图像素**）：**stencil 决定"哪些像素属于角色"**，**CustomDepth 的邻域深度差才是边的来源**（`abs(cd - cdC) > DepthThreshold`，外轮廓与部件交界都出线），再用 `PPI_SceneDepth` 挡穿墙（`cd <= sceneDepth + DepthThreshold`）。角色侧 `render_custom_depth=true` + `custom_depth_stencil_value=N`；材质挂专用 unbound volume，用 **`add_blendable_to_post_volume`**（直接写 `settings.blendables` 被读保护）。**绑定完要显式 bounce 一次 volume 的 `enabled`（False→True）再存关卡**。`BlendableLocation` 抄工程里**已能工作**的那个描边材质（本例 `BL_SCENE_COLOR_AFTER_TONEMAPPING`），不要照文档默认值猜。
-
-**打 stencil 前先普查"谁消费 stencil"**：任何以 `PPI_CustomStencil` 为条件的材质都会从"没效果"变成"生效"（本例 `M_Outline_RT` 是火焰描边，给角色打 tag 1 就顺带套上橙白火圈）。普查 = 遍历 `/Game` 下 `material_domain == MD_POST_PROCESS` 的材质，看 `SceneTexture` 节点 id 是否含 25、Custom 代码里有没有 `stencil`；**同时要记录"哪些真的挂在 volume 上"**（没挂的资产不参与渲染，谈冲突没有意义）。两个坑：扫描里**别用 `except: continue`** —— 它会把所有目标静默跳过，输出为空看起来就像"没有载体"（本仓库真踩过）；`WeightedBlendables` **不可迭代**，要取 `.get_editor_property("array")`。
-
-**每台以 stencil 为条件的描边 SHOULD 精确拥有一个取值**：判据写 `abs(stencil - StencilValue) < 0.25`，材质暴露自己的 `StencilValue`。分配就是一个约定，例如 **tag 1 = 火焰描边、tag 2 = 普通描边**；一个 primitive 只有一个 stencil 值，所以"某物体同时吃两套"只能靠**把两个 `StencilValue` 设成同值**（精确匹配同值 = 并集），不能靠两个 tag。
-
-反面写法是**累积**：`stencil >= StencilValue - 0.25`（写死的 `> 0.5` 就是它默认 1 时的等价形式）。只要有一台是累积的，它就会盖住所有更高 tag 的物体 —— 两台都精确才真正分得开。改老材质做这件事时，把判据**逐处**替换（本例 3 处）再补一个参数引脚。
-
-改老材质做这件事时：门限表达式要**逐处**替换（本例 3 处），**给已有 Custom 节点加引脚走 python** —— `unreal.load_object(None, "<pkg>.<asset>:MaterialExpressionCustom_0")` 拿到对象后 `set_editor_property("inputs", pins)`；改前把 code + 引脚表备份成 JSON。**老材质若有构建脚本，必须同步改脚本**，否则下次重建静默退回旧行为（工程里 `build_outline_rt2.py` + 若干 patch 脚本是既有惯例，新 patch 要落进这条链）。
-
-**顺序别记错**：材质的 `BlendablePriority` 和 volume 的 `priority` 是两件事。同 location 的材质链按**材质的** `BlendablePriority` 升序套用（`BlendableInterface.h:138-150` 的 `FCompare` + `PostProcessMaterial.cpp:1048` 的 `StableSort`），优先级相同时才保持卷的合并顺序；volume 的 `priority` 只在合并各 volume 的**设置**时起作用。要固定谁在上层，就显式给材质的 `BlendablePriority` 赋值。
-
-### 5. 落盘与自证
-
-脚本落 `Saved/MCPScripts/`（改材质 / 建描边 / 挂 volume 与组件 / 机器验收 / 批次清单各一份）。每个材质回读：节点数、`unreferenced_count`、blend、双面、贴图、`EmissiveColor` 与 `OpacityMask`/`Opacity` 连接、`errors_by_feature_level`（**SM5 与 SM6 都要空**）、`.uasset` mtime。两个实操注意：
-
-- 用 `execute_python_file` 跑十几二十个材质的批量改造会**超客户端 90s 上限而在客户端报 timeout，但服务端还在跑** —— 以脚本自己写出的 report JSON 为准，不要重跑。
-- 读某个节点采的是哪张贴图：`get_material_expression_property(property="texture")`（`list_material_expressions` 不列贴图）。
-
-### 6. 反向外扩描边（inverted hull）—— 二次元角色描边的原生做法
-
-要"MMD/原神那种描边"就走**几何外扩**，不要走后处理：后处理描边的线宽是像素（随距离/分辨率变）、深度连续处出不了线、贴地与凹处易断，而且做不到"每材质不同宽度"。判据：MMD 的 PMX 里每个材质带 `EdgeColor` / `EdgeSize` / 是否有 edge 标志 —— 那就是外扩的定义（解 PMX 就能拿到原始线宽与颜色）。
-
-**UE 里怎么"只画背面"（不猜，实测）**：
-
-| 问题 | 结论 | 依据 |
-|---|---|---|
-| 静态网格能反向剔除吗 | 能：`bReverseCulling` / `SetReverseCulling()` | `StaticMeshComponent.h:313,475` |
-| 骨架网格能吗 | **不能**：没有该标志，反向剔除只能由"变换行列式为负"推出 | `SkeletalMesh.cpp:6940,7202` |
-| 那用负缩放行不行 | 不行：行列式为负会连法线一起镜像，外推出的壳是**镜像的壳**，不对称姿势会画到错的一侧 | 同上 |
-| 材质层能拿到正/背面吗 | **能**：`MaterialExpressionTwoSidedSign`（=`Parameters.TwoSidedSign`，正面 +1 / 背面 −1） | `MaterialExpressionTwoSidedSign.h`、`MaterialTemplate.ush:4444-4462` |
-
-所以配方是：`MSM_UNLIT` + `BLEND_MASKED` + **`TwoSided=True`**（谁都不剔除）+ `WorldPositionOffset = VertexNormalWS × Width`（宽度用**世界单位**）+ `OpacityMask = Saturate(OneMinus(TwoSidedSign))`（只留背面 ⇒ 正面被 Masked 剪掉，不会盖住角色）。外推后的背面只在轮廓**之外**露出 → 得到一圈线，**不需要 stencil / CustomDepth / 后处理 volume**。
-
-**载体：用独立 actor（或蓝图 actor），别给已有 actor 硬加组件。** 独立 actor 用 `SkeletalMeshActor` 这类**类里自带**组件的载具：同一 mesh、材质槽全指壳材质、`LeaderPoseComponent` 指向角色主组件（跨 actor 共享姿势）、`cast_shadow=false`、attached 到角色；做成蓝图 actor 亦可（本项目受控角色就是把描边做成蓝图里的一个组件，见重定向 skill §三.1）。
-
-已知取舍：法线在硬边处分离 ⇒ 那些地方壳会裂（MMD 同样如此）；单一共享的壳材质会让"原本没有 edge"的槽也被描边，要对齐就得逐槽材质。
-
-**描边色不要"贴图 × 一个固定深色"，也不要全局一个颜色**：业界（MToon / Unity Toon Shader / Guilty Gear Xrd）的做法是**描边色取材质自己的暗部色与基色插值**（`lerp(ShadeColor, BaseColor, k)`；GG 更进一步用 lit/shadow 两张手绘 albedo，描边直接取 shadow 那张）。关键是线条要**比物体在任何阶调下都暗**：本体画的是 `tex * lerp(ShadowTint, 1, ramp)`，暗面已经到 `tex*0.35`，所以 `tex*0.55` 这种"看起来只是稍深"的线在暗面**比物体更亮**（用户会直接说"像浅色"）。稳妥做法：
-
-- 让描边材质**跑本体那份着色核心**（同一个 Custom 代码 × 一个 `Darken`），线条就成了"物体当前被画出来的颜色再压暗"，逐像素跟随法线与光照；`spec`/`rim` 用常量 0 接进去（那样描边不会长出高光）。
-- **代码从本体材质读、不要重抄**：`get_material_expression_property(property="code")` + `property="inputs"` 拿引脚表，建成壳材质的 Custom 节点；验收里断言两边 `code` **逐字节相同**，本体改公式时描边不会悄悄漂移。
-- **压暗要用"带色相的暗色"，不能用标量/乘黑**：标量乘等于把白色部件变成**灰线**（会被直接指出来："脸是白的，描边不能是灰色，要是棕色"）。做成**颜色参数**（默认暖棕，与源模型 PMX `EdgeColor` 同族），并把它写成机器判据（`LineTint.r > LineTint.b`）。这也是 ASW 的原话——"基色的**更暗、更饱和**的色调"。
-- **线条色逐槽取自该槽自己的颜色**：保持该槽色相、压暗并（相对）提饱和 —— 做法是采该材质 UV 框内的贴图均色，`tint = (mean / max(mean)) * 幅度`（幅度 ~0.45），蓝发就得到深蓝线。**近中性的槽没有色相可保**（纯白/近灰），乘下去只会变灰，所以饱和度低于阈值（~0.12）时回落到暖棕 —— 这一条正是用户两轮反馈的合并："脸是白的，描边不能是灰色，要是棕色" + "头发蓝色应该描边深蓝"。压暗必须是**颜色相乘**，不是标量。
-- **逐槽一个材质实例**（`MI_OL_<槽>`）：壳材质的贴图、暗部色、阶数、线条色都做成参数，实例的值**按索引**从本体组件的同一索引槽读出（两者挂同一 mesh ⇒ 索引即同一 section，别按名字查表）。槽序就是正确性。粒度是"每材质一个线条色"（GG 的 per-material line colour 同粒度）：槽内多色时取该槽均色的暗色，不逐像素跟随色相。
-- 未做的两项业界常见件（知道缺什么）：屏幕空间恒定像素宽度（当前世界单位宽度会随距离变细）、深度淡出（接触地面处硬切）。
-
-**改这些实例时：就地改参数，绝不要 recreate。** 已被挂载渲染的实例上用 `create_asset_safe(recreate=True)` 是"删了再建同名声"，渲染侧持有悬空数据 ⇒ **编辑器直接崩**（纯 Renderer 栈）。已存在就 `load_asset` 后改参数，不存在才创建。另：World Partition 关卡里 actor 的改动在 **external actor 包**，`save_current_level()` 不保证落盘，用 `EditorLoadingAndSavingUtils.save_dirty_packages(True, True)`。
-
-> **排查手法（省时间的关键）**：效果"看不到"时不要靠读属性猜，**把一个变量挪到已知能渲染的通道上**再判。本例就是把描边材质**临时挂到角色自己的材质槽（0 号槽）**：脸立刻被外推成红色块 ⇒ 材质/WPO/使用标志全部无罪，问题锁定在载体那个子对象上。一次观感就把"材质 / 组件 / 渲染状态"三类原因切开了。
-
-> 工具/编辑器侧实测原文（崩栈、`save_dirty_packages` 的必要性、旧实例的陈旧引用为何删不掉）：`Docs/MCP_Findings_2026-09-27_outline-mi-recreate-crash.md`。
+> **这一节已拆成独立 skill**：`unreal-material-case-mmd-toon-outline`（MMD 材质 → 阶调 toon 与描边的完整配方）。
+> **这一节已拆成独立 skill**：`unreal-material-case-face-sdf-lighting`（脸部 SDF 光照的完整配方）。

@@ -57,3 +57,29 @@ render_transform_pivot           # property key of set_widget_properties' props 
 compile_performed                # response field of get_umg_compile_errors (says the read command compiled to capture messages), not a tool
 focus_reason                     # response field of open_umg_designer (why a requested widget could not be selected), not a tool
 list_assets                      # unreal.EditorAssetLibrary python API quoted in the UMG skill's probe caveat (it answers empty while PIE runs), not an MCP tool
+add_node_by_class                # UnrealMCPBlueprintGraphLibrary method (lib.*) named in the animation skill's "the graph lib can drive subgraphs" sentence, not a bridge command
+connect_pins                     # UnrealMCPBlueprintGraphLibrary method (lib.*), same sentence, not a bridge command
+get_graph_nodes                  # UnrealMCPBlueprintGraphLibrary method (lib.*), same sentence, not a bridge command
+find_graph                       # graph-library entry point the animation skill names as "this route cannot reach a subgraph either", not a bridge command
+close_all_editors_for_asset      # unreal.AssetEditorSubsystem python API quoted in the animation skill's BlendSpace resample note, not an MCP tool
+load_failed_in_pie                # error code documented in the asset skill (PIE cannot load some asset types); the code is emitted by the bridge, not a tool
+read_only                        # value of reflect_probe's writable_detail field quoted in the animation skill, not a tool
+get_referencers                  # AssetRegistry python API named in the blueprint skill's reparent chapter (who references a BP), not an MCP tool
+get_reference_pose               # unreal.AnimPoseExtensions python API quoted in the asset-pipeline skill (rest pose readback), not an MCP tool
+read_render_target_pixel         # unreal.KismetRenderingLibrary python API named in the material skill as the way to get a pixel value, not an MCP tool
+set_actor_rotation               # unreal.Actor python API quoted in the material skill's "restore the sun angle after a viewport check" note, not an MCP tool
+delete_pending                   # response field of duplicate_asset_safe / delete_asset_safe (the delete half could not finish), not a tool
+delete_result                    # response field of duplicate_asset_safe (the embedded safe_delete_asset outcome), not a tool
+would_clear                      # response field of safe_delete_asset(dry_run=true), not a tool
+would_delete                     # response field of safe_delete_asset(dry_run=true), not a tool
+physics_asset_restored           # response field of import_skeletal_mesh (a replace import kept the previous PhysicsAsset), not a tool
+slots_added                      # response field of import_skeletal_mesh's equivalence object, not a tool
+slots_removed                    # response field of import_skeletal_mesh's equivalence object, not a tool
+slots_renamed                    # response field of import_skeletal_mesh's equivalence object, not a tool
+materials_lost                   # response field (and warning code) of import_skeletal_mesh's equivalence object, not a tool
+materials_changed                # response field of import_skeletal_mesh's equivalence object, not a tool
+redirection_fixed                # response field of safe_delete_asset when the target itself is a redirector, not a tool
+resolved_viewport                # response field of take_screenshot(source=asset_editor), not a tool
+editor_not_open                  # error code of take_screenshot(source=asset_editor), not a tool
+viewport_ambiguous               # error code of take_screenshot(source=asset_editor), not a tool
+rename_failed                    # error code of move_asset / move_directory when the engine refuses the rename, not a tool

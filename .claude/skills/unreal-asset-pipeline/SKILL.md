@@ -1,6 +1,6 @@
 ---
 name: unreal-asset-pipeline
-description: "UE5（UnrealMCP）里把「外部文件 → 工程资产」这件事做对的 Skill：为什么外部文件导入必须走 import_assets（force_legacy 关 Interchange + readback，手搓 AssetImportTask 会直接崩编辑器）、替换/重导入已有资产（同名覆盖、保持 Skeleton 绑定与材质重链）的正确顺序、导入后能用来自证的硬证据（临时目录导入 + rest 姿势逐骨比对、动画/材质槽/骨数核对、权重类改动无 python 读接口时的验收路径）、导入骨架的 track 平移单位与竖直轴不遵循 UE 约定（实测 MMD 版：单位=米、世界向上=父骨局部 −Y）以及写平移轨道前必须先标定、资产生命周期（safe_delete_asset / list_asset_blockers / 别在同一 job 删了再同名重建）、Blender→UE 的 FBX 导出参数与「别猜参数、用比对反证」的做法、以及 deferred python job 的边界（默认 sync、只有超过客户端 ~90s 才 deferred、job 文件只在结束时出现）。触发场景：准备调用 import_assets / import_texture / import_skeletal_mesh / import_animation / set_asset_properties / get_asset_properties / safe_delete_asset / list_asset_blockers / list_mcp_commands / execute_python_file（涉及导入、覆盖、批量落盘时）/ poll_python_job 之前；以及任何涉及「把 FBX/贴图/外部文件导进 UE、替换或重导入已有资产、覆盖导出后重新导入、导入崩编辑器、资产没落盘、删资产、判断某个操作该不该用 deferred、导入骨架的平移通道该写哪根轴/单位是多少」的任务。"
+description: "UE5（UnrealMCP）里把「外部文件 → 工程资产」这件事做对的 Skill：为什么外部文件导入必须走 import_assets（force_legacy 关 Interchange + readback，手搓 AssetImportTask 会直接崩编辑器）、替换/重导入已有资产（同名覆盖、保持 Skeleton 绑定与材质重链）的正确顺序、导入后能用来自证的硬证据（临时目录导入 + rest 姿势逐骨比对、动画/材质槽/骨数核对、权重类改动无 python 读接口时的验收路径）、导入骨架的 track 平移单位与竖直轴不遵循 UE 约定（实测 MMD 版：单位=米、世界向上=父骨局部 −Y）以及写平移轨道前必须先标定、资产生命周期（safe_delete_asset / duplicate_asset_safe / list_asset_blockers / 别在同一 job 删了再同名重建）、Blender→UE 的交接判据（别信上次导出参数、只信导入后比对）、以及执行模型（`execute_python_*` 一律同步、重活拆成短批、没有 deferred/job 模式）。触发场景：准备调用 import_assets / import_texture / import_skeletal_mesh / import_animation / set_asset_properties / get_asset_properties / safe_delete_asset / duplicate_asset_safe / list_asset_blockers / list_mcp_commands / execute_python_file（涉及导入、覆盖、批量落盘时）之前；以及任何涉及「把 FBX/贴图/外部文件导进 UE、替换或重导入已有资产、覆盖导出后重新导入、导入崩编辑器、资产没落盘、删资产、导入骨架的平移通道该写哪根轴/单位是多少」的任务。"
 metadata:
   version: "1.1.0"
   upstream: ~
@@ -9,7 +9,7 @@ metadata:
 
 # UnrealMCP 资产导入与外部文件管线 Skill
 
-适用：UE 5.5 + 本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
+适用：本仓库 `Plugins/UnrealMCP`（bridge `127.0.0.1:55557`，MCP server 名 `unrealMCP`）。
 目标：外部文件（FBX/贴图/文本）进工程、替换已有资产、批量落盘/删除时，**不崩编辑器、结果可自证**。
 
 > 本文只写**可复用的做法与接口**；不收录具体配方。
@@ -29,6 +29,7 @@ metadata:
 | 资产属性（贴图 srgb/压缩/寻址、材质参数等） | `set_asset_properties` | 手写 `set_editor_property` + 自己 save |
 | 读资产自身属性 | `get_asset_properties` | — |
 | 删资产 | `safe_delete_asset`(+`list_asset_blockers`) | `EditorAssetLibrary.delete_asset`（无注册表通知、会留残留） |
+| 复制资产 | `duplicate_asset_safe`（默认落在源目录、名字 `<源>_Copy`；`overwrite=true` 静默先删） | 手搓 `StaticDuplicateObject`（**不做蓝图/RigVM 类特有的 fixup**：副本当次会话能编译能存盘，**重载后编译失败** —— 实测 ControlRig 副本里的 spline 节点丢 `ScriptStruct`） |
 | 改资产路径 / 搬目录 | `move_asset` / `move_directory` | `EditorAssetLibrary.rename_asset`（引用者不落盘、又不留 redirector → 重启即断，见 §九） |
 
 外部文件导入唯一入口是这套工具（**不要**手搓 `AssetImportTask`，会崩编辑器）：贴图走 `import_texture`、骨骼网格走 `import_skeletal_mesh`、动画走 `import_animation`（`skeleton_path` 必填），**其它类型与混合批处理**才用 `import_assets`。三条类型化命令与 `import_assets` 共用同一份导入核心，所以 force_legacy 门禁、模态抑制、逐文件结果、companion_assets / save_failures 两张清单全部同形。`folder` 里出现"某类型专属参数"就说明该换工具了（例：`import_assets` 收到 `skeleton_path` 会结构化拒绝，不会静默忽略）。
@@ -56,7 +57,9 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 
 - 扩展名 → flag 映射：`.fbx → Interchange.FeatureFlags.Import.FBX`（其余见插件 `GetInterchangeExtensionFlags()`）。没有对应 flag 的扩展名 → `unsupported_extension`，`force_legacy` 无法兑现。
 - **会话级副作用（刻意设计）**：flag 关掉后本会话不再恢复，之后同扩展名的导入继续走 legacy importer；响应里的 `cvar_overrides` 记录改了哪些。
-- 返回：每个文件一条结果（形状固定），别只看整体 status。
+- 返回：每个文件一条结果（形状固定），别只看整体 `status`；另外两个清单决定"这次导入真的留下了什么"：
+  - `companion_assets[]`：本次导入在目标目录里**额外产出**的资产（Skeleton / PhysicsAsset / 自动材质），逐条带 `saved` —— 它们由导入任务之外的路径产生，曾经只留在内存（重启后主资产的引用就断）。
+  - `save_failures[]`（顶层 `companion_save_failed_count`）：companion 没落盘**不会**把 `imported` 翻成 false，只看 `imported` 会漏。
 
 ---
 
@@ -66,9 +69,17 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 
 1. **备份源文件**：覆盖导出前 `copy` 一份到同目录（例：`Richie_UE_pre_fix.fbx`）。UE 侧不留"改名备份资产"，靠文件备份回滚。
 2. **同名覆盖导出源文件**（Blender/FBX 侧），参数见 §5。
-3. `import_assets(paths=[同名文件], destination_path=原目录, replace_existing=true)`。
+3. `import_assets(paths=[同名文件], destination_path=原目录, replace_existing=true)`，**然后读回包里的
+   `equivalence{}`**（`replace_existing=true` 时默认给）：它把替换前后的 `height_cm` / `bounds_*` /
+   `sphere_radius` / `slot_count` / `morph_count` / `skeleton_path` / `physics_asset_path` 各取一次快照，
+   逐项给 `*_same`，再给 `bounds_delta{extent_ratio, sphere_radius_ratio, height_ratio}` 与 `warnings[]`。
+   判据：比值偏离 1 超过 5% = warning；比值 <1/50 或 >50 倍 = **error**（单位重复折算的形态，实测过一次
+   `global_scale` 被折算两次 → 整模型缩成 1/100，而回包仍是 `imported: true`）。
+   没有同名资产时 `before: null`；同名资产读不出来时 `before_unavailable` warning（PIE 会拒某些类型）。
+   **不要只看 `imported`**：导入成功与"资产还是原来那个东西"是两件事。
 4. **立刻核对绑定**（§4）：SkeletalMesh 的 `skeleton` 必须仍指向原 Skeleton —— 绑错/新建骨架会让所有动画失效。
-5. **覆盖导入不更新骨架**：`import_assets(replace_existing=true)` 只替换网格，**Skeleton / PhysicsAsset 保留第一次导入的数据**；要换骨架**先按 physics→skeleton→mesh 顺序删干净**再导（见 §5.1 第 3 步的 `purge_skeletal_assets.py`）。
+5. **覆盖导入不更新骨架**：`import_assets(replace_existing=true)` 只替换网格，**Skeleton / PhysicsAsset 保留第一次导入的数据**；要换骨架**先按 physics→skeleton→mesh 顺序删干净**再导（见 `unreal-asset-pipeline-case-bone-rename` 第 3 步的 `purge_skeletal_assets.py`）。
+   - **"MMD 角色整份重导、且要求动画/ABP 继续可用"这一整套配方**（为什么网格与骨架必须同门、编辑器关闭时的文件级换骨架、重编 ABP、绕序/UV 错配与单位三个必查缺陷）：见案例 skill `unreal-asset-pipeline-case-mmd-reimport-same-pair`。
 6. **导入选项（morph 之类）在覆盖导入时取自"网格资产自带的 import data"，不是任务参数**：`bImportMorphTargets` 是 `config` 属性、引擎基础 ini 里就是关的（首次导入靠给任务挂 `Options`，工具已做）；destination 已有同名网格时改的是**网格自己**那份 import data —— 打在 `"<mesh 对象路径>:FbxSkeletalMeshImportData_0"` 的 `bImportMorphTargets` 上（位域，python 的 `get_editor_property` 读不到它，用 `reflect_probe` / `set_object_property`），改完再重导。判据只有一条：重导后 `get_all_morph_target_names()` 的条数变了。
 7. **要保住成品材质，只能就地重导**（`destination_path` = 资产原目录）：导到新目录时导入器按 FBX 里的材质名**在新目录新建占位材质**（各 1 个节点），不会去原目录捡同名材质。
 8. 核对材质槽与资产总数没变（同名的材质/贴图按名字复用，不应产生新资产）；**复验要"槽路径 + 每槽节点数"逐条比，只比槽数会漏**。
@@ -88,6 +99,11 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 
 **权重类改动没有 python 读接口**（`SkeletalMesh` 不暴露 skin weights）：自证只能到"源头 + 导入等价"为止 —— 源头用 Blender 侧 vertex group 普查（改名/迁移后的顶点数与权重和），UE 侧证明"骨架没变、动画没坏"，最终形态由用户看视口验收。
 
+**同机位 A/B 是唯一能证明"改了权重/几何的导出真的到了视口"的手段**：`take_screenshot` 回包带 `camera{location, rotation, fov, viewport_size}`，**两次截图的 `camera` 相等才可比**；不等就说明视口被挪过，此时差异不可归因于改动（实测发生过一次，差异全被相机位移吃掉）。截图本身仍不是验收结论。
+- 要拍的不是关卡、而是某个资产编辑器自己的预览视口（Persona / 材质编辑器 / 预览视口）时用 `source='asset_editor'`，可配 `asset_path` 先把那个资产编辑器聚焦再拍（未打开回 `editor_not_open` + 退路，**不代开**）；`source='level_viewport'` **永远只拍关卡视口**（活动视口仍是关卡视口，拍 Persona 会拍到关卡画面），`source='pie'` 才是含 UMG 的 PIE 视口。
+  - **UE 导入时会归一化蒙皮权重** ⇒ 「权重和 ≠ 1」**不是缺陷通道**：本项目实测把 24595/37757 个和≠1 的顶点（最大 2.0）改成 sum=1 后重导，`height_cm`/`bounds`/槽位/morph 全等且**视口零变化**。改权重和 = 空操作，别把它当病因。
+  - **要证明"改权重真的会到视口"，做一次夸张自证**（比反复微调省时间）：挑一小组顶点 → 权重 100% 绑到另一根骨 **且**几何外移几 cm → 导出重导 → 同机位前后截图对比。本项目实测 362 个顶点这么改后肘部出现明显台阶、还原后消失，证明「Blender → FBX → 就地重导 → 视口」链路是通的。**没有这条自证，后面每一次"没效果"都无法区分"改动无效"与"链路没通"。**
+
 ---
 
 ## 四、`get_asset_properties` 能核对的硬字段
@@ -98,75 +114,51 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 - `materials`（槽位清单，逐条路径）
 - 动画资产：帧数/长度/轨道数/`enable_root_motion`/`get_root_motion_at_time` 采样
 
----
+**网格健康另有专用体检**：`inspect_skeletal_mesh(asset_path)` —— 一次拿到
 
-## 五、外部文件事实（FBX / Blender 侧）
-
-Blender 导出给 UE 的实测参数：`axis_forward='-Z'`、`axis_up='Y'`、`add_leaf_bones=False`、`use_armature_deform_only=False`、`use_mesh_modifiers=True`、`mesh_smooth_type='FACE'`、`path_mode='COPY'`、`embed_textures=True`、`bake_anim=False`、`object_types={'ARMATURE','MESH'}`。
-
-- **不要去"猜上次的导出参数"**：`bpy.context.window_manager.operator_properties_last('export_scene.fbx')` 可能给回默认值，与真实导出不符。判据只有一条：**导入后 rest 姿势逐骨比对**（§3）。
-- 单位：PMX/MMD 内部尺度 ≈ 8cm/单位、Blender 是米、UE 是 cm。导入 scale 与角色实际高度要实测记录。
-- **MMD→UE 的单位必须用"黑盒标定"定下来，别推公式**。标定关系（Blender 5.2 + UE 5.5，`axis_forward=-Z/axis_up=Y`、`add_leaf_bones=False`）：
-  - **UE 读到的 cm = FBX 里写的数值 × 100**（`FbxMainImport.cpp:1558` 的 `bConvertSceneUnit`：FBX 声明米 → `FbxSystemUnit::cm.ConvertScene` 全场景 ×100）。`apply_unit_scale` / `scale_length` / 单位系统那套**对数值的影响不可靠**，只信导入后实测。
-  - 标定姿势：改一个参数 → 导出 → `import_assets` 到**检查目录** → 量 `mesh.get_bounds()` 高度 + 一根骨的**局部平移**（`get_reference_pose(sk)` + `get_bone_pose(..., LOCAL)`，见 `unreal-retarget-authoring` §二.6）。**局部平移是判定"骨架有没有内嵌 scale"的唯一硬指标**。
-  - **`global_scale` 是唯一可控的整体倍数**：配方 = mmd_tools `import_model(scale=0.08)` → 把 ×100 **烤进数据**（`v.co *= 100`、Edit Mode 里 `eb.head/tail *= 100`）→ `export_scene.fbx(..., global_scale=0.01, apply_unit_scale=False)` → UE 里**骨局部平移是 cm**。
-- **导出前把 MMD 的"付与/D 变形骨"权重并到 FK 骨**（UE 没有付与机制，权重留在 `足D/ひざD/足首D/足先EX` 上 = 死皮，腿不动）：在 Blender 里按顶点把 `*D` 组的权重累加进对应 FK 组（`足D.L→足.L`、`ひざD.L→ひざ.L`、`足首D.L→足首.L`、`足先EX.L→つま先.L`），总权重守恒。**这是模型侧修复，重定向侧怎么调都救不了。**
-- **带 shape key（morph）的网格，×100 必须同时打给 `key_blocks` 与 `mesh.vertices`**：只缩 `mesh.vertices` 时，Blender 的权威顶点数据仍在 key 块里（米），导出的 morph delta 变成 `shape(米) − base(厘米) ≈ 整个身高` —— UE 导入**不报错**，只在"有曲线真的驱动它"时才表现为**整个角色被撕开**。导出前必须自检：任一脸部 morph 的 `max|delta| / 体型 ≤ 5%`（判据与单位无关；实测正解 3.8%，坏解 99%）；本 skill 的两个模板脚本已内置该断言。
-- **等价性证明要覆盖 morph 与槽序**：重导模前先导临时目录比对"高度 / morph **名序** / 材质槽**名序** / 骨架**骨名序** / 逐骨 LOCAL rest 平移"，全等再覆盖真网格。
-
-
-**本 skill 的 `scripts/`（都是"改顶部参数即可重跑"的模板）**：
-
-| 脚本 | 跑在哪 | 做什么 |
-|---|---|---|
-| `blender_pmx_to_ue_fbx.py` | Blender CLI（`--background --python`） | PMX→FBX 一站式：mmd_tools 导入(scale=0.08) → D 骨权重并到 FK 骨 → ×100 烤进顶点与骨骼 → `global_scale=0.01, apply_unit_scale=False` 干净导出（+ 贴图聚到 `<NAME>.fbm/`） |
-| `blender_mmd_rename_ascii.py` | Blender CLI | 同上 + **骨名 ASCII 标准化**（映射表/模式规则、同步顶点组与 mmd 字符串引用、dump `rename_map.json` 与新骨表、备份改名前 FBX） |
-| `dump_skeleton_baseline.py` | 编辑器 python（**改名前**） | 旧骨架逐骨 rest 姿势（LOCAL t/r）落盘，作为等价性比对基准 |
-| `verify_bone_rename_equiv.py` | 编辑器 python（改完导入后） | 用 `rename_map.json` 逐骨比对"只改名没动数据"，顺带体检高度/材质槽；给出 `PASS/CHECK` |
-| `check_imported_skeleton.py` | 编辑器 python | 导入后自检：mesh 高度对不对 + **骨架有没有内嵌 ×100 scale**（局部平量级判据，见上），给出 `CLEAN_CM` / `EMBEDDED_x100_SCALE` 结论 |
-| `purge_skeletal_assets.py` | 编辑器 python | 彻底删一套 mesh/skeleton/physics（先干掉引用它们的关卡 actor → 按序 `delete_asset` → 清残留 `.uasset` → `scan_paths_synchronous`），供"重导换骨架"用 |
-| `blender_vmd_to_ue_anim_fbx.py` | Blender CLI | PMX + VMD → **只带动画**的 FBX（骨名与 UE 侧 ASCII 骨架逐名一致，UE 侧 `import_assets` 后直接绑既有 `Skeleton`，不必走重定向）：mmd_tools 导入模型 → 导表情 VMD → 导动作 VMD → `nla.bake(visual_keying)` 烤 FK → 改名 ASCII → ×100 烤进骨骼与 location 通道 → `bake_anim=True` 导出 + FBX 自查 |
-
-**VMD → 动画 FBX 的四条纪律**（`blender_vmd_to_ue_anim_fbx.py` 的现场结论）：
-
-1. **骨名匹配用 PMX 原始名**：mmd_tools 导入 VMD 时是按 PMX 的 `name_j`（`右足`）去匹配的，而它导入模型时把骨显示成 `足.R` —— 所以 `SRC_VMD` 要**原始 VMD**，把 VMD 改写成显示名反而一条都对不上。
-2. **先导表情 VMD，再导动作 VMD**：动作 VMD 的导入会**摘掉** `mesh.data.shape_keys.animation_data.action`（action 本体还在 `bpy.data.actions` 里）→ 之后按"含 `key_blocks[` 的 action"重新挂回 `animation_data`，否则导出的 FBX 里没有 blendshape 动画。
-3. **MMD 腿是 IK 驱动，必须先烤**：`nla.bake(frame_start..frame_end, visual_keying=True, clear_constraints=True, use_current_action=True, bake_types={'POSE'})` 把 IK 解算结果落成 FK 通道，否则进 UE 是一堆无效键。
-4. **导出必须 `bake_anim=True`**（关着时导出器只写一个空的 AnimStack，一条骨骼曲线都不写），且导出后自查 FBX 里的 `AnimCurveNode` / `AnimationCurve` / `BlendShapeChannel` 计数——不然会把空导出当成功。UE 侧导入动画要带 `skeleton_path`（动画-only 导入**必须**指定骨架），要连网格/morph target 一起就加 `import_mesh=true`。
-
-### 5.1 骨名 ASCII 标准化（可选；决定不用 MMD/VMD 动作库时才做）
-
-**收益**：`apply_auto_generated_retarget_definition()` 变得可用（自动建出 Root/Spine/Neck/Head/四肢与双手各 5 条手指链）；脚本源码里可以直接写骨名，不再需要"dump JSON + 按下标取"那套绕行（见 §八 的桥 4KB 分块解码限制）。
-
-**代价**：与按名匹配的 MMD 动作库（VMD）脱钩；动作/曲线/骨骼引用等字符串接口都要跟着重建一次。
-
-**流程（4 步，缺一不可）**
-1. **先留基线**：`dump_skeleton_baseline.py`（旧骨架 rest 姿势）——否则改名后无法证明"只改了名字"。
-2. **Blender 改名 + 导出**：`blender_mmd_rename_ascii.py`（映射表 + 模式规则；脚本会 `assert` 未覆盖项与 FName 大小写冲突，全部打印，不静默漏改）。
-3. **换骨架**：`purge_skeletal_assets.py` 清 mesh/skeleton/physics → `import_assets` 新 FBX（**必须 purge**，否则踩 §二.5 的"覆盖导入不更新骨架"）。
-4. **验等价**：`verify_bone_rename_equiv.py` → 期望 非 ASCII 骨名 0 根、Δt_max < 1e-4 cm、|quat_dot| > 0.9999。
-
-**要点**
-- **Blender 改 `bone.name` 会自动改名匹配的顶点组**（权重守恒）。但**要先确认**：改完打印 `BONES_WITHOUT_GROUP` / `GROUPS_WITHOUT_BONE`（后者只应剩 `mmd_edge_scale` / `mmd_vertex_order` 两个 mmd_tools 元数据组）。
-- **UE 骨架的根骨名 = Blender 里"骨架对象名"**（FBX armature 节点）——不改它会留下唯一一根非 ASCII 骨。
-- **映射必须做 FName 大小写不敏感去重**：`Head`/`head`、全角 `ＩＫ`/半角 `IK` 在 UE 里是同一个 FName；批量改名撞名会静默吃掉一根骨的权重/动画。
-- **全角数字/字母要归一化后再匹配**：`親指０`（全角０）/`足ＩＫ`；脚本用 `unicodedata.normalize('NFKC', name)` 只做**匹配**，输出名自己生成。
-- **`WeaponL/R` 这类没有 `.` 的名字**要单独处理（MMD 里只有左右，没有点）。
-- **拇指多一节**：`親指０/１/２/先` → `thumb_01/02/03/tip`（其余手指是 `１/２/３/先` → `01/02/03/tip`），编号写错就会和 `親指１` 撞名。
-- **`.L/.R` → `_l/_r`** 是同一批命名里的约定，别指望 FBX 的 `.`→`_` 自动转换给你一致性（它会把 `.L` 变成 `_L`，大小写与风格都不统一）。
-- 改名只动**字符串**：Blender 的约束/父子是**指针**，改 `bone.name` 不会断；会断的是 Blender Action 的 f-curve 路径、驱动器、自定义属性里按名存的引用（mmd_tools 的 `additional_transform_bone` / `ik_target`）——脚本里断言 `len(bpy.data.actions) == 0` 并扫描 `REF_KEYS`。
-- **导入骨架的"动画 track 平移单位 + 竖直轴"不遵循 UE 约定**：MMD 版里 track 平移单位是**米**，世界向上落在 pelvis 父骨 `root` 的**局部 −Y**（局部 Z 是水平）。任何写平移轨道（`set_bone_track_keys` / `add_bone_track`）之前先标定，别假设"局部 Z = 竖直"；标定法与实例见 `unreal-retarget-authoring` §二.6。
-- 导出前先在 Blender 侧自查（命名、顶点组、朝向、权重和），UE 侧只做"是否等价"的比对。
-- 纹理/材质：不 `embed_textures`（或 `import_materials=False`）会让槽位退化成空材质 → 看起来"导入成功但材质丢了"。
+- `skeleton_consistent`：网格根骨能否在骨架里按名字找到。**为 false 时引擎不建 AnimInstance**，角色表现为参考姿势/T 字，而编译、引用扫描、导入回执全都不报错（唯一线索是 `LogAnimation` 的 Verbose 一行 `… : Missing joint on skeleton`）。角色"T 字/不动"先看这一条，再去看 AnimGraph。
+- `root_bone{name,scale,translation}` / `bone_count`：**导入期会把节点名里的 `.` 换成 `_`**（`root.001` → `root_001`），所以"Blender 里对象名被加了 `.00x` 后缀"会静默改 UE 侧骨名，进而让新网格与既有骨架对不上。判据是把网格/骨架两侧的 `bone[0]` 与骨名集合都读出来比。
+- `has_embedded_scale` / `bone_local_unit`：骨架有没有内嵌 ×100（`meters` vs `cm`）。
+- `slots_without_texture`：白膜签名（BaseColor 没有贴图支撑的槽）。
 
 ---
 
-## 六、`deferred` 的边界（与 `execute_python_*` 工具描述一致）
+## 五、外部文件事实（导入器侧）
 
-- **默认 sync**。只有"确定超过客户端工具超时（≈90s）"才 `deferred=True`：几十个资产的批量写、重编译、重导入、批处理循环。
-- 只是"慢一点"就用 `timeout=<秒>`（bridge 侧 5–600s）加宽 sync 等待，不要习惯性转 async。
-- deferred 的代价：job 占着 GameThread 期间**整条 MCP 通道被冻结**（`poll_python_job` 也会被挡住）；没有进度、没有取消。
-- 批量工作拆成**短、幂等、可重跑**的 job；一个 job 里别串多个重资产脚本。
+- **导入侧的判据只有一条：rest 姿势逐骨比对**（§三）；"导出时看着对"不算。
+- **UE 读到的 cm = FBX 里写的数值 × 100**（`FbxMainImport.cpp:1558` 的 `bConvertSceneUnit`：FBX 声明米 → `FbxSystemUnit::cm.ConvertScene` 全场景 ×100）。
+  `apply_unit_scale` / `scale_length` / 单位系统那套**对数值的影响不可靠**，只信导入后实测。
+- **骨架有没有内嵌 scale，只能靠"一根骨的局部平移量级"判**（`get_reference_pose` + `get_bone_pose(..., LOCAL)`，见 `unreal-retarget-authoring` §二.6）；
+  `mesh.get_bounds()` 高度作交叉验证。动画-only 导入**必须**带 `skeleton_path`。
+- **"上次的导出参数"不可信**：Blender 的 `operator_properties_last('export_scene.fbx')` 可能回默认值，与真实导出不符。
+- **Blender 侧怎么产出这个文件**（mmd_tools 参数、×100 烘焙与 `global_scale` 标定、D 变形骨权重、shape key 两块都要缩、VMD → 动画 FBX 四条纪律、导出参数表）
+  已拆成独立 skill：`blender-case-mmd-pipeline`；Blender MCP 用法与 bpy 纪律见 `blender-authoring`。
+
+**本 skill 的 `scripts/`（都是"改顶部参数即可重跑"的模板，都跑在编辑器 python 侧）**：
+
+| 脚本 | 做什么 |
+|---|---|
+| `dump_skeleton_baseline.py` | **改名前**：旧骨架逐骨 rest 姿势（LOCAL t/r）落盘，作为等价性比对基准 |
+| `verify_bone_rename_equiv.py` | 改完导入后：用 `rename_map.json` 逐骨比对"只改名没动数据"，顺带体检高度/材质槽；给出 `PASS/CHECK` |
+| `check_imported_skeleton.py` | 导入后自检：mesh 高度对不对 + **骨架有没有内嵌 ×100 scale**（局部平移量级判据），给出 `CLEAN_CM` / `EMBEDDED_x100_SCALE` 结论 |
+| `purge_skeletal_assets.py` | 彻底删一套 mesh/skeleton/physics（先干掉引用它们的关卡 actor → 按序 `delete_asset` → 清残留 `.uasset` → `scan_paths_synchronous`），供"重导换骨架"用 |
+
+> Blender CLI 侧的三个脚本（`blender_pmx_to_ue_fbx.py` / `blender_mmd_rename_ascii.py` / `blender_vmd_to_ue_anim_fbx.py`）
+> 已随案例搬到 `blender-case-mmd-pipeline/scripts/`。
+> **这一节已拆成独立 skill**：`unreal-asset-pipeline-case-bone-rename`（骨名 ASCII 标准化）。
+> **这一节已拆成独立 skill**：`unreal-animation-case-joint-transition-band`（关节过渡带的权重侧做法）。
+> **反方向（从第三方 UE 游戏的 cooked 包往外拆资产）**：容器解包、缺 `.usmap` 时从能跑的游戏 dump、贴图 PNG / JSON 导出，见案例 skill `unreal-asset-pipeline-case-thirdparty-game-extraction`。
+
+## 六、执行模型：一律同步（没有 deferred/job）
+
+- `execute_python_command` / `execute_python_file` **只有同步一种模式**（原先的 deferred 参数与配套的轮询工具已从工具面、命令面、C++ 一并移除）。调用的结果（含结构化错误）**在本次回包里返回**，返回后编辑器立刻能继续响应其它命令。
+- 因此**一次调用必须能在客户端工具超时（≈90s）内跑完**：重活（几十个资产的导入/重编/写盘）拆成**多次短、幂等、可重跑**的调用；只是"慢一点"就用 `timeout=<秒>`（bridge 侧 5–600s）拉长等待。
+- 拆批的粒度判据：一批的耗时估算要明显低于 90s（例如每批 20–30 个资产），批与批之间用回包里的清单核对（`imported_count` / `failed_count`），不要靠"应该成功了"。
+- 编辑器侧**没有后台**：调用跑在 GameThread 上，期间编辑器不响应别的命令（也别在 python 里 `sleep` / 轮询）。终端侧（Blender CLI、编译、下载）才用后台任务。
+
+### 附：样例脚本（`scripts/` 之外的临时脚本）怎么落
+
+长脚本写到 `Saved/MCPScripts/*.py` → `execute_python_file(file_path=..., timeout=...)` 同步跑；脚本内 `print()` 的中间状态会随回包一起回来。
 
 ---
 
@@ -174,7 +166,20 @@ Blender 导出给 UE 的实测参数：`axis_forward='-Z'`、`axis_up='Y'`、`ad
 
 - 写命令成功即落盘；仍建议 `does_asset_exist` + 磁盘 mtime 复核。
 - `safe_delete_asset`：`deleted` 只在盘上文件与内存对象都消失时为 true；失败给 `detail`/`blockers`。删之前被引用问 `list_asset_blockers`。
-- **探针夹具的"建"与"删"不要放在同一会话**：在同一个 session 里把刚建的资产删掉（尤其再同名重建），会留下 redirector / 坏包（日志里表现为 `<pkg>.uasset: Error opening file` 与 `寻找对象"ObjectRedirector …"失败`），随后**内容浏览器/TypedElement 刷新时会 AV 崩编辑器** —— 崩溃栈在 GameThread 的 TypedElement/UI 路径上，应用侧只看到"命令都返回成功了"。`safe_delete_asset(force=True)` 的 `force` 只绕过**引用检查**，绕不过悬空引用。做法：探针换新目录名建、删除留到下次会话；纯文件备份放 `Saved/`（不参与资产注册表）可随时删。批量删完也不要再接重活，先查 redirector 再继续。
+  删前还有一道 **World Partition 守卫**：① referencer 里出现 `/__ExternalActors__/` 或 `/__ExternalObjects__/` 包
+  ⇒ `world_partition_referenced`；② 任一已加载世界的 `UWorldPartition` 已初始化（= 正开着 WP 关卡）⇒ `world_partition_open`。
+  两种情况**什么都不删**（内存与包文件都不动），响应给 `world_partition_open`、`workarounds`（Fix Up Redirectors / 关编辑器删磁盘 / 换非 WP 关卡）
+  与 `detail`；`force=true` **不豁免**（force 只断引用，崩的是随后的 GC —— `WorldPartitionSubsystem.cpp:507` 的断言）。
+  即：**开着 WP 关卡时这条命令整体不可用**，脚本里要把它放到换关卡/收尾阶段。
+- **`force=true` 且有 blockers 时先跑只读前置探测**，命中即拒绝并**保持零改动**（不断引用、不标垃圾、不写盘）：响应为 `{deleted:false, reason:"would_fail_*", detail:"什么都没动", workarounds:[...]}`、`detached: []`。三类命中：目标包文件只读 / 该资产仍开着资产编辑器 / **存在够不到的活引用者**（`unreachable_references[]`：引用者的包落在"本命令能清空的范围"（`blockers` + 目标包）之外，且不属于缩略图那类瞬态包）。判据取**真实内存引用图**，不是文件锁 —— 加载中的包本来就映射着 `.uasset`，"文件被占"是删除前的正常状态，用文件锁当判据会把 `force` 变成空操作。
+- **`dry_run=true`（只读）**：给 `would_delete` / `would_fail`(+`would_fail_reason`/`would_fail_detail`) / `would_clear[]`（每项含 referencer 路径与将被清空的属性**路径**，形如 `would_clear_property:<属性路径>`，能看到 AnimGraph 内部路径），且 `detached` 恒为 `[]`（计划不进 `detached`）。它**穿透 World Partition 前端检测**（该检测针对会崩编辑器的真删除，干跑不删任何东西）⇒ 在"WP 关卡常开"的工程里这是唯一还能给出答案的形态。
+- **`force=true`** 通过探测后忽略 `blockers`、先断开引用再删，`detached[]` 列出被断开的引用者：关卡内以该资产为类的 actor 实例、资产自身指向目标的引用、以及**嵌套在结构体与结构体数组里的对象引用**（例如蒙太奇段的 `CompositeSections[i].LinkedSequence` / `AnimSegments[j].AnimReference`）—— 走查不递归进 struct 时这些清不掉，会出现"删除成功但引用者仍指向已删资产"。
+- **所有未删成功的结局都带 `workarounds[]`**（关编辑器后同名覆盖 / 删磁盘包文件再重启、先把引用者换走或改名、关掉该资产的编辑器后重试），不要只回一个裸 `false`。
+- 目标本身是 `UObjectRedirector` 时改走引擎 `IAssetTools::FixupReferencers`，用 `redirection_fixed` 与 `redirector_path`（`none` / `engine_fixup` / `plugin_fallback`）说明实际走的是哪条。
+- **走引擎 fixup 那条路会弹一个不可抑制的模态窗，而且工作其实在弹窗前就做完了**：`FixupReferencers` 结尾**无条件**弹 `SFixupRedirectorsReport`（`SModalEditorDialog<bool>`，引擎 `AssetFixUpRedirectors.cpp:938-939`，两种 fixup 模式都会走到），它占住 GameThread 直到有人点确认 ⇒ 回执必然超时丢失、整条 bridge 冻住，而引擎侧**已经把引用者包载入、改写并存盘完毕**（实测夹具：一次调用挂了 **139.31s**，其中真正的工作只有 **0.23s**，其余全在等人点）。它**不经过** `FCoreDelegates::ModalMessageDialog` ⇒ unattended 守卫与弹框策略**都拦不住**；`dry_run` 也不覆盖这条分支（实测 `dry_run=true` 仍改了引用者、删了 redirector）。做法：① 不要把这条路径排进批处理或指望回执；② 要证据就先落盘起止时间/journal，再从 `Saved/Logs/*.log` 的时间窗取回读数（日志里的 `Saving Map:`/`LogSavePackage` 行会精确标出工作段与等待段的分界）。
+- **`duplicate_asset_safe` 的验收判据是「重启后还能编译/还能用」**：它走引擎自己的复制路径（`IAssetTools::DuplicateAsset`，Content Browser 用的那条），蓝图/RigVM 类因此拿到类特有的 fixup；那条路唯一的风险是 `CanCreateAsset` 会 **fully-load 目标包**（脏包会弹模态），所以**目标包必须先判空**再调。存在性探测用 `FindAsset` 而**不是** `DoesAssetExist`（后者对"文件刚被删掉的包"会留 phantom 条目 ⇒ 误报 `asset_exists`；`FindAsset` 拒绝解析没有包文件的注册表条目）。`overwrite=true` 静默先删，删不掉回 `delete_pending` + 内嵌 `delete_result`。校验副本时**当次会话能编译不算数 —— 重启编辑器再编译一次**，那才是区分它和 `StaticDuplicateObject` 的判据。
+- **探针夹具的"建"与"删"不要放在同一会话**：在同一个 session 里把刚建的资产删掉（尤其再同名重建），会留下 redirector / 坏包（日志里表现为 `<pkg>.uasset: Error opening file` 与 `寻找对象"ObjectRedirector …"失败`），随后**内容浏览器/TypedElement 刷新时会 AV 崩编辑器** —— 崩溃栈在 GameThread 的 TypedElement/UI 路径上，应用侧只看到"命令都返回成功了"。`safe_delete_asset(force=True)` 的 `force` 只绕过**引用检查**，绕不过悬空引用。做法：探针换新目录名建、删除留到下次会话；纯文件备份放 `Saved/`（不参与资产注册表）可随时删。批量删完也不要再接重活，先查 redirector 再继续。**清理顺序很关键**：要清掉一个 redirector，必须**先处理 redirector、再删它的引用者** —— 反过来（先删引用者）会留下"引用者已死"的孤儿 redirector；**如果紧接着在同一个脚本 / 同一轮派发里触发 fixup，编辑器会在引擎 AssetTools 里 AV 崩**（实测栈：`FAssetFixUpRedirectors::ExecuteFixUp` 的删除段 → `ObjectTools::DeleteObjects`）。**只要间隔开就不会崩**（实测：同一序列拆成两次 MCP 调用、编辑器跑过 tick、GC 收掉待删包 ⇒ 正常完成）—— 所以纪律是"删完别在同一 tick 里接着修"，不是"别删引用者"。
+- **不要用「删除 + 改名替换」的方式替换被引用的资产**：引用会**静默断掉** —— 本项目实测替换 `Fei_Idle` 后，AnimBP 的 `AnimGraphNode_SequencePlayer.Sequence` 与 BlendSpace 的 `FBlendSample.Animation` 都变成 `None`，而命令回执、`save_asset`、甚至 `compile_blueprint` 的 `BS_UpToDate` **全都不报错**（BS 侧只在编辑器 log 里出一句"混合空间 X 拥有一个无/无效动画的样本"）。替换后**逐项回读引用者**：AnimBP 序列播放器 / BlendSpace 样本 / 蒙太奇 / 关卡 Actor 的组件。要做"换一份数据"，优先**同名覆盖重导**（网格）或直接改资产内容，而不是删了重建。
 - **不要在同一 job 里删掉刚创建的资产再同名重建**。要重来就换名/换目录，删除留到编辑器关闭后走文件系统。
 - 常见错误码：
 
@@ -184,6 +189,7 @@ Blender 导出给 UE 的实测参数：`axis_forward='-Z'`、`axis_up='Y'`、`ad
 | `cvar_override_failed` | flag 关不掉（readback 仍开），**拒绝导入**，什么都没做 |
 | `asset_exists` | 同名存在且 `replace_existing=false` |
 | `load_failed` / `invalid_params` | 路径不可读 / 参数非法 |
+| `load_failed_in_pie` | **PIE 运行中**、该路径在资产注册表里、但加载不出来（部分资产类型 play mode 不加载）⇒ 先 `stop_pie` 再读。与"资产真的不存在"（`load_failed`）是两个码，别混。每条命令的回包都带 `editor_state{pie_running, simulating_in_editor, world, level_name}`，判断环境不用再单独问一次 |
 
 ---
 
@@ -197,13 +203,15 @@ Blender 导出给 UE 的实测参数：`axis_forward='-Z'`、`axis_up='Y'`、`ad
 | `import_assets` | 基础入口：**其它类型 + 混合批处理** | `paths` / `destination_path` / `force_legacy` / `replace_existing` / `inspect_materials`。**不再接受** `skeleton_path` / `import_mesh`（传了返回 `unsupported_parameter` + `moved_to: import_animation`，且不导入任何文件） |
 | `set_asset_properties` | 资产属性批量写 | 逐项 `applied`/`failed`，不回滚；先读再写 |
 | `get_asset_properties` | 读资产自身反射属性 | 核对 `skeleton` / `materials` |
-| `safe_delete_asset` | 删资产（带注册表通知） | 被引用会拒；`blockers` 见 `list_asset_blockers` |
+| `safe_delete_asset` | 删资产（带注册表通知） | 被引用会拒；`blockers` 见 `list_asset_blockers`；开着 WP 关卡时整体拒（`world_partition_open`/`world_partition_referenced`，`force` 不豁免） |
 | `list_asset_blockers` | 查引用者 | 删之前先跑 |
-| `move_asset` | 改名 / 挪目录（唯一入口） | 默认 `update_referencers=true` + 改名**前**刷新注册表；引用者逐个重存盘；加载不到的（地图包）报 `unstorable[]` 并由引擎留 redirector；`dry_run=true` 只报告 |
-| `move_directory` | 整目录（含子目录）搬 | 目录**外**引用者按 `move_asset` 同规则处理；目标目录已存在即拒（不合并）；`assets[]` 是逐资产结果 |
+| `list_broken_references` | 查**我引用谁而它已经不在**（反查） | `scope` + `kinds`（blendspace / anim_blueprint / anim_montage / skeletal_mesh_comp）；默认只扫已加载资产（`load_missing=true` 才加载）；删/改名/替换之后**先跑它**再看别的 |
+| `move_asset` | 改名 / 挪目录（唯一入口） | 默认 `update_referencers=true` + 改名**前**刷新注册表；引用者逐个重存盘；加载不到的（地图包）报 `unstorable[]` 并由引擎留 redirector；`dry_run=true` 只报告；`answer_dialogs=true` 把引擎确认框答成"继续"并记进 `auto_answered_dialogs[]` |
+| `move_directory` | 整目录（含子目录）搬 | 目录**外**引用者按 `move_asset` 同规则处理；目标目录已存在即拒（不合并）；`assets[]` 是逐资产结果；`answer_dialogs` 同 `move_asset` |
 | `list_mcp_commands` | 自省命令表 | 写 python 前先跑 |
-| `execute_python_file` | 落盘脚本（>30 行） | 默认 sync；`deferred=True` 仅给超时活 |
-| `poll_python_job` | 取 deferred 结果 | 会被长 job 挡住；`cleanup` 默认删文件 |
+| `execute_python_file` | 落盘脚本（>30 行） | 同步；重活拆批，慢活用 `timeout<=600` |
+| `inspect_skeletal_mesh` | 网格健康体检（只读） | `skeleton_consistent`（false ⇒ 引擎不建 AnimInstance、角色 T 字且不报错）、`root_bone`/`bone_count`、`has_embedded_scale`/`bone_local_unit`、`slots_without_texture` |
+| `take_screenshot` | 截图排查（**不作验收结论**） | `source='level_viewport'`(默认) / `'pie'`(含 UMG) / `'asset_editor'`(+`asset_path` 聚焦该资产编辑器，未打开回 `editor_not_open`+退路)；回包带 `camera`，**同机位两次才可比** |
 
 ---
 
@@ -216,3 +224,7 @@ Blender 导出给 UE 的实测参数：`axis_forward='-Z'`、`axis_up='Y'`、`ad
 - 地图引用者只有 redirector 兜底：`redirector_left=true` 时旧路径仍可解析，但**没有被重写**；后续若做 "Fix Up Redirectors" 而地图未加载/未存盘，仍可能断。需要地图引用者干净，得先把地图加载并保存。
 - 移动/改名**不做覆盖**：目标已存在直接拒（`destination_exists`），没有 `force` / `replace_existing`。redirector 占着旧路径时**同名新建也会被拒** —— 要复用旧名先删 redirector。
 - **redirector 记的是路径快照**：它只记住创建时的目标路径。**只在引用者可见（注册表命中或已加载）时才能保护它**；引用者既不在注册表也没加载时无法发现，这是本机制的边界。
+- **弹框策略**：这两条命令底下会走引擎自己的改名路径（`UEditorAssetSubsystem::RenameLoadedAsset` → `IAssetTools::RenameAssets`）。该路径**可能**弹确认框（CDO 引用一类，来自另一项目的实测记录；**本工程用"蓝图 CDO 持有被改名资产的类引用"复现过一例，未触发** ⇒ 触发条件尚不明确），而模态框占住 GameThread ⇒ 整条 bridge 冻到有人手点。所以每次调用前先定策略，回执里用 `dialog_policy` 报出来：
+  - 默认 `unattended_defaults`：确认框返回**引擎默认值**、不建窗口，**保证不冻**；但确认框的默认值通常是"中止"，于是改名失败 ⇒ 回 `rename_failed` + `hint`。此时**"没冻"不等于"成功"**，按失败处理。
+  - `answer_dialogs=true`：答成"继续"，每次回答（类型/标题/正文/答案）都在 `auto_answered_dialogs[]` 里。**这是真决定** —— 若弹出的是签出提示，等于替你签出，所以默认不开。`rename_failed` 时优先拿它重跑看被答了什么。
+  - 编辑器自身以 `-unattended` 启动时该机制不生效，`dialog_policy_note` 会说明。

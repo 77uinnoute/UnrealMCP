@@ -31,7 +31,6 @@
 | `bMutatesGraph` | 会改图/资产：material 用它决定编译边界 stamp；particle/node 用它决定 undo 事务 | 各域 `RunCommand` + `Domain` 策略 |
 | `bHidden` | 协议/内部命令，不进 agent 工具面（仍可调用、仍出现在自省里） | 工具面导出 |
 | `bPersistAfterSuccess` | 成功后把所属蓝图写盘（编辑器会被构建脚本强杀） | blueprint / blueprint_node `RunCommand` |
-| `bPythonExecution` | 会跑 python，其工作可排成 deferred job（`params.deferred`） | `UUnrealMCPBridge::ExecuteCommand` 的预处理 |
 
 ## 门禁怎么跑
 

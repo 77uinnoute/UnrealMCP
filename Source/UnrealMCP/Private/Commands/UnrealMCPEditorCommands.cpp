@@ -28,6 +28,8 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Toolkits/AssetEditorToolkit.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "Particles/ParticleSystem.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/Emitter.h"
@@ -82,9 +84,15 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         }), MCPFlags(),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSpawnParticleActor(Params); });
 
-    MCP_REGISTER_COMMAND(Registry, "delete_actor", "editor", "Destroy the actor with the given name.",
+    MCP_REGISTER_COMMAND(Registry, "delete_actor", "editor",
+        "Destroy the actor with the given name. Destroy() only marks it pending-kill: it leaves every actor "
+        "listing immediately, but its NAME stays taken until garbage collection - so a same-name spawn right "
+        "after this call is a hard engine Fatal, and saving the level writes the actor back. The response "
+        "reports pending_kill (probed on the object graph, not the actor list) plus a hint; pass flush=true to "
+        "garbage-collect first and have pending_kill reflect that.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Name of the actor to destroy")),
+            MCPParamOpt(TEXT("flush"), TEXT("bool"), TEXT("Garbage-collect before returning, so the name is actually free (default false)")),
         }), MCPFlags(),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleDeleteActor(Params); });
 
@@ -150,10 +158,11 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleFocusViewport(Params); });
 
     // Queued onto the GameThread when called over the python loopback, hence the flag.
-    MCP_REGISTER_COMMAND(Registry, "take_screenshot", "editor", "Save a PNG to disk: source=level_viewport (default) reads the active level viewport backbuffer (no PIE, no UMG); source=pie takes a Slate screenshot of the PIE game viewport widget, which includes UMG. The pie source is for UI layout triage only, never an acceptance verdict.",
+    MCP_REGISTER_COMMAND(Registry, "take_screenshot", "editor", "Save a PNG to disk: source=level_viewport (default) reads the active level viewport backbuffer (no PIE, no UMG); source=pie takes a Slate screenshot of the PIE game viewport widget, which includes UMG; source=asset_editor reads an asset editor's preview viewport (Persona, material editor, ...) - with asset_path it focuses that asset's editor first, without it the focused asset editor viewport is used. The reply also carries the camera pose (camera.location/rotation/fov/viewport_size), which is what makes two captures comparable: equal camera means a pixel-level A/B is meaningful. pie and asset_editor are for triage only, never an acceptance verdict.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("filepath"), TEXT("string"), TEXT("Output file path (.png appended when missing)")),
-            MCPParamOpt(TEXT("source"), TEXT("string"), TEXT("level_viewport (default) or pie")),
+            MCPParamOpt(TEXT("source"), TEXT("string"), TEXT("level_viewport (default), pie or asset_editor")),
+            MCPParamOpt(TEXT("asset_path"), TEXT("string"), TEXT("With source=asset_editor: the asset whose editor to capture (its editor is focused; it is never opened for you)")),
         }), MCPFlags(/*bLoopbackForbidden=*/true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleTakeScreenshot(Params); });
 
@@ -314,19 +323,16 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActor(const TShared
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get editor world"));
     }
 
-    // Check if an actor with this name already exists
-    TArray<AActor*> AllActors;
-    UGameplayStatics::GetAllActorsOfClass(World, AActor::StaticClass(), AllActors);
-    for (AActor* Actor : AllActors)
+    // A requested name the engine would treat as taken stops here, before the spawn can assert (see helper).
+    if (TSharedPtr<FJsonObject> NameTaken = FUnrealMCPCommonUtils::MakeNameTakenResponseIfTaken(World, ActorName))
     {
-        if (Actor && Actor->GetName() == ActorName)
-        {
-            return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Actor with name '%s' already exists"), *ActorName));
-        }
+        return NameTaken;
     }
 
     FActorSpawnParameters SpawnParams;
     SpawnParams.Name = *ActorName;
+    // Belt and braces: if anything still races us, answer null instead of letting the engine assert.
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
 
     // Any AActor subclass by name, instead of the handful that used to be hard-coded here (SkyLight,
     // SkyAtmosphere, ExponentialHeightFog, PostProcessVolume and friends were unreachable).
@@ -365,6 +371,9 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TShare
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name' parameter"));
     }
 
+    bool bFlush = false;
+    Params->TryGetBoolField(TEXT("flush"), bFlush);
+
     TArray<AActor*> AllActors;
     UGameplayStatics::GetAllActorsOfClass(GWorld, AActor::StaticClass(), AllActors);
     
@@ -374,12 +383,54 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TShare
         {
             // Store actor info before deletion for the response
             TSharedPtr<FJsonObject> ActorInfo = FUnrealMCPCommonUtils::ActorToJsonObject(Actor);
-            
+
+            // The outer outlives the actor; after a flush the object-graph entry does not.
+            UObject* const ActorOuter = Actor->GetOuter();
+
             // Delete the actor
             Actor->Destroy();
-            
+
+            // Ask the engine's own question. StaticFindObjectFast against the level sees pending-kill objects -
+            // which is exactly what the spawn path checks before it asserts (LevelActor.cpp:575) - while an actor
+            // listing answers "no" the whole time the name is still taken.
+            auto IsNameStillTaken = [&ActorName, ActorOuter]()
+            {
+                return StaticFindObjectFast(nullptr, ActorOuter, FName(*ActorName)) != nullptr;
+            };
+            bool bNameStillTaken = IsNameStillTaken();
+
+            // flush collects UNCONDITIONALLY. Gating it on the probe is how this silently did nothing before,
+            // leaving the name owned until some later collection (and a same-name spawn then killed the editor).
+            const bool bCollected = bFlush && bNameStillTaken;
+            if (bCollected)
+            {
+                CollectGarbage(RF_NoFlags);
+                bNameStillTaken = IsNameStillTaken();
+            }
+
             TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
             ResultObj->SetObjectField(TEXT("deleted_actor"), ActorInfo);
+            ResultObj->SetBoolField(TEXT("pending_kill"), bNameStillTaken);
+            if (bCollected)
+            {
+                ResultObj->SetBoolField(TEXT("flushed"), true);
+            }
+            if (bNameStillTaken)
+            {
+                ResultObj->SetStringField(TEXT("hint"),
+                    TEXT("Destroy() marks the actor pending-kill: it is gone from every actor listing, but the "
+                         "name is still taken until garbage collection - a same-name spawn is a hard engine "
+                         "Fatal ('Cannot generate unique name') while the name is owned, and a level save writes "
+                         "the actor back. Pass flush=true to collect garbage here, or give the new actor a "
+                         "different name."));
+            }
+            else if (bCollected)
+            {
+                ResultObj->SetStringField(TEXT("hint"),
+                    TEXT("the name is free now, but a same-name spawn must happen in a LATER command: the level "
+                         "keeps resolving the old name for the rest of this frame, so spawning it in the same "
+                         "call would still reach the engine's Fatal."));
+            }
             return ResultObj;
         }
     }
@@ -590,8 +641,15 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
     SpawnTransform.SetRotation(FQuat(Rotation));
     SpawnTransform.SetScale3D(Scale);
 
+    // Same guard as spawn_actor: a name the engine treats as taken must answer, not assert.
+    if (TSharedPtr<FJsonObject> NameTaken = FUnrealMCPCommonUtils::MakeNameTakenResponseIfTaken(World, ActorName))
+    {
+        return NameTaken;
+    }
+
     FActorSpawnParameters SpawnParams;
     SpawnParams.Name = *ActorName;
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
 
     AActor* NewActor = World->SpawnActor<AActor>(Blueprint->GeneratedClass, SpawnTransform, SpawnParams);
     if (NewActor)
@@ -708,18 +766,51 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
 
     FString Source = TEXT("level_viewport");
     Params->TryGetStringField(TEXT("source"), Source);
-    if (Source != TEXT("level_viewport") && Source != TEXT("pie"))
+    if (Source != TEXT("level_viewport") && Source != TEXT("pie") && Source != TEXT("asset_editor"))
     {
         TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
-            FString::Printf(TEXT("Unknown source '%s'; use level_viewport or pie"), *Source));
+            FString::Printf(TEXT("Unknown source '%s'; use level_viewport, pie or asset_editor"), *Source));
         TArray<TSharedPtr<FJsonValue>> Sources;
         Sources.Add(MakeShared<FJsonValueString>(TEXT("level_viewport")));
         Sources.Add(MakeShared<FJsonValueString>(TEXT("pie")));
+        Sources.Add(MakeShared<FJsonValueString>(TEXT("asset_editor")));
         Error->SetArrayField(TEXT("candidates"), Sources);
         return Error;
     }
 
-    auto SavePng = [&FilePath, &Source](int32 Width, int32 Height, const TArray<FColor>& Pixels) -> TSharedPtr<FJsonObject>
+    // Two screenshots are only comparable pixel by pixel if they were taken from the same camera, and the
+    // caller cannot know that: the viewport camera moves whenever a human moves it. Measured 2026-10-02:
+    // an A/B pair silently stopped being comparable, and the difference was attributed to the change under
+    // test until the images were compared by hand. Reporting the pose makes "not comparable" visible
+    // without a second command. A missing camera never fails the capture - it is reported as null.
+    TSharedPtr<FJsonObject> CameraJson;
+    auto VectorToArray = [](const FVector& Value)
+    {
+        TArray<TSharedPtr<FJsonValue>> Items;
+        Items.Add(MakeShared<FJsonValueNumber>(Value.X));
+        Items.Add(MakeShared<FJsonValueNumber>(Value.Y));
+        Items.Add(MakeShared<FJsonValueNumber>(Value.Z));
+        return Items;
+    };
+    auto MakeCameraJson = [&VectorToArray](const FVector& Location, const FRotator& Rotation, double Fov,
+                                           const FIntPoint& ViewportSize)
+    {
+        TSharedPtr<FJsonObject> Camera = MakeShared<FJsonObject>();
+        Camera->SetArrayField(TEXT("location"), VectorToArray(Location));
+        TArray<TSharedPtr<FJsonValue>> RotationItems;
+        RotationItems.Add(MakeShared<FJsonValueNumber>(Rotation.Pitch));
+        RotationItems.Add(MakeShared<FJsonValueNumber>(Rotation.Yaw));
+        RotationItems.Add(MakeShared<FJsonValueNumber>(Rotation.Roll));
+        Camera->SetArrayField(TEXT("rotation"), RotationItems);
+        Camera->SetNumberField(TEXT("fov"), Fov);
+        TArray<TSharedPtr<FJsonValue>> SizeItems;
+        SizeItems.Add(MakeShared<FJsonValueNumber>(ViewportSize.X));
+        SizeItems.Add(MakeShared<FJsonValueNumber>(ViewportSize.Y));
+        Camera->SetArrayField(TEXT("viewport_size"), SizeItems);
+        return Camera;
+    };
+
+    auto SavePng = [&FilePath, &Source, &CameraJson](int32 Width, int32 Height, const TArray<FColor>& Pixels) -> TSharedPtr<FJsonObject>
     {
         TArray<uint8> CompressedBitmap;
         FImageUtils::CompressImageArray(Width, Height, Pixels, CompressedBitmap);
@@ -732,6 +823,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         ResultObj->SetNumberField(TEXT("width"), Width);
         ResultObj->SetNumberField(TEXT("height"), Height);
         ResultObj->SetStringField(TEXT("source"), Source);
+        ResultObj->SetObjectField(TEXT("camera"), CameraJson);
         // 回传文件大小，供客户端做黑帧/空帧校验（过小则重试）
         const int64 FileSize = IFileManager::Get().FileSize(*FilePath);
         if (FileSize >= 0)
@@ -739,6 +831,40 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
             ResultObj->SetNumberField(TEXT("file_size"), (double)FileSize);
         }
         return ResultObj;
+    };
+
+    // Shared capture for an editor viewport client (the level viewport or an asset editor's preview
+    // viewport): force a redraw so the backbuffer is current, read the pixels, report the pose.
+    auto CaptureEditorViewport = [&](FEditorViewportClient* ViewportClient, FViewport* Viewport)
+        -> TSharedPtr<FJsonObject>
+    {
+        if (!ViewportClient || !Viewport)
+        {
+            return nullptr;
+        }
+
+        // 强制重绘：非实时视口的 backbuffer 是陈旧的（材质改完后截图字节完全不变的元凶）。
+        for (FEditorViewportClient* Client : GEditor->GetAllViewportClients())
+        {
+            if (Client)
+            {
+                Client->SetRealtime(true);
+                Client->Invalidate();
+            }
+        }
+        Viewport->Draw();
+
+        CameraJson = MakeCameraJson(ViewportClient->GetViewLocation(), ViewportClient->GetViewRotation(),
+            ViewportClient->ViewFOV, Viewport->GetSizeXY());
+
+        TArray<FColor> Bitmap;
+        FIntRect ViewportRect(0, 0, Viewport->GetSizeXY().X, Viewport->GetSizeXY().Y);
+        if (ViewportRect.Width() > 0 && ViewportRect.Height() > 0
+            && Viewport->ReadPixels(Bitmap, FReadSurfaceDataFlags(), ViewportRect))
+        {
+            return SavePng(ViewportRect.Width(), ViewportRect.Height(), Bitmap);
+        }
+        return nullptr;
     };
 
     // PIE: UMG is composited by Slate on top of the game viewport widget, not drawn into the scene
@@ -769,6 +895,19 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         TSharedPtr<SWindow> WidgetWindow = FSlateApplication::Get().FindWidgetWindow(ViewportWidget.ToSharedRef());
         if (FSlateApplication::Get().TakeScreenshot(ViewportWidget.ToSharedRef(), Pixels, Size) && Size.X > 0 && Size.Y > 0)
         {
+            // The PIE camera, not the editor viewport one: they are unrelated while a session runs.
+            if (const APlayerController* PlayerController = PlayWorld->GetFirstPlayerController())
+            {
+                if (const APlayerCameraManager* CameraManager = PlayerController->PlayerCameraManager)
+                {
+                    const FIntPoint ViewportSize = GameViewport && GameViewport->Viewport
+                        ? GameViewport->Viewport->GetSizeXY()
+                        : FIntPoint(Size.X, Size.Y);
+                    CameraJson = MakeCameraJson(CameraManager->GetCameraLocation(), CameraManager->GetCameraRotation(),
+                        CameraManager->GetFOVAngle(), ViewportSize);
+                }
+            }
+
             if (TSharedPtr<FJsonObject> Saved = SavePng(Size.X, Size.Y, Pixels))
             {
                 return Saved;
@@ -791,31 +930,124 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         return Error;
     }
 
+    // Asset editor (Persona / material editor / any toolkit with its own preview viewport). The
+    // asset's editor is focused through the engine's own path first - that is what makes the capture
+    // land on the right viewport, and it is a real capability of IAssetEditorInstance, not something
+    // the plugin has to emulate. The asset's editor is never opened on the caller's behalf.
+    if (Source == TEXT("asset_editor"))
+    {
+        FString RequestedAssetPath;
+        Params->TryGetStringField(TEXT("asset_path"), RequestedAssetPath);
+        FString EditorName;
+        if (!RequestedAssetPath.IsEmpty())
+        {
+            UObject* Asset = FUnrealMCPCommonUtils::FindAsset(RequestedAssetPath);
+            if (!Asset)
+            {
+                TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("asset_not_found"),
+                    FString::Printf(TEXT("no asset at '%s'"), *RequestedAssetPath));
+                Error->SetStringField(TEXT("asset_path"), RequestedAssetPath);
+                return Error;
+            }
+
+            UAssetEditorSubsystem* EditorSubsystem = GEditor
+                ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+            IAssetEditorInstance* EditorInstance = EditorSubsystem
+                ? EditorSubsystem->FindEditorForAsset(Asset, /*bFocusIfOpen=*/ true) : nullptr;
+            if (!EditorInstance)
+            {
+                TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("editor_not_open"),
+                    FString::Printf(TEXT("'%s' has no open asset editor, and this command does not open one"), *RequestedAssetPath));
+                Error->SetStringField(TEXT("asset_path"), RequestedAssetPath);
+                FUnrealMCPCommonUtils::AddStringArrayField(Error, TEXT("workarounds"), {
+                    TEXT("open it first: open_animation_editor / open_montage_editor / open_umg_designer / open_blueprint_graph"),
+                    TEXT("or click the asset in the Content Browser and retry")
+                });
+                return Error;
+            }
+
+            EditorInstance->FocusWindow(Asset);
+            EditorName = EditorInstance->GetEditorName().ToString();
+        }
+
+        // Level viewports are the ones whose world IS the editor world; everything else is an asset
+        // editor preview viewport. Focus decides between several, and ambiguity is reported rather
+        // than guessed.
+        UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext(/*bEnsureIsGWorld=*/ false).World() : nullptr;
+        TArray<FEditorViewportClient*> Candidates;
+        FEditorViewportClient* FocusedClient = nullptr;
+        for (FEditorViewportClient* Client : GEditor->GetAllViewportClients())
+        {
+            if (!Client || !Client->Viewport || Client->Viewport->GetSizeXY().X <= 0 || Client->Viewport->GetSizeXY().Y <= 0)
+            {
+                continue;
+            }
+            if (EditorWorld && Client->GetWorld() == EditorWorld)
+            {
+                continue;
+            }
+            Candidates.Add(Client);
+            if (Client->Viewport->HasFocus())
+            {
+                FocusedClient = Client;
+            }
+        }
+
+        if (Candidates.Num() == 0)
+        {
+            TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_asset_editor_viewport"),
+                TEXT("no asset editor viewport is open (only the level viewports are visible)"));
+            FUnrealMCPCommonUtils::AddStringArrayField(Error, TEXT("workarounds"), {
+                TEXT("open the asset's editor (open_animation_editor / open_montage_editor / open_umg_designer / open_blueprint_graph), then retry"),
+                TEXT("use source=level_viewport for the level viewport")
+            });
+            return Error;
+        }
+
+        if (Candidates.Num() > 1 && !FocusedClient)
+        {
+            TArray<TSharedPtr<FJsonValue>> CandidatesJson;
+            for (const FEditorViewportClient* Candidate : Candidates)
+            {
+                CandidatesJson.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("viewport %dx%d, world=%s"),
+                    Candidate->Viewport->GetSizeXY().X, Candidate->Viewport->GetSizeXY().Y,
+                    Candidate->GetWorld() ? *Candidate->GetWorld()->GetName() : TEXT("<none>"))));
+            }
+            TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("viewport_ambiguous"),
+                FString::Printf(TEXT("%d asset editor viewports are open and none has focus"), Candidates.Num()));
+            Error->SetArrayField(TEXT("candidates"), CandidatesJson);
+            Error->SetStringField(TEXT("hint"), TEXT("click into the viewport you want, then retry"));
+            return Error;
+        }
+
+        FEditorViewportClient* Chosen = FocusedClient ? FocusedClient : Candidates[0];
+        const FString ResolvedViewport = FString::Printf(TEXT("%dx%d world=%s"),
+            Chosen->Viewport->GetSizeXY().X, Chosen->Viewport->GetSizeXY().Y,
+            Chosen->GetWorld() ? *Chosen->GetWorld()->GetName() : TEXT("<none>"));
+        if (TSharedPtr<FJsonObject> Saved = CaptureEditorViewport(Chosen, Chosen->Viewport))
+        {
+            Saved->SetStringField(TEXT("editor_name"), EditorName);
+            Saved->SetStringField(TEXT("resolved_viewport"), ResolvedViewport);
+            Saved->SetBoolField(TEXT("focused"), FocusedClient != nullptr);
+            return Saved;
+        }
+
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("asset_editor_screenshot_failed"),
+            TEXT("the asset editor viewport could not be read back"));
+        Error->SetStringField(TEXT("editor_name"), EditorName);
+        Error->SetStringField(TEXT("resolved_viewport"), ResolvedViewport);
+        return Error;
+    }
+
     // Get the active viewport
     if (GEditor && GEditor->GetActiveViewport())
     {
         FViewport* Viewport = GEditor->GetActiveViewport();
 
-        // 强制重绘：非实时视口的 backbuffer 是陈旧的（材质改完后截图字节
-        // 完全不变的元凶）。置全部编辑器视口 realtime + invalidate，再同步
-        // 画一帧，保证 ReadPixels 读到当前场景状态。
-        for (FEditorViewportClient* ViewportClient : GEditor->GetAllViewportClients())
+        // FEditorViewportClient is not a UObject, so this is a static_cast, not a Cast<>.
+        if (FEditorViewportClient* ViewportClient = static_cast<FEditorViewportClient*>(Viewport->GetClient()))
         {
-            if (ViewportClient)
-            {
-                ViewportClient->SetRealtime(true);
-                ViewportClient->Invalidate();
-            }
-        }
-        Viewport->Draw();
-
-        TArray<FColor> Bitmap;
-        FIntRect ViewportRect(0, 0, Viewport->GetSizeXY().X, Viewport->GetSizeXY().Y);
-
-        if (ViewportRect.Width() > 0 && ViewportRect.Height() > 0
-            && Viewport->ReadPixels(Bitmap, FReadSurfaceDataFlags(), ViewportRect))
-        {
-            if (TSharedPtr<FJsonObject> Saved = SavePng(ViewportRect.Width(), ViewportRect.Height(), Bitmap))
+            if (TSharedPtr<FJsonObject> Saved = CaptureEditorViewport(ViewportClient, Viewport))
             {
                 return Saved;
             }
@@ -931,8 +1163,15 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnParticleActor(const
     bool bAutoActivate = true;
     Params->TryGetBoolField(TEXT("auto_activate"), bAutoActivate);
 
+    // Same guard as spawn_actor: a name the engine treats as taken must answer, not assert.
+    if (TSharedPtr<FJsonObject> NameTaken = FUnrealMCPCommonUtils::MakeNameTakenResponseIfTaken(World, ActorName))
+    {
+        return NameTaken;
+    }
+
     FActorSpawnParameters SpawnParams;
     SpawnParams.Name = *ActorName;
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
 
     AEmitter* NewActor = World->SpawnActor<AEmitter>(AEmitter::StaticClass(), Location, Rotation, SpawnParams);
     if (!NewActor)

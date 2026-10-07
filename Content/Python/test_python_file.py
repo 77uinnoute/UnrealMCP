@@ -73,30 +73,7 @@ def main():
     assert int(resp["result"]["code_bytes"]) > 64000, resp["result"]
     print(f"[OK] 5.1 execute_python_file: 64KB script executed intact (len+md5, code_bytes={resp['result']['code_bytes']})")
 
-    # --- 5.2 deferred + description ---
-    job_script = os.path.join(here, "job_script_test.py").replace("\\", "/")
-    with open(job_script, "w", encoding="utf-8") as f:
-        f.write("print('JOB_FROM_FILE_OK')\n")
-    resp = call("execute_python_file", {
-        "file_path": job_script,
-        "deferred": True,
-        "description": "acceptance-job",
-    })
-    job_id = resp["result"]["job_id"]
-    deadline = time.time() + 60
-    job = None
-    while time.time() < deadline:
-        poll = call("poll_python_job", {"job_id": job_id, "cleanup": True})
-        if poll["result"].get("state") == "done":
-            job = poll["result"]["job"]
-            break
-        time.sleep(0.5)
-    assert job is not None and job.get("success") is True, job
-    assert job.get("description") == "acceptance-job", job
-    assert job.get("file_path") == job_script, job
-    job_out = "".join(e.get("output", "") for e in (job.get("log") or []))
-    assert "JOB_FROM_FILE_OK" in job_out, job_out
-    print("[OK] 5.2 deferred file job: done, carries file_path + description")
+    # --- 5.2 (deferred file job coverage removed: execute_python_file is sync-only) ---
 
     # --- 5.3 error paths ---
     resp = call("execute_python_file", {"file_path": "Z:/definitely/not/there.py"})

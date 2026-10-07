@@ -254,6 +254,9 @@ def register_blueprint_tools(mcp: FastMCP):
             Dict with property_value_before and property_value_after, or a structured
             error carrying error_code, unchanged, supported_shapes / available_fields
             and a hint (unknown_property keeps its "did you mean" suggestion).
+            This writes the SCS component TEMPLATE, so the receipt also carries
+            placed_instances / counted_in (editor|pie) and - when instances exist - a hint
+            saying they keep their own property values and do NOT follow the template.
         """
 
         from unreal_mcp_server import get_unreal_connection
@@ -724,6 +727,16 @@ def register_blueprint_tools(mcp: FastMCP):
         """
         Change a member variable's type (ChangeMemberVariableType).
 
+        REFUSES with variable_referenced_by_nodes when graph nodes already use the variable. On that
+        shape the engine rebuilds their pins and the call has been measured to freeze the editor's
+        game thread dead: the editor stays alive, the port keeps listening, no further log line
+        appears and the client times out - nothing can be answered or timed out from outside.
+        The refusal lists the nodes in referencing_nodes[] and names the safe route: remove the
+        variable (remove_blueprint_variable also clears the referencing nodes), add it back with the
+        target type, rebuild the nodes. There is no override: one was tried and removed (it did not
+        apply the change, put up the same dialog anyway, and answering that dialog by hand did not
+        apply it either).
+
         Args:
             blueprint_name: Name of the target Blueprint
             variable_name: Member variable to retype
@@ -736,6 +749,7 @@ def register_blueprint_tools(mcp: FastMCP):
         Returns:
             Dict with the variable read back (type, container, ...) and the compile result.
             An unsupported type reports unsupported_variable_type with supported_types.
+            Refusals carry error=variable_referenced_by_nodes + referencing_nodes[] + hint.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -751,6 +765,7 @@ def register_blueprint_tools(mcp: FastMCP):
                 params["sub_class"] = sub_class
             if container:
                 params["container"] = container
+
 
             return unreal.send_command("set_blueprint_variable_type", params) or {
                 "success": False, "message": "No response from Unreal Engine"}
@@ -1062,9 +1077,13 @@ def register_blueprint_tools(mcp: FastMCP):
 
         Returns:
             Dict with components: [{component_name, component_class, component_template, parent,
-            attach_socket, is_root, is_inherited, children}], component_count, root_components,
-            root_count, unique_root and duplicate_components (empty unless the SCS holds a name
-            twice). A blueprint without a construction script reports blueprint_not_ready.
+            attach_socket, is_root, is_inherited, children, relative_location}], component_count,
+            root_components, root_count, unique_root, duplicate_components (empty unless the SCS
+            holds a name twice) and no_transform_count (entries whose relative_location is null).
+            relative_location is the component TEMPLATE's rest value - the construction script
+            default, not a runtime world position - in the frame of the parent that entry reports,
+            and is null for components without a transform (a plain ActorComponent). A blueprint
+            without a construction script reports blueprint_not_ready.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -1220,6 +1239,9 @@ def register_blueprint_tools(mcp: FastMCP):
             collision read back (collision_enabled / collision_profile / object_type / responses),
             plus the compile result. A component without a BodyInstance reports
             component_not_primitive; an unknown key lands in `failed` with candidates.
+            This writes the SCS component TEMPLATE, so the receipt also carries placed_instances /
+            counted_in (editor|pie) and - when instances exist - a hint saying they keep their own
+            collision and do NOT follow the template.
         """
         from unreal_mcp_server import get_unreal_connection
 

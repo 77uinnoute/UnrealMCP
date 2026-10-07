@@ -10,6 +10,18 @@ public class UnrealMCP : ModuleRules
 		// Use IWYUSupport instead of the deprecated bEnforceIWYU in UE5.5
 		IWYUSupport = IWYUSupport.Full;
 
+		// Live Coding (hot reload) commands. ILiveCodingModule only exists in the Windows engine
+		// module, so the dependency and the code that uses it are both Windows-only.
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			PrivateDependencyModuleNames.Add("LiveCoding");
+			PublicDefinitions.Add("UNREALMCP_WITH_LIVE_CODING=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("UNREALMCP_WITH_LIVE_CODING=0");
+		}
+
 		PublicIncludePaths.AddRange(
 			new string[] {
 				// ... add public include paths required here ...

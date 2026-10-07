@@ -232,6 +232,33 @@ namespace
             return true;
         }
 
+        // C-style fixed-size arrays (`FBlendParameter BlendParameters[3]`) are ONE property with ArrayDim
+        // slots - there is no FArrayProperty to unwrap, the slots sit at a fixed stride inside the
+        // property's own memory. Without this branch every such property answered "is not an array or a
+        // map" and the subscript did not apply, which is how UBlendSpace::BlendParameters stayed out of
+        // reach of the reflector.
+        if (Property->ArrayDim > 1)
+        {
+            if (!Subscript.IsNumeric())
+            {
+                OutErrorMessage = FString::Printf(TEXT("'%s' is a fixed-size array; the subscript must be an index"),
+                    *Property->GetName());
+                return false;
+            }
+
+            const int32 Index = FCString::Atoi(*Subscript);
+            if (Index < 0 || Index >= Property->ArrayDim)
+            {
+                OutErrorMessage = FString::Printf(TEXT("Index %d is out of range for '%s' (%d elements)"),
+                    Index, *Property->GetName(), Property->ArrayDim);
+                return false;
+            }
+
+            OutProperty = Property;
+            OutAddress = static_cast<uint8*>(Address) + static_cast<int64>(Index) * Property->ElementSize;
+            return true;
+        }
+
         if (FMapProperty* MapProperty = CastField<FMapProperty>(Property))
         {
             FScriptMapHelper Helper(MapProperty, Address);
@@ -376,6 +403,29 @@ namespace
         return Out;
     }
 
+    /**
+     * Follow-up command a write needs before it means anything at runtime.
+     *
+     * A write that lands in the asset while the runtime data stays stale is the hardest failure to
+     * attribute: the editor looks right, the read-back is right, and only PIE shows the symptom (an
+     * empty blend = a T-pose). These pairs are stated in the reply instead of being folklore.
+     */
+    FString DependentCommandHint(const FString& RequestedProperty)
+    {
+        if (RequestedProperty.StartsWith(TEXT("sample_data"), ESearchCase::IgnoreCase))
+        {
+            return TEXT("BlendSpace samples written: the runtime segment/triangle table stays stale until "
+                        "finalize_blend_space runs, and the blend output is empty (a T-pose in PIE) until it does. "
+                        "set_blend_space_samples does the write and the finalize in one call.");
+        }
+        if (RequestedProperty.StartsWith(TEXT("blend_parameters"), ESearchCase::IgnoreCase))
+        {
+            return TEXT("BlendSpace grid changed: the samples have to be realigned with the new axes and "
+                        "finalize_blend_space has to run, or the runtime data stays empty.");
+        }
+        return FString();
+    }
+
     /** The UObject a probe addresses: a graph node, a component template, a material expression, or an asset/CDO. */
     bool ResolveProbeTarget(const TSharedPtr<FJsonObject>& Params, UObject*& OutObject,
                             FString& OutErrorCode, FString& OutErrorMessage, TArray<FString>& OutCandidates)
@@ -511,7 +561,8 @@ namespace
             return true;
         }
 
-        OutErrorCode = Target.IsEmpty() ? TEXT("invalid_params") : TEXT("load_failed");
+        const FString PieCode = FUnrealMCPCommonUtils::ClassifyAssetLoadFailure(Target);
+        OutErrorCode = Target.IsEmpty() ? TEXT("invalid_params") : (PieCode.IsEmpty() ? FString(TEXT("load_failed")) : PieCode);
         OutErrorMessage = Target.IsEmpty()
             ? TEXT("Missing 'target' parameter")
             : FString::Printf(TEXT("Could not resolve target '%s' as an asset, a class, or a sub-object (tried: %s)"),
@@ -539,9 +590,12 @@ void FUnrealMCPReflectionCommands::RegisterCommands(FMCPCommandRegistry& Registr
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleReflectProbe(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "set_object_property", "reflection",
-        "Write properties on any object path (asset, class or sub-object) with one optional save.",
+        "Write properties on any object (asset, class or sub-object) with one optional save. The object selector "
+        "is 'target' - the same word reflect_probe uses, because the two are used as a pair. 'object_path' still "
+        "works as a deprecated alias, and using it is reported back in renamed_params[].",
         (TArray<FMCPParamSpec>{
-            MCPParam(TEXT("object_path"), TEXT("string"), TEXT("Asset, class, or sub-object path to write, e.g. \"/Game/X.X:A.Config\"")),
+            MCPParam(TEXT("target"), TEXT("string"), TEXT("Asset, class, or sub-object path to write, e.g. \"/Game/X.X:A.Config\"")),
+            MCPParamOpt(TEXT("object_path"), TEXT("string"), TEXT("Deprecated alias of 'target' (same meaning); the response echoes it in renamed_params[]")),
             MCPParamOpt(TEXT("property_name"), TEXT("string"), TEXT("Single-property form: property name (snake_case resolves) or a path like \"LodData[0].PhysicalMeshData.WeightMaps[1].Values\"")),
             MCPParamOpt(TEXT("property_value"), TEXT("any"), TEXT("Single-property form: value in the shape reflect_probe reports")),
             MCPParamOpt(TEXT("properties"), TEXT("object"), TEXT("Batch form: object of property name (or path) -> value, written with ONE save")),
@@ -651,6 +705,24 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleReflectProbe(const T
     }
     Data->SetArrayField(TEXT("supported_shapes"), Shapes);
 
+    // The verdict a caller needs BEFORE writing: whether the writer will accept this property, phrased
+    // in the same rule the writer uses (nested-path form when the probe itself was addressed by path).
+    // `supported_shapes` alone does not answer it - a property can be type-supported and still refused
+    // for its edit flags, which is what made writing SampleData a two-attempt guess.
+    const bool bProbedByPath = PropertyName.Contains(TEXT(".")) || PropertyName.Contains(TEXT("["));
+    FString WritableDetail;
+    const bool bWritable = FMCPPropertyReflector::IsWritableAndSupported(Property, bProbedByPath, WritableDetail);
+    Data->SetBoolField(TEXT("writable"), bWritable);
+    if (!WritableDetail.IsEmpty())
+    {
+        Data->SetStringField(TEXT("writable_detail"), WritableDetail);
+    }
+    if (!Descriptor.Shape.IsEmpty())
+    {
+        Data->SetStringField(TEXT("shape"), Descriptor.Shape);
+    }
+    FUnrealMCPCommonUtils::AddStringArrayField(Data, TEXT("element_fields"), Descriptor.ElementFields);
+
     if (!Descriptor.Hint.IsEmpty())
     {
         Data->SetStringField(TEXT("hint"), Descriptor.Hint);
@@ -710,11 +782,34 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
             TEXT("Nothing to write: pass 'property_name' + 'property_value', or a non-empty 'properties' object"));
     }
 
+    // The object selector is `target` - the same word reflect_probe uses, because these two are used as a
+    // pair (probe, then write). `object_path` was the old spelling and still works: one concept, one name,
+    // with a compatibility window that reports itself back so callers migrate.
+    FString TargetKey = TEXT("target");
+    bool bUsedRenamedParam = false;
+    {
+        FString NewValue;
+        FString OldValue;
+        const bool bHasNew = Params->TryGetStringField(TEXT("target"), NewValue);
+        const bool bHasOld = Params->TryGetStringField(TEXT("object_path"), OldValue);
+        if (bHasNew && bHasOld && !NewValue.Equals(OldValue))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
+                TEXT("'target' and its deprecated alias 'object_path' were both given with different values; "
+                     "pass only one of them"));
+        }
+        if (!bHasNew && bHasOld)
+        {
+            TargetKey = TEXT("object_path");
+            bUsedRenamedParam = true;
+        }
+    }
+
     UObject* TargetObject = nullptr;
     FString ErrorCode;
     FString ErrorMessage;
     TArray<FString> TriedPaths;
-    if (!FMCPObjectPathResolver::ResolveFromParams(Params, TEXT("object_path"), TargetObject, ErrorCode,
+    if (!FMCPObjectPathResolver::ResolveFromParams(Params, *TargetKey, TargetObject, ErrorCode,
                                                    ErrorMessage, TriedPaths))
     {
         TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(ErrorCode, ErrorMessage);
@@ -729,6 +824,7 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
 
     TArray<TSharedPtr<FJsonValue>> WritesJson;
     TArray<TSharedPtr<FJsonValue>> FailedJson;
+    FString ResponseHint;
 
     for (const FPendingWrite& Pending : Writes)
     {
@@ -757,14 +853,15 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
         // looks like it worked while nothing ever consumes the value. A nested path is exempt from the
         // "editable" half because baked data (FPointWeightMap.Values) carries no Edit specifier at all -
         // addressing it down to the leaf IS the explicit opt-in - but EditConst stays refused.
-        const bool bWritable = bNestedPath
-            ? !Property->HasAnyPropertyFlags(CPF_EditConst)
-            : (Property->HasAnyPropertyFlags(CPF_Edit) && !Property->HasAnyPropertyFlags(CPF_EditConst));
+        // The rule itself lives in the reflector so `reflect_probe` reports the same verdict.
+        FString WritableDetail;
+        const bool bWritable = FMCPPropertyReflector::IsWritable(Property, bNestedPath, WritableDetail);
         if (!bWritable)
         {
             TSharedPtr<FJsonObject> Failure = MakeShared<FJsonObject>();
             Failure->SetStringField(TEXT("property_name"), Property->GetName());
             Failure->SetStringField(TEXT("error_code"), TEXT("property_not_writable"));
+            Failure->SetStringField(TEXT("writable_detail"), WritableDetail);
             Failure->SetStringField(TEXT("error"), FString::Printf(TEXT("'%s' is not editable (%s); it is engine-managed data"),
                 *Property->GetName(), *Property->GetClass()->GetName()));
             FailedJson.Add(MakeShared<FJsonValueObject>(Failure));
@@ -839,6 +936,14 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
         // A setter may clamp or refuse silently, so "changed" compares the read-backs rather than the requests.
         Written->SetBoolField(TEXT("changed"),
             JsonValueToComparableString(ValueBefore) != JsonValueToComparableString(ValueAfter));
+
+        // Read-only information: it never alters the write, it only says what else has to happen.
+        if (const FString DependentHint = DependentCommandHint(Pending.RequestedName); !DependentHint.IsEmpty())
+        {
+            Written->SetStringField(TEXT("hint"), DependentHint);
+            ResponseHint = DependentHint;
+        }
+
         WritesJson.Add(MakeShared<FJsonValueObject>(Written));
     }
 
@@ -855,7 +960,7 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
     }
 
     FString RequestedPath;
-    Params->TryGetStringField(TEXT("object_path"), RequestedPath);
+    Params->TryGetStringField(TargetKey, RequestedPath);
 
     TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
     Data->SetStringField(TEXT("requested_object_path"), RequestedPath);
@@ -868,6 +973,19 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
     Data->SetNumberField(TEXT("failed_count"), FailedJson.Num());
     Data->SetBoolField(TEXT("persist_requested"), bPersist);
     Data->SetBoolField(TEXT("saved"), bSaved);
+    if (!ResponseHint.IsEmpty())
+    {
+        Data->SetStringField(TEXT("hint"), ResponseHint);
+    }
+    if (bUsedRenamedParam)
+    {
+        TSharedPtr<FJsonObject> Renamed = MakeShared<FJsonObject>();
+        Renamed->SetStringField(TEXT("old"), TEXT("object_path"));
+        Renamed->SetStringField(TEXT("new"), TEXT("target"));
+        TArray<TSharedPtr<FJsonValue>> RenamedArray;
+        RenamedArray.Add(MakeShared<FJsonValueObject>(Renamed));
+        Data->SetArrayField(TEXT("renamed_params"), RenamedArray);
+    }
 
     return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
 }

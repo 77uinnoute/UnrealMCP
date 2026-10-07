@@ -30,6 +30,10 @@
  *     that modal freezes the whole bridge), but python tools cannot be called from editor-side
  *     scripts - so the implementation lives here, where both the tool surface and the bridge
  *     loopback of execute_python_* reach it.
+ *   - duplicate_asset_safe: the matching copy path. IAssetTools::DuplicateAsset runs CanCreateAsset,
+ *     which fully-loads the destination package - the same call the header of the montage duplicator
+ *     documents as unsafe for a just-deleted name; this command creates the package itself and uses
+ *     StaticDuplicateObject instead, so a copy never prompts.
  */
 class UNREALMCP_API FUnrealMCPAssetCommands
 {
@@ -42,6 +46,7 @@ public:
 private:
     TSharedPtr<FJsonObject> HandleSafeDeleteAsset(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleListAssetBlockers(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleListBrokenReferences(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAssetStatus(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleListDiskOnlyAssets(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleMoveAsset(const TSharedPtr<FJsonObject>& Params);
@@ -52,12 +57,20 @@ private:
     TSharedPtr<FJsonObject> HandleAddBlendableToPostVolume(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCreateAssetSafe(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDeleteAssetSafe(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleDuplicateAssetSafe(const TSharedPtr<FJsonObject>& Params);
 
     // Shared resolution: given an asset object path, collect blocking referencer
     // packages (non-redirector) and redirector objects pointing at the asset.
     // Returns false + error response when the asset does not exist.
+    //
+    // OutRedirectorPackages is the registry-derived list of referencer packages that ARE redirectors;
+    // it is the one to use for decisions and receipts, because it is complete. OutRedirectors only
+    // carries the instances that happened to be loaded already: this function MUST NOT load a package
+    // (loading one to answer "is this a redirector?" pulled whole levels and blueprints into memory
+    // during a read-only preflight - measured 10.6s cold against 0.03s for the registry-only view).
     bool ResolveAssetBlockers(const FString& AssetPath,
                                TArray<FString>& OutBlockerPackages,
+                               TArray<FString>& OutRedirectorPackages,
                                TArray<UObject*>& OutRedirectors,
                                TSharedPtr<FJsonObject>& OutError);
 
@@ -79,7 +92,34 @@ private:
     // Destroys level actor instances of the target's class, then clears object properties that
     // live inside already-loaded referencer packages and point at the target. Every broken
     // reference is appended to OutDetached as {referencer, how}. Loads nothing.
-    static void DetachReferencers(UObject* Target, TArray<TSharedPtr<FJsonValue>>& OutDetached);
+    // bApply=false is the read-only twin (dry_run): same walk, `would_*` labels, no Modify/Destroy.
+    static void DetachReferencers(UObject* Target, TArray<TSharedPtr<FJsonValue>>& OutDetached,
+                                  bool bApply = true);
+
+    // --- safe_delete_asset pre-flight: predict a doomed force delete BEFORE breaking anything ---
+    // The force delete used to clear every reachable reference and only then discover that the
+    // package file could not be removed (measured: ~100 references cleared, then
+    // reason=package_file_locked and the asset still there). These checks run before the detach
+    // pass; when one fires, nothing is modified and the reply carries the reason + workarounds:
+    //   - the package file is read-only;
+    //   - the asset still has an open asset editor (its editing objects hold the asset alive);
+    //   - a live referencer lives outside every package this command can clear, so the GC pass
+    //     would leave the package alive and the file locked (see UnreachableReferencers).
+    struct FForceDeletePreflight
+    {
+        bool bProceed = true;
+        FString Reason;
+        FString Detail;
+        TArray<FString> UnreachableReferencers;
+        bool bReferencedByUndo = false;
+    };
+
+    static FForceDeletePreflight CheckForceDeletePreflight(UObject* AssetObject, const FString& PackageName,
+                                                           const TArray<FString>& BlockerPackages);
+
+    // Workarounds shared by every "could not delete" outcome (the same shape the World Partition
+    // refusal uses): what the caller can actually do instead of retrying blindly.
+    static void AddDeleteWorkarounds(const TSharedPtr<FJsonObject>& ResultJson);
 
     // --- asset_status / list_disk_only_assets -----------------------------------------------
     // Caller path (object path or package path) -> package name + object path, no loading.

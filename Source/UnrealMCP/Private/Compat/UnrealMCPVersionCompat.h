@@ -27,14 +27,15 @@
 // -------------------------------------------------------------------------------------------
 // Object lookup: ANY_PACKAGE
 // -------------------------------------------------------------------------------------------
-// 5.1 deprecated ANY_PACKAGE, 5.7 removed it. The replacement for "search every package" is an
-// explicit nullptr outer; the old macro is kept for the versions that still have it so 5.5/5.6
-// keep the exact code path they were developed and tested on.
-#if UE_VERSION_OLDER_THAN(5, 7, 0)
-	#define UNREALMCP_ANY_PACKAGE ANY_PACKAGE
-#else
-	#define UNREALMCP_ANY_PACKAGE nullptr
-#endif
+// 5.1 deprecated ANY_PACKAGE, 5.7 removed it. There is deliberately NO shim for it: mapping it to a
+// null outer - which is what a shim is tempted to do - does not mean "search every package", it means
+// "only match an object whose outer is null", i.e. a TOP-LEVEL package
+// (CoreUObject/Private/UObject/UObjectHash.cpp:1118, the `&& (!Object->GetOuter())` guard). Every
+// class lookup written that way silently stopped resolving on 5.7.
+//
+// The replacement is FUnrealMCPCommonUtils::ResolveUClass, which does the short-name search with
+// FindFirstObject: that one hashes on the object name alone (UObjectHash.cpp:1226-1270), so it really
+// does search every package, on every supported engine version.
 
 // -------------------------------------------------------------------------------------------
 // Material: material resource at a feature level
