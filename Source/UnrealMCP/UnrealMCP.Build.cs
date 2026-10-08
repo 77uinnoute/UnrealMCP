@@ -59,6 +59,11 @@ public class UnrealMCP : ModuleRules
 					"Slate",
 					"SlateCore",
 					"RHI",                 // For GetFeatureLevelShaderPlatform (material resource lookup on 5.7+)
+					"ApplicationCore",     // For IPlatformInputDeviceMapper::Get, which the inline
+					                       // FInputKeyEventArgs(FInputDeviceId, ...) constructor references
+					                       // (inject_key). Slate/SlateCore pull the module in, but a static
+					                       // import symbol needs the module linked into THIS binary: without
+					                       // the dependency the build compiles and then fails at LNK2019.
 					"UMG",
 					"MovieScene",          // For UMovieScene / AddPossessable / property tracks (widget animation authoring)
 					"MovieSceneTracks",    // For UMovieSceneFloatTrack / UMovieSceneByteTrack and their sections

@@ -22,7 +22,34 @@
 // sink (FProperty::ImportText_Direct, UScriptStruct::ImportText) takes an FOutputDevice*, so the
 // header has to be included explicitly - without it the declaration fails and each use of the sink
 // cascades into "undeclared identifier" plus the const-initialisation errors that follow.
-#include "Misc/StringOutputDevice.h"
+//
+// The declaration moved with it: up to 5.6 FStringOutputDevice is declared in
+// Containers/UnrealString.h, and only from 5.7 on does Misc/StringOutputDevice.h have it. Including
+// the new header unconditionally is a hard error on 5.5/5.6 (C1083, "cannot open include file"), and
+// it is a FATAL one - every translation unit that includes this file dies with it, not just the ones
+// that use the import sinks.
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+	#include "Containers/UnrealString.h"
+#else
+	#include "Misc/StringOutputDevice.h"
+#endif
+
+// -------------------------------------------------------------------------------------------
+// Viewport input: FInputKeyEventArgs construction
+// -------------------------------------------------------------------------------------------
+// 5.6 added the event-timestamp constructor
+// (FViewport*, FInputDeviceId, FKey, EInputEvent, uint64); 5.5 only has the four-argument forms.
+// This is not a "slightly different defaults" difference: a five-argument call does not compile on
+// 5.5, and the failure does not stay local - with the construction ill-formed, overload resolution
+// on UGameViewportClient::InputKey falls back to another overload that returns void, so the caller's
+// `const bool bHandled = ...` reports "cannot convert from void to bool" as well.
+#if UE_VERSION_OLDER_THAN(5, 6, 0)
+	#define UNREALMCP_INPUT_KEY_EVENT_ARGS(ViewportPtr, DeviceId, Key, Event) \
+		FInputKeyEventArgs((ViewportPtr), (DeviceId), (Key), (Event))
+#else
+	#define UNREALMCP_INPUT_KEY_EVENT_ARGS(ViewportPtr, DeviceId, Key, Event) \
+		FInputKeyEventArgs((ViewportPtr), (DeviceId), (Key), (Event), /*EventTimestamp=*/uint64(0))
+#endif
 
 // -------------------------------------------------------------------------------------------
 // Object lookup: ANY_PACKAGE

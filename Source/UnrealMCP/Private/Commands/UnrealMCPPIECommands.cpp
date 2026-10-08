@@ -1,5 +1,6 @@
 #include "Commands/UnrealMCPPIECommands.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
+#include "Compat/UnrealMCPVersionCompat.h"
 #include "Core/MCPCommandRegistry.h"
 
 #include "CoreGlobals.h"
@@ -332,8 +333,8 @@ TSharedPtr<FJsonObject> FUnrealMCPPIECommands::HandleInjectKey(const TSharedPtr<
     // it, and the device id is the primary one (a keyboard reports as internal id 0).
     auto Push = [ViewportClient, &Key](EInputEvent Event)
     {
-        return ViewportClient->InputKey(FInputKeyEventArgs(ViewportClient->Viewport,
-            FInputDeviceId::CreateFromInternalId(0), Key, Event, /*EventTimestamp=*/uint64(0)));
+        return ViewportClient->InputKey(UNREALMCP_INPUT_KEY_EVENT_ARGS(ViewportClient->Viewport,
+            FInputDeviceId::CreateFromInternalId(0), Key, Event));
     };
 
     TArray<TSharedPtr<FJsonValue>> EventJson;

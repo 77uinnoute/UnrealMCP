@@ -2531,6 +2531,16 @@ namespace
 
     // Non-forced: the point is to gather what is already on disk (fresh saves), not to re-read every
     // file. Measured 0.58s for all of /Game on this project.
+    //
+    // The third argument is NOT bWaitForCompletion and must not be passed: on every supported engine
+    // version it is bIgnoreDenyListScanFilters (IAssetRegistry.h:655 in 5.5, unchanged through 5.7 -
+    // the scan API is synchronous-only, there is no "wait for completion" parameter). Passing true
+    // there puts the engine into "ignore the deny list, so force a full rescan" mode, which is exactly
+    // the forced re-read this helper exists to avoid: measured here it made move_asset re-scan every
+    // one of the 43k assets under /Game, log the warning "ScanPathsSynchronous: bIgnoreDenyListScanFilters==true
+    // is only valid when bForceRescan==true. Setting bForceRescan=true.", dump a stack trace from
+    // FDebug, and report the stale on-disk .uasset files an incremental scan skips ("Package is
+    // unloadable: Version is too old").
     void RefreshRegistryPaths(const TArray<FString>& Paths)
     {
         if (Paths.Num() == 0)
@@ -2538,7 +2548,7 @@ namespace
             return;
         }
         FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-        AssetRegistryModule.Get().ScanPathsSynchronous(Paths, /*bForceRescan=*/ false, /*bWaitForCompletion=*/ true);
+        AssetRegistryModule.Get().ScanPathsSynchronous(Paths, /*bForceRescan=*/ false);
     }
 
     // Referencer superset: the dependency graph's answer, plus every loaded package whose objects hold
