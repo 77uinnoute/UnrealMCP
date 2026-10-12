@@ -27,13 +27,13 @@ public class UnrealMCP : ModuleRules
 				// ... add public include paths required here ...
 			}
 		);
-		
+
 		PrivateIncludePaths.AddRange(
 			new string[] {
 				// ... add other private include paths required here ...
 			}
 		);
-		
+
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -43,68 +43,68 @@ public class UnrealMCP : ModuleRules
 				"InputCore",
 				"Networking",
 				"Sockets",
-					"HTTP",
-					"Json",
-					"JsonUtilities",
-					"DeveloperSettings",
-					"Niagara",
-					"NiagaraCore",
-					"NiagaraShader"
+				"HTTP",
+				"Json",
+				"JsonUtilities",
+				"DeveloperSettings",
+				"Niagara",
+				"NiagaraCore",
+				"NiagaraShader"
 			}
 		);
-		
+
+		PrivateDependencyModuleNames.AddRange(
+			new string[]
+			{
+				"UnrealEd",
+				"EditorScriptingUtilities",
+				"EditorSubsystem",
+				"Slate",
+				"SlateCore",
+				"RHI",                 // For GetFeatureLevelShaderPlatform (material resource lookup on 5.7+)
+				"RenderCore",          // For FRHIGPUTextureReadback's game-thread side: ENQUEUE_RENDER_COMMAND
+				                       // and FlushRenderingCommands live here, not in RHI (read_render_target_stats
+				                       // compiles without it and then fails at LNK2019 on those two symbols)
+				"ApplicationCore",     // For IPlatformInputDeviceMapper::Get, which the inline
+				                       // FInputKeyEventArgs(FInputDeviceId, ...) constructor references
+				                       // (inject_key). Slate/SlateCore pull the module in, but a static
+				                       // import symbol needs the module linked into THIS binary: without
+				                       // the dependency the build compiles and then fails at LNK2019.
+				"UMG",
+				"MovieScene",          // For UMovieScene / AddPossessable / property tracks (widget animation authoring)
+				"MovieSceneTracks",    // For UMovieSceneFloatTrack / UMovieSceneByteTrack and their sections
+				"Kismet",
+				"KismetCompiler",
+				"BlueprintGraph",
+				"Projects",
+				"AssetRegistry",
+				"AssetTools",          // For UAssetImportTask / FAssetToolsModule (import_assets)
+				"ClothingSystemRuntimeCommon",  // For UClothingAssetCommon::ApplyParameterMasks (apply_cloth_masks)
+				"PhysicsUtilities",    // For FPhysicsAssetUtils::CreateNewBody / CreateNewConstraint (add_physics_asset_body / add_physics_asset_constraint)
+				"PhysicsCore"          // For EPhysicsType (UBodySetup::PhysicsType) read back by list_physics_asset_bodies
+			}
+		);
+
+		if (Target.bBuildEditor == true)
+		{
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
-					"UnrealEd",
-					"EditorScriptingUtilities",
-					"EditorSubsystem",
-					"Slate",
-					"SlateCore",
-					"RHI",                 // For GetFeatureLevelShaderPlatform (material resource lookup on 5.7+)
-					"RenderCore",          // For FRHIGPUTextureReadback's game-thread side: ENQUEUE_RENDER_COMMAND
-					                       // and FlushRenderingCommands live here, not in RHI (read_render_target_stats
-					                       // compiles without it and then fails at LNK2019 on those two symbols)
-					"ApplicationCore",     // For IPlatformInputDeviceMapper::Get, which the inline
-					                       // FInputKeyEventArgs(FInputDeviceId, ...) constructor references
-					                       // (inject_key). Slate/SlateCore pull the module in, but a static
-					                       // import symbol needs the module linked into THIS binary: without
-					                       // the dependency the build compiles and then fails at LNK2019.
-					"UMG",
-					"MovieScene",          // For UMovieScene / AddPossessable / property tracks (widget animation authoring)
-					"MovieSceneTracks",    // For UMovieSceneFloatTrack / UMovieSceneByteTrack and their sections
-					"Kismet",
-					"KismetCompiler",
-					"BlueprintGraph",
-					"Projects",
-					"AssetRegistry",
-					"AssetTools",          // For UAssetImportTask / FAssetToolsModule (import_assets)
-					"ClothingSystemRuntimeCommon",  // For UClothingAssetCommon::ApplyParameterMasks (apply_cloth_masks)
-					"PhysicsUtilities",    // For FPhysicsAssetUtils::CreateNewBody / CreateNewConstraint (add_physics_asset_body / add_physics_asset_constraint)
-					"PhysicsCore"          // For EPhysicsType (UBodySetup::PhysicsType) read back by list_physics_asset_bodies
+					"PropertyEditor",      // For widget property editing
+					"ToolMenus",           // For editor UI
+					"BlueprintEditorLibrary", // For Blueprint utilities
+					"UMGEditor",           // For WidgetBlueprint.h and other UMG editor functionality
+					"PythonScriptPlugin",  // For executing Python commands in editor
+					"MaterialEditor",      // For material expression editing (UMaterialEditingLibrary)
+					"AnimGraph",           // For UAnimPreviewInstance (animation editor session / preview control)
+					"LevelEditor",         // For ULevelEditorSubsystem (PIE lifecycle: play / end play / is playing)
+					"PCG",                 // For the read-only PCG probing commands (UPCGGraph / UPCGComponent / FPCGDataCollection)
+					"NiagaraEditor",       // For UNiagaraGraph / FNiagaraStackGraphUtilities / FNiagaraSystemViewModel
+					"NiagaraEditorWidgets" // For Niagara stack widget integration
 				}
 			);
-		
-			if (Target.bBuildEditor == true)
-				{
-					PrivateDependencyModuleNames.AddRange(
-						new string[]
-						{
-							"PropertyEditor",      // For widget property editing
-							"ToolMenus",           // For editor UI
-							"BlueprintEditorLibrary", // For Blueprint utilities
-							"UMGEditor",           // For WidgetBlueprint.h and other UMG editor functionality
-							"PythonScriptPlugin",  // For executing Python commands in editor
-							"MaterialEditor",      // For material expression editing (UMaterialEditingLibrary)
-								"AnimGraph",           // For UAnimPreviewInstance (animation editor session / preview control)
-								"LevelEditor",         // For ULevelEditorSubsystem (PIE lifecycle: play / end play / is playing)
-								"PCG",                 // For the read-only PCG probing commands (UPCGGraph / UPCGComponent / FPCGDataCollection)
-								"NiagaraEditor",       // For UNiagaraGraph / FNiagaraStackGraphUtilities / FNiagaraSystemViewModel
-								"NiagaraEditorWidgets" // For Niagara stack widget integration
-							}
-					);
-				}
-		
+		}
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{
@@ -112,4 +112,4 @@ public class UnrealMCP : ModuleRules
 			}
 		);
 	}
-} 
+}
