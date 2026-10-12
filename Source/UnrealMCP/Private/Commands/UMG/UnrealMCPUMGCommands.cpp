@@ -234,6 +234,29 @@ void FUnrealMCPUMGCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         }), MCPFlags(false, /*bMutatesGraph=*/true),
         [this](const TSharedPtr<FJsonObject>& Params) { return EnsurePersistReceipt(Params, HandleSetUMGDesignSize(Params)); });
 
+    MCP_REGISTER_COMMAND(Registry, "set_umg_designer_overlay", "umg", "Write the widget designer's own view settings: the dashed widget outlines (the 'Show Dashed Outlines By Default' project setting) and grid snapping. These are project-wide USER settings (UWidgetDesignerSettings is config=EditorPerProjectUserSettings), so there is no blueprint_name and no asset to save - the value is written into the per-project user settings ini. Python cannot reach them (UWidgetDesignerSettings is not exposed to python; script-side, class lookup returns nothing). An already-open designer view keeps the state it was created with, so reopen it to see a change.",
+        (TArray<FMCPParamSpec>{
+            MCPParamOpt(TEXT("show_outlines"), TEXT("bool"), TEXT("Draw the dashed widget outlines by default in the designer")),
+            MCPParamOpt(TEXT("grid_snap_enabled"), TEXT("bool"), TEXT("Snap widget positions to the grid")),
+            MCPParamOpt(TEXT("grid_snap_size"), TEXT("int"), TEXT("Grid snap size")),
+            MCPParamOpt(TEXT("save"), TEXT("bool"), TEXT("Write the per-project user settings ini; default true")),
+        }), MCPFlags(),
+        [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetUMGDesignerOverlay(Params); });
+
+    MCP_REGISTER_COMMAND(Registry, "set_widget_brush", "umg", "Write the brush of a Border (its Background) or an Image (its Brush) - resource, draw_as, 9-slice margin, image_size, tint and the widget's colour - and report every key before/after. This is the only route that can write the brush's ImageSize: python cannot construct that field (FDeprecateSlateVector2D is not exposed), so a script-side brush keeps Slate's default 32x32 and the caller has no say. Passing a texture resource seeds image_size from the texture when the caller does not set it. MEASURED LIMIT: draw_as=Box on a Border's Background drew NOTHING in this project at both image_size 32 and 64 (the widget renders fine again with draw_as=Image), so treat the 9-slice modes as unverified here and prefer draw_as=Image stretch unless you have checked the result yourself.",
+        (TArray<FMCPParamSpec>{
+            MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name or path of the target Widget Blueprint")),
+            MCPParam(TEXT("widget_name"), TEXT("string"), TEXT("Border or Image widget whose brush is written")),
+            MCPParamOpt(TEXT("resource"), TEXT("string"), TEXT("Asset path of a texture or material to use as the brush resource")),
+            MCPParamOpt(TEXT("draw_as"), TEXT("string"), TEXT("Image / Box / Border / RoundedBox / NoDrawType")),
+            MCPParamOpt(TEXT("margin"), TEXT("array"), TEXT("9-slice margin: [l, t, r, b] (or one number / {left, top, right, bottom})")),
+            MCPParamOpt(TEXT("image_size"), TEXT("array"), TEXT("Brush image size [w, h]; defaults to the texture's size when a texture resource is given")),
+            MCPParamOpt(TEXT("tint"), TEXT("array"), TEXT("[r, g, b, a] brush tint")),
+            MCPParamOpt(TEXT("color"), TEXT("array"), TEXT("Widget colour [r, g, b, a]: Border.BrushColor / Image.ColorAndOpacity in LINEAR space")),
+            MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save after the command; default true.")),
+        }), MCPFlags(false, /*bMutatesGraph=*/true),
+        [this](const TSharedPtr<FJsonObject>& Params) { return EnsurePersistReceipt(Params, HandleSetWidgetBrush(Params)); });
+
     MCP_REGISTER_COMMAND(Registry, "create_widget_animation", "umg", "Create a widget animation (UWidgetAnimation with its own movie scene) on a Widget Blueprint and make it visible to the designer and the runtime.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name or path of the target Widget Blueprint")),

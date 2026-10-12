@@ -257,7 +257,7 @@ bridge("create_material_expression", asset_path=MAT,
 | `add_custom_input` | 同名 | `{asset_path, expression_name, input_name, index?, expression_desc?, recompile?}`（`index` 默认追加；`inputs` 顺序 = HLSL 参数顺序） |
 | `remove_custom_input` | 同名 | `{asset_path, expression_name, input_name, expression_desc?, recompile?}`（回 `was_connected` / `disconnected_from`） |
 | `delete_material_expressions` | 同名 | `{asset_path, expressions: [{name\|desc}...]}` |
-| `get_material_parameters` / `set_material_parameters` | 同名 | `{asset_path[, values, recompile]}` |
+| `get_material_parameters` / `set_material_parameters` | 同名 | `{asset_path[, values, recompile]}`；`set_material_parameters` 回包额外带 `param_scope`（`base_material_default` / `material_instance_override`）、`affects_live_render`、`live_components_using_material`、`live_render_worlds`、`live_render_note` —— **"这次改动到不到得了我在看的画面"从此是回读而不是猜**：写的是参数**默认值**时不需要 `recompile`（引擎在写入时重建 uniform 集合并推给绑定的组件，正在跑的 PIE 与编辑器共用同一个已加载材质对象）；`recompile` 只对**图改动**（节点/连线）有意义 |
 | `import_assets` | 同名 | `{paths: [...], destination_path, force_legacy?, replace_existing?}` |
 | `set_asset_properties` | 同名 | `{asset_path, props: {...}}` |
 

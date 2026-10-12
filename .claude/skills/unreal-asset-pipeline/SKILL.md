@@ -204,6 +204,7 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 | `set_asset_properties` | 资产属性批量写 | 逐项 `applied`/`failed`，不回滚；先读再写 |
 | `get_asset_properties` | 读资产自身反射属性 | 核对 `skeleton` / `materials` |
 | `safe_delete_asset` | 删资产（带注册表通知） | 被引用会拒；`blockers` 见 `list_asset_blockers`；开着 WP 关卡时整体拒（`world_partition_open`/`world_partition_referenced`，`force` 不豁免） |
+| `delete_asset_with_level_switch` | 专治 `world_partition_open`：临时切到空白地图删完再切回（`switched_to` / `restored_level` 回读） | 关卡有未保存改动会拒（`level_dirty`），要么先存要么显式 `save_dirty=true`；`world_partition_referenced`（被 WP 外部 Actor 包引用）它**不解决**，关地图也不会解开 |
 | `list_asset_blockers` | 查引用者 | 删之前先跑 |
 | `list_broken_references` | 查**我引用谁而它已经不在**（反查） | `scope` + `kinds`（blendspace / anim_blueprint / anim_montage / skeletal_mesh_comp）；默认只扫已加载资产（`load_missing=true` 才加载）；删/改名/替换之后**先跑它**再看别的 |
 | `move_asset` | 改名 / 挪目录（唯一入口） | 默认 `update_referencers=true` + 改名**前**刷新注册表；引用者逐个重存盘；加载不到的（地图包）报 `unstorable[]` 并由引擎留 redirector；`dry_run=true` 只报告；`answer_dialogs=true` 把引擎确认框答成"继续"并记进 `auto_answered_dialogs[]` |
@@ -211,7 +212,8 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 | `list_mcp_commands` | 自省命令表 | 写 python 前先跑 |
 | `execute_python_file` | 落盘脚本（>30 行） | 同步；重活拆批，慢活用 `timeout<=600` |
 | `inspect_skeletal_mesh` | 网格健康体检（只读） | `skeleton_consistent`（false ⇒ 引擎不建 AnimInstance、角色 T 字且不报错）、`root_bone`/`bone_count`、`has_embedded_scale`/`bone_local_unit`、`slots_without_texture` |
-| `take_screenshot` | 截图排查（**不作验收结论**） | `source='level_viewport'`(默认) / `'pie'`(含 UMG) / `'asset_editor'`(+`asset_path` 聚焦该资产编辑器，未打开回 `editor_not_open`+退路)；回包带 `camera`，**同机位两次才可比** |
+| `take_screenshot` | 截图排查（**不作验收结论**） | `source='level_viewport'`(默认，**PIE 期间照常可用**) / `'pie'`(+`route='slate'` 才含 UMG，见下) / `'asset_editor'`(+`asset_path` 聚焦该资产编辑器，未打开回 `editor_not_open`+退路)；**"哪条路/含不含 UMG"看回包的 captured_via 与 includes_umg 字段，别按 source 名推断**；回包带 `camera`，**同机位两次才可比** |
+| `take_screenshot` 的 UMG | 看控件长什么样 | `source='asset_editor'` + `asset_path=<WBP>` = 设计器预览本身（`captured_via='widget_preview_slate'`，**不需要 PIE**，但含设计器的虚线轮廓 ⇒ `includes_editor_overlay: true`）；`source='pie'` + `route='slate'` = 游戏视口里的 UI（无辅助线，需窗口在前台）；`route='viewport'/'auto'` 只读场景，**永远不含 UI**（`auto` 的后缓冲一旦成功就 return） |
 
 ---
 

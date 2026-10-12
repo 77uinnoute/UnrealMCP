@@ -154,18 +154,24 @@ def register_reflection_tools(mcp: FastMCP):
                 the change in memory (useful while iterating; nothing reaches disk until a later save).
 
         Returns:
-            success plus:
+            success (the CALL ran - it does NOT mean every write landed; the verdict is
+            failed_count == 0) plus:
             - object_path / object_class / object_class_path: what the path resolved to
             - writes [{property_name (reflected leaf name), property_path (only for a path), property_type,
               property_value_before, property_value_after, changed}]: property_value_after is the
               authority, and `changed` is false when a setter clamped the value back
-            - written_count / failed [{property_name, property_path, error_code, error, ...}] / failed_count
+            - written_count / failed [{property_name, property_path, error_code, error, path_prefix
+              (the last segment that resolved), unchanged, hint}] / failed_count
             - saved (true only when persist was honoured), persist_requested
+            When NOTHING was written the envelope is an ERROR (success: false, error_code / error / hint
+            from the first failure) with the per-item detail kept in `data` - an empty `writes` array never
+            arrives inside a success envelope. One item of a batch landing is enough for success.
             Failed error codes: unknown_property / unknown_field (the step that failed; candidates lists
-            the legal names there), property_not_writable (exists but not editable), type_mismatch
+            the legal names there), index_out_of_range (an array subscript beyond the current length; hint
+            points at the whole-array form), property_not_writable (exists but not editable), type_mismatch
             (supported_shapes lists the accepted shapes), unknown_enum_member, unsupported_property_type,
-            load_failed (a null object or container segment mid-path), write_failed. Items are written
-            independently: one bad name does not stop the rest and nothing is rolled back.
+            load_failed (a null object or container segment mid-path), path_not_found, write_failed. Items
+            are written independently: one bad name does not stop the rest and nothing is rolled back.
         """
         from unreal_mcp_server import get_unreal_connection
 

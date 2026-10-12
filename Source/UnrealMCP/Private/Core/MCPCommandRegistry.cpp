@@ -31,6 +31,44 @@ void FMCPCommandRegistry::Register(FMCPCommandEntry Entry)
     Commands.Add(MoveTemp(Entry));
 }
 
+int32 FMCPCommandRegistry::AddParamsToCategory(const FString& Category, const TArray<FMCPParamSpec>& ExtraParams)
+{
+    if (bSealed || ExtraParams.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("MCPCommandRegistry: AddParamsToCategory('%s') ignored (%s)"),
+            *Category, bSealed ? TEXT("the table is sealed") : TEXT("no parameters given"));
+        return 0;
+    }
+
+    int32 Extended = 0;
+    for (FMCPCommandEntry& Command : Commands)
+    {
+        if (Command.Category != Category)
+        {
+            continue;
+        }
+
+        bool bTouched = false;
+        for (const FMCPParamSpec& Extra : ExtraParams)
+        {
+            const bool bAlreadyDeclared = Command.Params.ContainsByPredicate([&Extra](const FMCPParamSpec& Spec)
+            {
+                return Spec.Name == Extra.Name;
+            });
+            if (!bAlreadyDeclared)
+            {
+                Command.Params.Add(Extra);
+                bTouched = true;
+            }
+        }
+        Extended += bTouched ? 1 : 0;
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("MCPCommandRegistry: category '%s' now declares %d shared parameter(s) on %d command(s)"),
+        *Category, ExtraParams.Num(), Extended);
+    return Extended;
+}
+
 void FMCPCommandRegistry::Reset()
 {
     Commands.Reset();
@@ -102,12 +140,83 @@ TSharedPtr<FJsonObject> FMCPCommandRegistry::Execute(const FString& Name, const 
         }
         FUnrealMCPCommonUtils::FMCPPersistScope PersistScope(bPersist);
 
+        // Parameters the command never declared. These used to vanish without a trace - a caller passing
+        // `width` to take_screenshot got a plain success and believed the resize happened (it never did).
+        // They are reported rather than rejected: `persist` is handled here (not by any handler), and a few
+        // handlers read keys their registration does not list yet, so a hard refusal would break commands
+        // that work. Reported + logged is the part that removes the silent-drop failure mode.
+        TArray<FString> UndeclaredParams;
+        if (Params.IsValid())
+        {
+            for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Params->Values)
+            {
+                if (Pair.Key == TEXT("persist"))
+                {
+                    continue;
+                }
+                const bool bDeclared = Entry->Params.ContainsByPredicate([&Pair](const FMCPParamSpec& Spec)
+                {
+                    return Spec.Name == Pair.Key;
+                });
+                if (!bDeclared)
+                {
+                    UndeclaredParams.Add(Pair.Key);
+                }
+            }
+        }
+
+        // A command that writes the editor world gets one undo step and a level that is left UNSAVED-DIRTY.
+        // Two things used to be missing together: the writes answered success with a correct read-back while
+        // get_dirty_map_packages() stayed empty (nothing would prompt a save, so the change could be dropped
+        // silently), and with no transaction there was no undo entry either. Driven by the flag, so a future
+        // editor-world writer cannot forget it.
+        TUniquePtr<FUnrealMCPCommonUtils::FMCPEditorWorldWriteScope> WriteScope;
+        if (Entry->Flags.bWritesEditorWorld)
+        {
+            WriteScope = MakeUnique<FUnrealMCPCommonUtils::FMCPEditorWorldWriteScope>(Entry->Name);
+        }
+
         TSharedPtr<FJsonObject> Result = Entry->Handler(Params);
+
+        if (WriteScope.IsValid())
+        {
+            WriteScope->Finish(FUnrealMCPCommonUtils::ResponseIndicatesSuccess(Result));
+            WriteScope.Reset();
+        }
+
+        if (UndeclaredParams.Num() > 0)
+        {
+            UndeclaredParams.Sort();
+            UE_LOG(LogTemp, Warning, TEXT("MCPCommandRegistry: '%s' was called with undeclared parameter(s): %s"),
+                *Entry->Name, *FString::Join(UndeclaredParams, TEXT(", ")));
+
+            if (Result.IsValid())
+            {
+                TArray<TSharedPtr<FJsonValue>> Items;
+                Items.Reserve(UndeclaredParams.Num());
+                for (const FString& Undeclared : UndeclaredParams)
+                {
+                    Items.Add(MakeShared<FJsonValueString>(Undeclared));
+                }
+                Result->SetArrayField(TEXT("undeclared_params"), Items);
+                Result->SetStringField(TEXT("undeclared_params_hint"),
+                    FString::Printf(TEXT("%s does not declare these parameter(s), so they had no defined effect "
+                                         "(some handlers still read a few of them, but nothing is guaranteed). "
+                                         "Check the declared set with list_mcp_commands."),
+                        *Entry->Name));
+            }
+        }
 
         // Editor/PIE context on EVERY reply, injected once here rather than by each handler: a caller has
         // to be able to tell "no such asset" from "PIE is running and this type cannot load in play mode",
         // and a per-handler convention would leave gaps exactly where nobody remembered.
         FUnrealMCPCommonUtils::AddEditorState(Result);
+
+        // A write that landed on the editor world while PIE ran changes nothing the play session renders.
+        if (Entry->Flags.bWritesEditorWorld)
+        {
+            FUnrealMCPCommonUtils::AddEditorWorldWriteWarning(Result, Entry->Name);
+        }
         return Result;
     }
 

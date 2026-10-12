@@ -1,5 +1,9 @@
 ﻿#include "Commands/UnrealMCPEditorCommands.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
+#include "Commands/UMG/UnrealMCPUMGCommandHelpers.h"
+#include "WidgetBlueprint.h"
+#include "WidgetBlueprintEditor.h"
+#include "Blueprint/UserWidget.h"
 #include "Editor.h"
 #include "EditorViewportClient.h"
 #include "LevelEditorViewport.h"
@@ -44,6 +48,8 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
     MCP_REGISTER_COMMAND(Registry, "get_actors_in_level", "editor", "List every actor in the editor level.", {}, MCPFlags(),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleGetActorsInLevel(Params); });
 
+    // Everything below that edits the level carries bWritesEditorWorld, so a call made while PIE runs
+    // answers with the warning that its result is invisible to the play session (see Execute).
     MCP_REGISTER_COMMAND(Registry, "find_actors_by_name", "editor", "List actors whose name contains the given pattern.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("pattern"), TEXT("string"), TEXT("Substring matched against the actor name")),
@@ -57,7 +63,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParamOpt(TEXT("location"), TEXT("array"), TEXT("[X, Y, Z] world location")),
             MCPParamOpt(TEXT("rotation"), TEXT("array"), TEXT("[Pitch, Yaw, Roll] world rotation")),
             MCPParamOpt(TEXT("scale"), TEXT("array"), TEXT("[X, Y, Z] scale")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSpawnActor(Params); });
 
     // Deprecated alias: kept because the dispatcher still routes it.
@@ -67,8 +73,9 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Name for the new actor (must not exist yet)")),
             MCPParamOpt(TEXT("location"), TEXT("array"), TEXT("[X, Y, Z] world location")),
             MCPParamOpt(TEXT("rotation"), TEXT("array"), TEXT("[Pitch, Yaw, Roll] world rotation")),
+            MCPParamOpt(TEXT("rotation"), TEXT("array"), TEXT("[Pitch, Yaw, Roll] world rotation")),
             MCPParamOpt(TEXT("scale"), TEXT("array"), TEXT("[X, Y, Z] scale")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSpawnActor(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "spawn_particle_actor", "editor", "Spawn an emitter for a particle system asset, optionally attached to an actor.",
@@ -81,7 +88,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParamOpt(TEXT("relative_location"), TEXT("array"), TEXT("[X, Y, Z] offset from the attach parent")),
             MCPParamOpt(TEXT("relative_rotation"), TEXT("array"), TEXT("[Pitch, Yaw, Roll] rotation relative to the attach parent")),
             MCPParamOpt(TEXT("auto_activate"), TEXT("bool"), TEXT("Activate the system after spawning (default true)")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSpawnParticleActor(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "delete_actor", "editor",
@@ -93,7 +100,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Name of the actor to destroy")),
             MCPParamOpt(TEXT("flush"), TEXT("bool"), TEXT("Garbage-collect before returning, so the name is actually free (default false)")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleDeleteActor(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "set_actor_transform", "editor", "Apply a new location, rotation and/or scale to an actor.",
@@ -102,7 +109,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParamOpt(TEXT("location"), TEXT("array"), TEXT("[X, Y, Z] world location")),
             MCPParamOpt(TEXT("rotation"), TEXT("array"), TEXT("[Pitch, Yaw, Roll] world rotation")),
             MCPParamOpt(TEXT("scale"), TEXT("array"), TEXT("[X, Y, Z] scale")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetActorTransform(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "set_actor_location_safe", "editor",
@@ -112,7 +119,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParam(TEXT("location"), TEXT("array"), TEXT("[x, y, z] world location")),
             MCPParamOpt(TEXT("sweep"), TEXT("bool"), TEXT("Sweep against blocking geometry (default false)")),
             MCPParamOpt(TEXT("teleport"), TEXT("bool"), TEXT("Teleport physics (default false)")),
-        }), MCPFlags(false, false, false),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetActorLocationSafe(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "set_actor_custom_depth_safe", "editor",
@@ -121,7 +128,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Level actor name")),
             MCPParamOpt(TEXT("stencil_value"), TEXT("number"), TEXT("Stencil value 0-255 (default 1)")),
             MCPParamOpt(TEXT("enabled"), TEXT("bool"), TEXT("Enable custom depth (default true)")),
-        }), MCPFlags(false, false, false),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetActorCustomDepthSafe(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "get_actor_properties", "editor", "Return an actor's transform and reflected properties.",
@@ -135,7 +142,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Name of the actor to change")),
             MCPParam(TEXT("property_name"), TEXT("string"), TEXT("Property name on the actor class")),
             MCPParam(TEXT("property_value"), TEXT("string"), TEXT("Value to set (number / bool / string / array, as the property accepts)")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetActorProperty(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "spawn_blueprint_actor", "editor", "Spawn an instance of a Blueprint class in the level.",
@@ -145,7 +152,7 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParamOpt(TEXT("location"), TEXT("array"), TEXT("[X, Y, Z] world location")),
             MCPParamOpt(TEXT("rotation"), TEXT("array"), TEXT("[Pitch, Yaw, Roll] world rotation")),
             MCPParamOpt(TEXT("scale"), TEXT("array"), TEXT("[X, Y, Z] scale")),
-        }), MCPFlags(),
+        }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSpawnBlueprintActor(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "focus_viewport", "editor", "Point the level viewport at an actor or a location.",
@@ -158,10 +165,11 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleFocusViewport(Params); });
 
     // Queued onto the GameThread when called over the python loopback, hence the flag.
-    MCP_REGISTER_COMMAND(Registry, "take_screenshot", "editor", "Save a PNG to disk: source=level_viewport (default) reads the active level viewport backbuffer (no PIE, no UMG); source=pie takes a Slate screenshot of the PIE game viewport widget, which includes UMG; source=asset_editor reads an asset editor's preview viewport (Persona, material editor, ...) - with asset_path it focuses that asset's editor first, without it the focused asset editor viewport is used. The reply also carries the camera pose (camera.location/rotation/fov/viewport_size), which is what makes two captures comparable: equal camera means a pixel-level A/B is meaningful. pie and asset_editor are for triage only, never an acceptance verdict.",
+    MCP_REGISTER_COMMAND(Registry, "take_screenshot", "editor", "Save a PNG to disk. source=level_viewport (default) reads a level viewport backbuffer (no UMG; it keeps working while PIE runs, because the level viewport is picked by world identity, not by being the active viewport); source=pie reads the PIE game viewport backbuffer, and route picks between its two routes: auto (default, backbuffer first), viewport (backbuffer only) and slate (a Slate screenshot of the game viewport widget). Slate is the only route that contains UMG and it needs the editor window on screen, so auto alone can never show a widget - pass route=slate for that; the reply says which one ran in captured_via (pie_viewport_readback / pie_slate) plus includes_umg; source=asset_editor reads an asset editor's preview viewport (Persona, material editor, ...) - with asset_path it focuses that asset's editor first, without it the focused asset editor viewport is used. A UMG designer has no scene viewport at all, so for a Widget Blueprint the route is the designer preview's own Slate widget instead (captured_via=widget_preview_slate, includes_umg=true) - that is the asset's design, with the designer's own outlines painted over it (includes_editor_overlay=true; use source=pie route=slate for pixels without them). The reply also carries the camera pose (camera.location/rotation/fov/viewport_size), which is what makes two captures comparable: equal camera means a pixel-level A/B is meaningful; a widget preview capture has no camera and reports it as null. pie and asset_editor are for triage only, never an acceptance verdict.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("filepath"), TEXT("string"), TEXT("Output file path (.png appended when missing)")),
             MCPParamOpt(TEXT("source"), TEXT("string"), TEXT("level_viewport (default), pie or asset_editor")),
+            MCPParamOpt(TEXT("route"), TEXT("string"), TEXT("With source=pie: auto (default), viewport (backbuffer only, no UMG) or slate (the only route that includes UMG)")),
             MCPParamOpt(TEXT("asset_path"), TEXT("string"), TEXT("With source=asset_editor: the asset whose editor to capture (its editor is focused; it is never opened for you)")),
         }), MCPFlags(/*bLoopbackForbidden=*/true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleTakeScreenshot(Params); });
@@ -483,6 +491,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorTransform(const 
     }
 
     // Set the new transform
+    FUnrealMCPCommonUtils::MarkActorModified(TargetActor);
     TargetActor->SetActorTransform(NewTransform);
 
     // Return updated actor info
@@ -563,25 +572,116 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorProperty(const T
     }
     
     TSharedPtr<FJsonValue> PropertyValue = Params->Values.FindRef(TEXT("property_value"));
-    
+
+    // `Component.Property`: the properties callers reach for first (light intensity, camera FOV, a static
+    // mesh, component visibility) live on the COMPONENT, and set_component_property is no substitute - it
+    // writes a Blueprint's SCS template and has no answer for an actor already standing in the level
+    // (measured 2026-10-09: `intensity` -> "Property not found: intensity", and the only route that worked
+    // was python: get_component_by_class(DirectionalLightComponent).set_intensity()).
+    UObject* WriteTarget = TargetActor;
+    FString LookupName = PropertyName;
+    FString ComponentSelector;
+    FString DottedName;
+    if (PropertyName.Split(TEXT("."), &ComponentSelector, &DottedName) && !ComponentSelector.IsEmpty() && !DottedName.IsEmpty())
+    {
+        UActorComponent* Component = FUnrealMCPCommonUtils::FindActorComponentBySelector(TargetActor, ComponentSelector);
+        if (!Component)
+        {
+            TArray<FString> Components;
+            FUnrealMCPCommonUtils::DescribeActorComponents(TargetActor, Components);
+            TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("component_not_found"),
+                FString::Printf(TEXT("'%s' is not a component of '%s'"), *ComponentSelector, *ActorName));
+            FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("components"), Components);
+            Response->SetStringField(TEXT("hint"),
+                TEXT("the part before the dot is a component: its object name or its class name (U prefix and "
+                     "'Component' suffix optional)"));
+            return Response;
+        }
+        WriteTarget = Component;
+        LookupName = DottedName;
+    }
+
     // Set the property using our utility function
     FString ErrorMessage;
-    if (FUnrealMCPCommonUtils::SetObjectProperty(TargetActor, PropertyName, PropertyValue, ErrorMessage))
+    FString ErrorCode;
+    FUnrealMCPCommonUtils::MarkActorModified(TargetActor);
+    if (FUnrealMCPCommonUtils::SetObjectProperty(WriteTarget, LookupName, PropertyValue, ErrorMessage,
+                                                 nullptr, &ErrorCode))
     {
         // Property set successfully
         TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
         ResultObj->SetStringField(TEXT("actor"), ActorName);
         ResultObj->SetStringField(TEXT("property"), PropertyName);
+        if (WriteTarget != TargetActor)
+        {
+            // Which component it landed on: the selector was matched, not echoed, so say what matched.
+            ResultObj->SetStringField(TEXT("component"), WriteTarget->GetName());
+        }
         ResultObj->SetBoolField(TEXT("success"), true);
-        
+
+        // Read back from the object the write landed on: a `UPROPERTY(Setter = ...)` field is often only a
+        // mirror of the state the engine reads, so "the call succeeded" has to stay separable from "the
+        // value is what was asked for" (see the Setter note on InvokePropertySetter).
+        if (FProperty* Written = FUnrealMCPCommonUtils::FindPropertyByNameNormalized(WriteTarget->GetClass(), LookupName))
+        {
+            if (TSharedPtr<FJsonValue> ValueAfter = FUnrealMCPCommonUtils::PropertyValueToJson(
+                    Written, Written->ContainerPtrToValuePtr<void>(WriteTarget)))
+            {
+                ResultObj->SetField(TEXT("property_value_after"), ValueAfter);
+            }
+        }
+
         // Also include the full actor details
         ResultObj->SetObjectField(TEXT("actor_details"), FUnrealMCPCommonUtils::ActorToJsonObject(TargetActor, true));
         return ResultObj;
     }
-    else
+
+    // Failure: answer with a ROUTE, not just the reason. Attached below: this actor's components, and - for
+    // every component that owns a property resembling the request - the dotted path that does work.
+    const FString MissCode = ErrorCode.IsEmpty() ? FString(TEXT("write_failed")) : ErrorCode;
+    TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(MissCode, ErrorMessage);
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(ErrorMessage);
+        TArray<FString> Components;
+        FUnrealMCPCommonUtils::DescribeActorComponents(TargetActor, Components);
+        FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("components"), Components);
+
+        TArray<UActorComponent*> AllComponents;
+        TargetActor->GetComponents(AllComponents);
+        TArray<TSharedPtr<FJsonValue>> Paths;
+        for (UActorComponent* Component : AllComponents)
+        {
+            if (!Component)
+            {
+                continue;
+            }
+
+            // FindPropertyByNameNormalized, NOT FindPropertyNameSuggestions: the latter returns nothing when
+            // the property exists under another spelling (FName comparison is case-insensitive, so "intensity"
+            // already counts as found next to `Intensity`) - and the spelling is exactly what a dotted path
+            // needs. This is the case that matters: the property IS on the component, the caller just could
+            // not reach it from the actor.
+            FProperty* Match = FUnrealMCPCommonUtils::FindPropertyByNameNormalized(Component->GetClass(), LookupName);
+            if (!Match)
+            {
+                continue;
+            }
+
+            TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetStringField(TEXT("component"), Component->GetName());
+            Entry->SetStringField(TEXT("component_class"), Component->GetClass()->GetName());
+            Entry->SetStringField(TEXT("path"),
+                FString::Printf(TEXT("%s.%s"), *Component->GetName(), *Match->GetName()));
+            Paths.Add(MakeShared<FJsonValueObject>(Entry));
+        }
+
+        if (Paths.Num() > 0)
+        {
+            Response->SetArrayField(TEXT("component_property_paths"), Paths);
+            Response->SetStringField(TEXT("hint"),
+                TEXT("this property is on a component, not on the actor: write '<component>.<property>'"));
+        }
     }
+    return Response;
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(const TSharedPtr<FJsonObject>& Params)
@@ -615,6 +715,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
     FVector Location(0.0f, 0.0f, 0.0f);
     FRotator Rotation(0.0f, 0.0f, 0.0f);
     FVector Scale(1.0f, 1.0f, 1.0f);
+    bool bHasScale = false;
 
     if (Params->HasField(TEXT("location")))
     {
@@ -627,6 +728,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
     if (Params->HasField(TEXT("scale")))
     {
         Scale = FUnrealMCPCommonUtils::GetVectorFromJson(Params, TEXT("scale"));
+        bHasScale = true;
     }
 
     // Spawn the actor
@@ -654,6 +756,17 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
     AActor* NewActor = World->SpawnActor<AActor>(Blueprint->GeneratedClass, SpawnTransform, SpawnParams);
     if (NewActor)
     {
+        // The spawn transform's scale does NOT survive for a Blueprint actor: its root component comes from
+        // the SCS, so the engine's own handling (Actor.cpp:3858-3870, and the FinishSpawning path it takes
+        // when there is no native root) rebuilds the root from the template and the requested scale is lost -
+        // measured 2026-10-09: scale [1.4,1.4,1.4] came back (1,1,1) while location and rotation were exact.
+        // spawn_actor re-applies the whole transform for the same reason. Here only the scale is re-applied,
+        // so the location/rotation a construction script or a parent class may have authored are left alone.
+        if (bHasScale)
+        {
+            NewActor->SetActorScale3D(Scale);
+        }
+
         // Set the actor label so the Outliner shows the requested name
         NewActor->SetActorLabel(*ActorName);
         return FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
@@ -693,20 +806,54 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSha
         HasOrientation = true;
     }
 
-    // Get the active viewport
-    FLevelEditorViewportClient* ViewportClient = (FLevelEditorViewportClient*)GEditor->GetActiveViewport()->GetClient();
+    // Pick the client from GEditor's own editor clients - never from the "active" viewport, whose client is
+    // a UGameViewportClient while PIE runs (a C-style cast of that pointer then reads through garbage; this
+    // handler had the same shape as the 2026-10-09 take_screenshot crash). Level viewports are the ones
+    // whose world IS the editor world; focus decides between several.
+    UWorld* EditorWorld = GEditor
+        ? GEditor->GetEditorWorldContext(/*bEnsureIsGWorld=*/ false).World() : nullptr;
+    TArray<FEditorViewportClient*> EditorClients;
+    if (GEditor)
+    {
+        EditorClients = GEditor->GetAllViewportClients();
+    }
+    FEditorViewportClient* ViewportClient = nullptr;
+    for (FEditorViewportClient* Candidate : EditorClients)
+    {
+        if (!Candidate || !Candidate->Viewport
+            || Candidate->Viewport->GetSizeXY().X <= 0 || Candidate->Viewport->GetSizeXY().Y <= 0)
+        {
+            continue;
+        }
+        if (EditorWorld && Candidate->GetWorld() != EditorWorld)
+        {
+            continue;
+        }
+        if (!ViewportClient || Candidate->Viewport->HasFocus())
+        {
+            ViewportClient = Candidate;
+        }
+        if (Candidate->Viewport->HasFocus())
+        {
+            break;
+        }
+    }
     if (!ViewportClient)
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to get active viewport"));
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_editor_viewport"),
+            TEXT("No editor level viewport is available to focus"));
+        Error->SetStringField(TEXT("hint"), TEXT("Open a level viewport (Window > Viewports) and retry"));
+        return Error;
     }
 
     // If we have a target actor, focus on it
     if (HasTargetActor)
     {
-        // Find the actor
+        // Find the actor. The editor world, not GWorld: while PIE runs GWorld is the play world, and the
+        // viewport being moved shows the editor world.
         AActor* TargetActor = nullptr;
         TArray<AActor*> AllActors;
-        UGameplayStatics::GetAllActorsOfClass(GWorld, AActor::StaticClass(), AllActors);
+        UGameplayStatics::GetAllActorsOfClass(EditorWorld ? EditorWorld : GWorld, AActor::StaticClass(), AllActors);
         
         for (AActor* Actor : AllActors)
         {
@@ -778,6 +925,28 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         return Error;
     }
 
+    // Which route inside a source is used. Only meaningful for source=pie, where two routes exist: the
+    // game viewport backbuffer (works unattended, never contains UMG) and a Slate screenshot of the game
+    // viewport widget (the only route with UMG pixels, but it needs the editor window on screen). "auto"
+    // keeps the historical order (backbuffer first) - which means UMG was UNREACHABLE, because the
+    // backbuffer succeeded and returned early (measured 2026-10-10: captured_via=pie_viewport_readback,
+    // includes_umg=false, while the widget was in the viewport). "slate" forces the Slate route.
+    FString Route = TEXT("auto");
+    Params->TryGetStringField(TEXT("route"), Route);
+    if (Route != TEXT("auto") && Route != TEXT("viewport") && Route != TEXT("slate"))
+    {
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
+            FString::Printf(TEXT("Unknown route '%s'; use auto, viewport or slate"), *Route));
+        TArray<TSharedPtr<FJsonValue>> Routes;
+        Routes.Add(MakeShared<FJsonValueString>(TEXT("auto")));
+        Routes.Add(MakeShared<FJsonValueString>(TEXT("viewport")));
+        Routes.Add(MakeShared<FJsonValueString>(TEXT("slate")));
+        Error->SetArrayField(TEXT("candidates"), Routes);
+        Error->SetStringField(TEXT("hint"),
+            TEXT("route=slate is the only one that includes UMG; route=viewport reads the scene only"));
+        return Error;
+    }
+
     // Two screenshots are only comparable pixel by pixel if they were taken from the same camera, and the
     // caller cannot know that: the viewport camera moves whenever a human moves it. Measured 2026-10-02:
     // an A/B pair silently stopped being comparable, and the difference was attributed to the change under
@@ -812,8 +981,12 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
 
     auto SavePng = [&FilePath, &Source, &CameraJson](int32 Width, int32 Height, const TArray<FColor>& Pixels) -> TSharedPtr<FJsonObject>
     {
-        TArray<uint8> CompressedBitmap;
-        FImageUtils::CompressImageArray(Width, Height, Pixels, CompressedBitmap);
+        // PNGCompressImageArray, NOT the deprecated CompressImageArray: the latter forwards to
+        // ThumbnailCompressImageArray, which writes a JPEG - so every capture was a JPEG byte stream in a
+        // .png file (measured 2026-10-09: the file started FF D8 FF E0 ... JFIF, and a caller checking the
+        // PNG magic declared the capture broken). See Docs/MCP_Tool_Defects_2026-10-09.md D3.
+        TArray64<uint8> CompressedBitmap;
+        FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels), CompressedBitmap);
         if (!FFileHelper::SaveArrayToFile(CompressedBitmap, *FilePath))
         {
             return nullptr;
@@ -823,6 +996,11 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         ResultObj->SetNumberField(TEXT("width"), Width);
         ResultObj->SetNumberField(TEXT("height"), Height);
         ResultObj->SetStringField(TEXT("source"), Source);
+        // Which pixels are scene and which are the EDITOR's own overlay. The level viewport (and an asset
+        // editor's preview viewport) paint sprite icons, the grid and the axis gizmo into the image, and a
+        // caller that does not know that reads them as scene content - a DirectionalLight sprite was taken
+        // for a VFX dome, a PlayerStart star for an effect. PIE's backbuffer and Slate routes have neither.
+        ResultObj->SetBoolField(TEXT("includes_editor_overlay"), Source != TEXT("pie"));
         ResultObj->SetObjectField(TEXT("camera"), CameraJson);
         // 回传文件大小，供客户端做黑帧/空帧校验（过小则重试）
         const int64 FileSize = IFileManager::Get().FileSize(*FilePath);
@@ -831,6 +1009,38 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
             ResultObj->SetNumberField(TEXT("file_size"), (double)FileSize);
         }
         return ResultObj;
+    };
+
+    // Read pixels out of ANY viewport (editor viewport, asset editor preview, or the PIE game viewport).
+    // Deliberately does not touch FEditorViewportClient: the game viewport's client is a UGameViewportClient,
+    // and that mismatch is what produced the 2026-10-09 access violation. Nothing here casts a client.
+    auto CaptureViewportPixels = [](FViewport* Viewport, TArray<FColor>& OutBitmap, FIntRect& OutRect) -> bool
+    {
+        if (!Viewport)
+        {
+            return false;
+        }
+
+        // 强制重绘：非实时视口的 backbuffer 是陈旧的（材质改完后截图字节完全不变的元凶）。
+        if (GEditor)
+        {
+            for (FEditorViewportClient* Client : GEditor->GetAllViewportClients())
+            {
+                if (Client)
+                {
+                    Client->SetRealtime(true);
+                    Client->Invalidate();
+                }
+            }
+        }
+        Viewport->Draw();
+
+        OutRect = FIntRect(0, 0, Viewport->GetSizeXY().X, Viewport->GetSizeXY().Y);
+        if (OutRect.Width() <= 0 || OutRect.Height() <= 0)
+        {
+            return false;
+        }
+        return Viewport->ReadPixels(OutBitmap, FReadSurfaceDataFlags(), OutRect);
     };
 
     // Shared capture for an editor viewport client (the level viewport or an asset editor's preview
@@ -843,32 +1053,22 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
             return nullptr;
         }
 
-        // 强制重绘：非实时视口的 backbuffer 是陈旧的（材质改完后截图字节完全不变的元凶）。
-        for (FEditorViewportClient* Client : GEditor->GetAllViewportClients())
-        {
-            if (Client)
-            {
-                Client->SetRealtime(true);
-                Client->Invalidate();
-            }
-        }
-        Viewport->Draw();
-
-        CameraJson = MakeCameraJson(ViewportClient->GetViewLocation(), ViewportClient->GetViewRotation(),
-            ViewportClient->ViewFOV, Viewport->GetSizeXY());
-
         TArray<FColor> Bitmap;
-        FIntRect ViewportRect(0, 0, Viewport->GetSizeXY().X, Viewport->GetSizeXY().Y);
-        if (ViewportRect.Width() > 0 && ViewportRect.Height() > 0
-            && Viewport->ReadPixels(Bitmap, FReadSurfaceDataFlags(), ViewportRect))
+        FIntRect ViewportRect;
+        if (CaptureViewportPixels(Viewport, Bitmap, ViewportRect))
         {
+            CameraJson = MakeCameraJson(ViewportClient->GetViewLocation(), ViewportClient->GetViewRotation(),
+                ViewportClient->ViewFOV, Viewport->GetSizeXY());
             return SavePng(ViewportRect.Width(), ViewportRect.Height(), Bitmap);
         }
         return nullptr;
     };
 
     // PIE: UMG is composited by Slate on top of the game viewport widget, not drawn into the scene
-    // backbuffer, so it is only in a Slate screenshot of that widget.
+    // backbuffer, so it is only in a Slate screenshot of that widget. Slate can only paint a window that
+    // is on screen, which makes it useless for an unattended run - so the game viewport's own backbuffer
+    // is read back first (same API the level viewport path uses), and Slate is kept as the fallback that
+    // is the only source of UMG pixels.
     if (Source == TEXT("pie"))
     {
         UWorld* PlayWorld = GEditor ? GEditor->PlayWorld.Get() : nullptr;
@@ -880,13 +1080,43 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
             return Error;
         }
         UGameViewportClient* GameViewport = PlayWorld->GetGameViewport();
+        FViewport* PieViewport = GameViewport ? GameViewport->Viewport : nullptr;
+
+        // Path 1: the game viewport's backbuffer. Works with a minimized editor window; does NOT contain UMG.
+        // route=slate skips it, otherwise it always wins (it succeeds whenever PIE has a viewport, which is
+        // why the Slate route below used to be dead code).
+        if (PieViewport && Route != TEXT("slate"))
+        {
+            TArray<FColor> Bitmap;
+            FIntRect ViewportRect;
+            if (CaptureViewportPixels(PieViewport, Bitmap, ViewportRect))
+            {
+                // The PIE camera, not the editor viewport one: they are unrelated while a session runs.
+                if (const APlayerController* PlayerController = PlayWorld->GetFirstPlayerController())
+                {
+                    if (const APlayerCameraManager* CameraManager = PlayerController->PlayerCameraManager)
+                    {
+                        CameraJson = MakeCameraJson(CameraManager->GetCameraLocation(), CameraManager->GetCameraRotation(),
+                            CameraManager->GetFOVAngle(), PieViewport->GetSizeXY());
+                    }
+                }
+                if (TSharedPtr<FJsonObject> Saved = SavePng(ViewportRect.Width(), ViewportRect.Height(), Bitmap))
+                {
+                    Saved->SetStringField(TEXT("captured_via"), TEXT("pie_viewport_readback"));
+                    Saved->SetBoolField(TEXT("includes_umg"), false);
+                    return Saved;
+                }
+            }
+        }
+
         TSharedPtr<SViewport> ViewportWidget = GameViewport ? GameViewport->GetGameViewportWidget() : nullptr;
         if (!ViewportWidget.IsValid() || !FSlateApplication::IsInitialized()
             || !FSlateApplication::Get().FindWidgetWindow(ViewportWidget.ToSharedRef()).IsValid())
         {
             TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("pie_not_ready"),
-                TEXT("The PIE game viewport widget is not available yet"));
+                TEXT("Neither the PIE game viewport backbuffer nor its Slate widget is available yet"));
             Error->SetStringField(TEXT("hint"), TEXT("PIE is still starting; retry in a later call"));
+            Error->SetBoolField(TEXT("viewport_backbuffer_readable"), PieViewport != nullptr);
             return Error;
         }
 
@@ -900,8 +1130,8 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
             {
                 if (const APlayerCameraManager* CameraManager = PlayerController->PlayerCameraManager)
                 {
-                    const FIntPoint ViewportSize = GameViewport && GameViewport->Viewport
-                        ? GameViewport->Viewport->GetSizeXY()
+                    const FIntPoint ViewportSize = PieViewport
+                        ? PieViewport->GetSizeXY()
                         : FIntPoint(Size.X, Size.Y);
                     CameraJson = MakeCameraJson(CameraManager->GetCameraLocation(), CameraManager->GetCameraRotation(),
                         CameraManager->GetFOVAngle(), ViewportSize);
@@ -910,23 +1140,28 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
 
             if (TSharedPtr<FJsonObject> Saved = SavePng(Size.X, Size.Y, Pixels))
             {
+                Saved->SetStringField(TEXT("captured_via"), TEXT("pie_slate"));
+                Saved->SetBoolField(TEXT("includes_umg"), true);
                 return Saved;
             }
         }
 
         // Slate only has pixels for a window that is actually on screen: an unfocused or minimized
-        // editor yields a zero-sized capture. Say which it was instead of a bare failure.
+        // editor yields a zero-sized capture. Say which it was instead of a bare failure, and report both
+        // paths so the caller knows the backbuffer route is the one that was supposed to work unattended.
         TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("pie_screenshot_failed"),
-            TEXT("Slate could not capture the PIE game viewport widget"));
+            TEXT("Neither the PIE game viewport backbuffer nor the Slate widget could be captured"));
         Error->SetNumberField(TEXT("captured_width"), Size.X);
         Error->SetNumberField(TEXT("captured_height"), Size.Y);
+        Error->SetBoolField(TEXT("viewport_backbuffer_readable"), PieViewport != nullptr);
         if (WidgetWindow.IsValid())
         {
             Error->SetBoolField(TEXT("window_visible"), WidgetWindow->IsVisible());
             Error->SetBoolField(TEXT("window_minimized"), WidgetWindow->IsWindowMinimized());
         }
         Error->SetStringField(TEXT("hint"),
-            TEXT("The PIE window has to be on screen and not minimized for Slate to paint it; bring the editor window to the front and retry"));
+            TEXT("The backbuffer route needs a live PIE game viewport (retry a few frames after start_pie); "
+                 "the Slate route needs the editor window on screen and not minimized"));
         return Error;
     }
 
@@ -968,6 +1203,69 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
 
             EditorInstance->FocusWindow(Asset);
             EditorName = EditorInstance->GetEditorName().ToString();
+
+            // A UMG designer has NO scene viewport: its preview is a pure Slate widget tree, so the
+            // viewport scan below cannot find it and instead settles on an UNRELATED editor viewport,
+            // reporting success for an image of something else (measured 2026-10-10:
+            // /Game/UI/Inventory/WBP_InventoryPanel resolved to "521x448 world=World_5"). The design is
+            // only in the preview widget's own pixels, so capture those.
+            if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Asset))
+            {
+                FWidgetBlueprintEditor* WidgetEditor = FindWidgetBlueprintEditor(WidgetBlueprint);
+                UUserWidget* Preview = WidgetEditor ? WidgetEditor->GetPreview() : nullptr;
+                TSharedPtr<SWidget> PreviewWidget = Preview ? Preview->GetCachedWidget() : nullptr;
+
+                if (!PreviewWidget.IsValid() || !FSlateApplication::IsInitialized())
+                {
+                    TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(
+                        TEXT("widget_preview_unavailable"),
+                        TEXT("the widget blueprint's designer preview has no Slate widget to capture yet"));
+                    Error->SetStringField(TEXT("asset_path"), RequestedAssetPath);
+                    Error->SetStringField(TEXT("editor_name"), EditorName);
+                    Error->SetBoolField(TEXT("editor_open"), WidgetEditor != nullptr);
+                    Error->SetBoolField(TEXT("has_preview"), Preview != nullptr);
+                    Error->SetStringField(TEXT("hint"),
+                        TEXT("open the designer (open_umg_designer) and retry in a later call - the preview "
+                             "widget is created on a frame after the editor opens"));
+                    return Error;
+                }
+
+                TArray<FColor> PreviewPixels;
+                FIntVector PreviewSize;
+                if (FSlateApplication::Get().TakeScreenshot(PreviewWidget.ToSharedRef(), PreviewPixels, PreviewSize)
+                    && PreviewSize.X > 0 && PreviewSize.Y > 0)
+                {
+                    if (TSharedPtr<FJsonObject> Saved = SavePng(PreviewSize.X, PreviewSize.Y, PreviewPixels))
+                    {
+                        Saved->SetStringField(TEXT("captured_via"), TEXT("widget_preview_slate"));
+                        Saved->SetBoolField(TEXT("includes_umg"), true);
+                        // TRUE, and measured: Slate's TakeScreenshot renders the widget's WINDOW REGION,
+                        // so anything the designer paints on top of the preview area is in the pixels too.
+                        // The same widget captured through PIE (route=slate) has no dashed outlines while
+                        // this route does, so those outlines are the designer's, not the widget's brush
+                        // (measured 2026-10-10).
+                        Saved->SetBoolField(TEXT("includes_editor_overlay"), true);
+                        Saved->SetStringField(TEXT("editor_name"), EditorName);
+                        Saved->SetStringField(TEXT("resolved_widget"),
+                            Preview->GetClass() ? Preview->GetClass()->GetName() : FString());
+                        Saved->SetStringField(TEXT("resolved_viewport"), FString::Printf(TEXT("%dx%d widget_preview"),
+                            PreviewSize.X, PreviewSize.Y));
+                        return Saved;
+                    }
+                }
+
+                TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(
+                    TEXT("widget_preview_screenshot_failed"),
+                    TEXT("the widget preview widget returned no pixels"));
+                Error->SetStringField(TEXT("asset_path"), RequestedAssetPath);
+                Error->SetNumberField(TEXT("captured_width"), PreviewSize.X);
+                Error->SetNumberField(TEXT("captured_height"), PreviewSize.Y);
+                Error->SetStringField(TEXT("hint"),
+                    TEXT("Slate can only paint an on-screen window: bring the editor window up (not minimized) "
+                         "and retry; if the designer view is stale or was moved around, close and reopen the "
+                         "asset editor (close_asset_editors + open_umg_designer) and retry"));
+                return Error;
+            }
         }
 
         // Level viewports are the ones whose world IS the editor world; everything else is an asset
@@ -1039,22 +1337,73 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
         return Error;
     }
 
-    // Get the active viewport
-    if (GEditor && GEditor->GetActiveViewport())
+    // Level viewport. NOT the "active" viewport: while PIE runs the active one is the game viewport, whose
+    // client is a UGameViewportClient - and FEditorViewportClient is not a UObject, so there is no Cast<> to
+    // fall back on. A raw static_cast of that client handed back a bogus pointer and GetViewLocation() read
+    // through it: EXCEPTION_ACCESS_VIOLATION reading 0xffffffffffffffff (measured 2026-10-09, the callstack
+    // pointed at the camera read). So the candidates come from GEditor's own editor clients only, and the
+    // level viewports are the ones whose world IS the editor world (an asset editor's preview viewport is
+    // also an FEditorViewportClient, which is why world identity, not "is focused", is the filter).
     {
-        FViewport* Viewport = GEditor->GetActiveViewport();
-
-        // FEditorViewportClient is not a UObject, so this is a static_cast, not a Cast<>.
-        if (FEditorViewportClient* ViewportClient = static_cast<FEditorViewportClient*>(Viewport->GetClient()))
+        UWorld* EditorWorld = GEditor
+            ? GEditor->GetEditorWorldContext(/*bEnsureIsGWorld=*/ false).World() : nullptr;
+        TArray<FEditorViewportClient*> EditorClients;
+        if (GEditor)
         {
-            if (TSharedPtr<FJsonObject> Saved = CaptureEditorViewport(ViewportClient, Viewport))
+            EditorClients = GEditor->GetAllViewportClients();
+        }
+        FEditorViewportClient* Chosen = nullptr;
+        FEditorViewportClient* Focused = nullptr;
+        for (FEditorViewportClient* Candidate : EditorClients)
+        {
+            if (!Candidate || !Candidate->Viewport
+                || Candidate->Viewport->GetSizeXY().X <= 0 || Candidate->Viewport->GetSizeXY().Y <= 0)
             {
+                continue;
+            }
+            if (EditorWorld && Candidate->GetWorld() != EditorWorld)
+            {
+                continue;
+            }
+            if (!Chosen)
+            {
+                Chosen = Candidate;
+            }
+            if (Candidate->Viewport->HasFocus())
+            {
+                Focused = Candidate;
+                break;
+            }
+        }
+
+        if (Focused)
+        {
+            Chosen = Focused;
+        }
+        if (Chosen)
+        {
+            if (TSharedPtr<FJsonObject> Saved = CaptureEditorViewport(Chosen, Chosen->Viewport))
+            {
+                Saved->SetStringField(TEXT("captured_via"), TEXT("level_viewport_readback"));
+                Saved->SetBoolField(TEXT("includes_umg"), false);
                 return Saved;
             }
         }
-    }
 
-    return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to take screenshot"));
+        // No readable editor viewport is the only refusal left. The code is kept for callers that already
+        // branch on it, but its meaning is now narrow: while PIE runs there is normally a level viewport to
+        // read, so this fires when the editor has none at all.
+        const bool bPieRunning = GEditor && GEditor->PlayWorld != nullptr;
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(
+            bPieRunning ? TEXT("pie_running") : TEXT("no_editor_viewport"),
+            bPieRunning
+                ? TEXT("No editor viewport could be read while PIE runs")
+                : TEXT("No editor viewport is available to read"));
+        Error->SetStringField(TEXT("hint"), bPieRunning
+            ? TEXT("Retry after a frame; for the game's own pixels use source=\"pie\"")
+            : TEXT("Click into a level viewport and retry"));
+        return Error;
+    }
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetConsoleVariable(const TSharedPtr<FJsonObject>& Params)
@@ -1402,6 +1751,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorLocationSafe(con
 
     // Sweep/teleport are the whole point of this command: set_actor_transform moves the actor
     // without touching collision or physics.
+    FUnrealMCPCommonUtils::MarkActorModified(TargetActor);
     const bool bMoved = TargetActor->SetActorLocation(NewLocation, bSweep, nullptr,
         bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None);
 
@@ -1447,6 +1797,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorCustomDepthSafe(
 
     // Write both properties through the engine accessors (they mark the render state dirty) rather
     // than through reflection, so the stencil reaches the renderer without a second poke.
+    FUnrealMCPCommonUtils::MarkActorModified(TargetActor);
     TArray<UPrimitiveComponent*> Components;
     TargetActor->GetComponents<UPrimitiveComponent>(Components);
     for (UPrimitiveComponent* Component : Components)

@@ -63,6 +63,7 @@
 #include "Commands/Asset/UnrealMCPAssetCommands.h"
 #include "Commands/Asset/UnrealMCPAssetEditCommands.h"
 #include "Commands/Particle/UnrealMCPParticleCommands.h"
+#include "Commands/Niagara/UnrealMCPNiagaraCommands.h"
 #include "Commands/PCG/UnrealMCPPCGCommands.h"
 #include "Commands/Animation/UnrealMCPAnimationCommands.h"
 #include "Commands/Clothing/UnrealMCPClothCommands.h"
@@ -107,6 +108,7 @@ UUnrealMCPBridge::UUnrealMCPBridge()
     AssetCommands = MakeShared<FUnrealMCPAssetCommands>();
     AssetEditCommands = MakeShared<FUnrealMCPAssetEditCommands>();
     ParticleCommands = MakeShared<FUnrealMCPParticleCommands>();
+    NiagaraCommands = MakeShared<FUnrealMCPNiagaraCommands>();
     AnimationCommands = MakeShared<FUnrealMCPAnimationCommands>();
     PCGCommands = MakeShared<FUnrealMCPPCGCommands>();
     ReflectionCommands = MakeShared<FUnrealMCPReflectionCommands>();
@@ -128,6 +130,7 @@ UUnrealMCPBridge::~UUnrealMCPBridge()
     AssetCommands.Reset();
     AssetEditCommands.Reset();
     ParticleCommands.Reset();
+    NiagaraCommands.Reset();
     AnimationCommands.Reset();
     PCGCommands.Reset();
     PIECommands.Reset();
@@ -207,6 +210,7 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
     AssetCommands->RegisterCommands(Registry);
     AssetEditCommands->RegisterCommands(Registry);
     ParticleCommands->RegisterCommands(Registry);
+    NiagaraCommands->RegisterCommands(Registry);
     AnimationCommands->RegisterCommands(Registry);
     PCGCommands->RegisterCommands(Registry);
     ReflectionCommands->RegisterCommands(Registry);

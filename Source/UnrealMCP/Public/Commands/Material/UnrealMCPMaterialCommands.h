@@ -48,4 +48,5 @@ private:
     TSharedPtr<FJsonObject> HandleAddCustomInput(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveCustomInput(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleBuildMaterialPreview(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleReadRenderTargetStats(const TSharedPtr<FJsonObject>& Params);
 };

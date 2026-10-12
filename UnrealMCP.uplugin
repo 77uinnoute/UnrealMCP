@@ -35,9 +35,13 @@
 			"Name": "PythonScriptPlugin",
 			"Enabled": true
 		},
-		{
-			"Name": "PCG",
-			"Enabled": true
-		}
+			{
+				"Name": "PCG",
+				"Enabled": true
+			},
+			{
+				"Name": "Niagara",
+				"Enabled": true
+			}
 	]
 } 

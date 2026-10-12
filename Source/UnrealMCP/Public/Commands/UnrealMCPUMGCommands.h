@@ -212,6 +212,25 @@ private:
     TSharedPtr<FJsonObject> HandleSetUMGDesignSize(const TSharedPtr<FJsonObject>& Params);
 
     /**
+     * Write the designer's own view settings (dashed outlines / grid snapping).
+     * Project-wide user settings, not per asset: there is no blueprint_name.
+     * @param Params - At least one of "show_outlines" / "grid_snap_enabled" / "grid_snap_size"; optional "save"
+     * @return JSON response with applied[] before/after, the config section and whether it was saved
+     */
+    TSharedPtr<FJsonObject> HandleSetUMGDesignerOverlay(const TSharedPtr<FJsonObject>& Params);
+
+    /**
+     * Write the brush of a Border (Background) or Image (Brush) with a proper image size.
+     * Python cannot do this: FSlateBrush::ImageSize is an FDeprecateSlateVector2D, which python
+     * cannot construct, so a script-side brush keeps Slate's default 32x32 with no way to change it.
+     * Measured limit: draw_as=Box on a Border drew nothing at image_size 32 and 64 (the same widget
+     * renders with draw_as=Image), so the 9-slice modes stay unverified.
+     * @param Params - Must include "blueprint_name" and "widget_name"; optional resource / draw_as / margin / image_size / tint / color
+     * @return JSON response with applied[] (per key before/after) and the brush read back
+     */
+    TSharedPtr<FJsonObject> HandleSetWidgetBrush(const TSharedPtr<FJsonObject>& Params);
+
+    /**
      * Play an animation in the designer preview (preview instance only, never the asset).
      * @param Params - Must include "blueprint_name" and "animation_name"
      * @return JSON response with playing / preview_animation_name / playback_context

@@ -43,6 +43,14 @@ struct FMCPCommandFlags
      * that used to consult FUnrealMCPCommonUtils::IsPersistedBlueprintCommand() now reads this.
      */
     bool bPersistAfterSuccess = false;
+
+    /**
+     * The command writes the EDITOR world (spawn / delete / move / re-property a level actor). While PIE
+     * runs, the same call lands on the editor world copy and changes nothing the play session renders -
+     * yet the reply used to say plain success, which produced "A/B" captures that were byte-identical.
+     * Dispatch attaches a warning to such a reply while PIE is running (see FMCPCommandRegistry::Execute).
+     */
+    bool bWritesEditorWorld = false;
 };
 
 /** One registered command: the only place its name, parameters and policy are declared. */
@@ -73,6 +81,18 @@ public:
 
     /** Queue one command. Duplicates are resolved (and reported) at Seal(). */
     void Register(FMCPCommandEntry Entry);
+
+    /**
+     * Declare parameters that a whole domain resolves generically, instead of repeating the same spec in
+     * every registration: FUnrealMCPParticleCommands::RunCommand reads `detail` / `fields` / `return_state` /
+     * `include_modules` / `auto_close` for EVERY particle command, so they are part of that domain's contract
+     * but were declared nowhere - reachable and effective, yet invisible to list_mcp_commands and reported as
+     * undeclared by dispatch.
+     *
+     * Only valid while the table is open (i.e. from inside a domain's RegisterCommands, before Seal). Names an
+     * entry already declares are left untouched. Returns the number of entries extended.
+     */
+    int32 AddParamsToCategory(const FString& Category, const TArray<FMCPParamSpec>& ExtraParams);
 
     /**
      * Drop everything and open the table again. Handlers bind to the domain objects that own
@@ -131,13 +151,14 @@ inline FMCPParamSpec MCPParamOpt(const FString& Name, const FString& Type, const
 }
 
 inline FMCPCommandFlags MCPFlags(bool bLoopbackForbidden = false, bool bMutatesGraph = false, bool bHidden = false,
-                                 bool bPersistAfterSuccess = false)
+                                 bool bPersistAfterSuccess = false, bool bWritesEditorWorld = false)
 {
     FMCPCommandFlags Flags;
     Flags.bLoopbackForbidden = bLoopbackForbidden;
     Flags.bMutatesGraph = bMutatesGraph;
     Flags.bHidden = bHidden;
     Flags.bPersistAfterSuccess = bPersistAfterSuccess;
+    Flags.bWritesEditorWorld = bWritesEditorWorld;
     return Flags;
 }
 

@@ -207,8 +207,10 @@ namespace
 
     /** Apply "[i]" (array index) or "[key]" (map key) to a container property. */
     bool ResolveSubscript(FProperty* Property, void* Address, const FString& Subscript, FProperty*& OutProperty,
-                          void*& OutAddress, FString& OutErrorMessage)
+                          void*& OutAddress, FString& OutErrorCode, FString& OutErrorMessage, FString& OutHint)
     {
+        OutErrorCode = TEXT("unknown_field");
+
         if (FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
         {
             if (!Subscript.IsNumeric())
@@ -222,13 +224,22 @@ namespace
             FScriptArrayHelper Helper(ArrayProperty, Address);
             if (!Helper.IsValidIndex(Index))
             {
+                // An out-of-range index is not a "field that does not exist": it has its own code, and the
+                // remedy (write the whole array) is knowable from here, so it is handed over rather than
+                // left for the caller to infer from the message.
+                OutErrorCode = TEXT("index_out_of_range");
                 OutErrorMessage = FString::Printf(TEXT("Index %d is out of range for '%s' (%d elements)"),
                     Index, *Property->GetName(), Helper.Num());
+                OutHint = FString::Printf(
+                    TEXT("Write the whole array instead: property_name=\"%s\", property_value=[...] "
+                         "(the array currently has %d element(s))"),
+                    *Property->GetName(), Helper.Num());
                 return false;
             }
 
             OutProperty = ArrayProperty->Inner;
             OutAddress = Helper.GetRawPtr(Index);
+            OutErrorCode.Empty();
             return true;
         }
 
@@ -249,13 +260,17 @@ namespace
             const int32 Index = FCString::Atoi(*Subscript);
             if (Index < 0 || Index >= Property->ArrayDim)
             {
-                OutErrorMessage = FString::Printf(TEXT("Index %d is out of range for '%s' (%d elements)"),
+                OutErrorCode = TEXT("index_out_of_range");
+                OutErrorMessage = FString::Printf(TEXT("Index %d is out of range for '%s' (%d slots)"),
                     Index, *Property->GetName(), Property->ArrayDim);
+                OutHint = FString::Printf(TEXT("'%s' is a fixed-size array; valid indices are 0..%d"),
+                    *Property->GetName(), Property->ArrayDim - 1);
                 return false;
             }
 
             OutProperty = Property;
             OutAddress = static_cast<uint8*>(Address) + static_cast<int64>(Index) * Property->ElementSize;
+            OutErrorCode.Empty();
             return true;
         }
 
@@ -275,6 +290,7 @@ namespace
                 {
                     OutProperty = MapProperty->ValueProp;
                     OutAddress = Helper.GetValuePtr(Index);
+                    OutErrorCode.Empty();
                     return true;
                 }
             }
@@ -299,11 +315,20 @@ namespace
      */
     bool ResolvePropertyPath(UObject* RootObject, const FString& Path, FProperty*& OutProperty,
                              void*& OutAddress, FString& OutErrorCode, FString& OutErrorMessage,
-                             TArray<FString>& OutCandidates)
+                             TArray<FString>& OutCandidates, FString* OutResolvedPrefix = nullptr,
+                             FString* OutHint = nullptr)
     {
         OutProperty = nullptr;
         OutAddress = nullptr;
         OutCandidates.Reset();
+        if (OutResolvedPrefix)
+        {
+            OutResolvedPrefix->Empty();
+        }
+        if (OutHint)
+        {
+            OutHint->Empty();
+        }
 
         TArray<FPathStep> Steps;
         if (!ParsePropertyPath(Path, Steps, OutErrorMessage))
@@ -333,18 +358,36 @@ namespace
 
             void* Address = Property->ContainerPtrToValuePtr<void>(Base);
 
+            // Every segment that resolves keeps the path readable as a prefix, so a failure can say where
+            // the walk stopped instead of leaving the caller to parse the message.
+            FString Segment = Step.bHasSubscript
+                ? FString::Printf(TEXT("%s[%s]"), *Step.Name, *Step.Subscript)
+                : Step.Name;
+
             if (Step.bHasSubscript)
             {
                 FProperty* ElementProperty = nullptr;
                 void* ElementAddress = nullptr;
-                if (!ResolveSubscript(Property, Address, Step.Subscript, ElementProperty, ElementAddress, OutErrorMessage))
+                FString SubscriptCode;
+                FString SubscriptHint;
+                if (!ResolveSubscript(Property, Address, Step.Subscript, ElementProperty, ElementAddress,
+                        SubscriptCode, OutErrorMessage, SubscriptHint))
                 {
-                    OutErrorCode = TEXT("unknown_field");
+                    OutErrorCode = SubscriptCode.IsEmpty() ? TEXT("unknown_field") : SubscriptCode;
                     OutErrorMessage = FString::Printf(TEXT("%s (path '%s')"), *OutErrorMessage, *Path);
+                    if (OutHint)
+                    {
+                        *OutHint = SubscriptHint;
+                    }
                     return false;
                 }
                 Property = ElementProperty;
                 Address = ElementAddress;
+            }
+
+            if (OutResolvedPrefix)
+            {
+                *OutResolvedPrefix = OutResolvedPrefix->IsEmpty() ? Segment : *OutResolvedPrefix + TEXT(".") + Segment;
             }
 
             if (StepIndex == Steps.Num() - 1)
@@ -592,7 +635,9 @@ void FUnrealMCPReflectionCommands::RegisterCommands(FMCPCommandRegistry& Registr
     MCP_REGISTER_COMMAND(Registry, "set_object_property", "reflection",
         "Write properties on any object (asset, class or sub-object) with one optional save. The object selector "
         "is 'target' - the same word reflect_probe uses, because the two are used as a pair. 'object_path' still "
-        "works as a deprecated alias, and using it is reported back in renamed_params[].",
+        "works as a deprecated alias, and using it is reported back in renamed_params[]. When no write lands "
+        "(written_count == 0) the response is an error carrying the first failure's code / message / hint, with "
+        "the per-item detail in 'data'.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("target"), TEXT("string"), TEXT("Asset, class, or sub-object path to write, e.g. \"/Game/X.X:A.Config\"")),
             MCPParamOpt(TEXT("object_path"), TEXT("string"), TEXT("Deprecated alias of 'target' (same meaning); the response echoes it in renamed_params[]")),
@@ -649,8 +694,10 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleReflectProbe(const T
     void* PropertyAddress = nullptr;
     FString PropertyErrorCode;
     FString PropertyErrorMessage;
+    FString ResolvedPrefix;
+    FString ResolveHint;
     if (!ResolvePropertyPath(TargetObject, PropertyName, Property, PropertyAddress, PropertyErrorCode,
-            PropertyErrorMessage, PropertyCandidates))
+            PropertyErrorMessage, PropertyCandidates, &ResolvedPrefix, &ResolveHint))
     {
         TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(PropertyErrorCode, PropertyErrorMessage);
         TArray<TSharedPtr<FJsonValue>> CandidateValues;
@@ -659,6 +706,16 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleReflectProbe(const T
             CandidateValues.Add(MakeShared<FJsonValueString>(Candidate));
         }
         Error->SetArrayField(TEXT("candidates"), CandidateValues);
+        // The probe answers with the same verdict the writer would reach, so it says where the path
+        // stopped and what to do about it rather than only that it failed.
+        if (!ResolvedPrefix.IsEmpty())
+        {
+            Error->SetStringField(TEXT("path_prefix"), ResolvedPrefix);
+        }
+        if (!ResolveHint.IsEmpty())
+        {
+            Error->SetStringField(TEXT("hint"), ResolveHint);
+        }
         return Error;
     }
 
@@ -825,6 +882,11 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
     TArray<TSharedPtr<FJsonValue>> WritesJson;
     TArray<TSharedPtr<FJsonValue>> FailedJson;
     FString ResponseHint;
+    // First item that did not land, so an all-failed call can answer with a real error code instead of a
+    // `success: true` envelope whose only content is an empty `writes` array.
+    FString FirstFailureCode;
+    FString FirstFailureMessage;
+    FString FirstFailureHint;
 
     for (const FPendingWrite& Pending : Writes)
     {
@@ -835,16 +897,34 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
         void* PropertyAddr = nullptr;
         FString ResolveErrorCode;
         FString ResolveErrorMessage;
+        FString ResolvedPrefix;
+        FString ResolveHint;
         const bool bNestedPath = Pending.RequestedName.Contains(TEXT(".")) || Pending.RequestedName.Contains(TEXT("["));
         if (!ResolvePropertyPath(TargetObject, Pending.RequestedName, Property, PropertyAddr, ResolveErrorCode,
-                ResolveErrorMessage, PropertyCandidates))
+                ResolveErrorMessage, PropertyCandidates, &ResolvedPrefix, &ResolveHint))
         {
+            const FString FailureCode = ResolveErrorCode.IsEmpty() ? TEXT("unknown_property") : ResolveErrorCode;
             TSharedPtr<FJsonObject> Failure = MakeShared<FJsonObject>();
             Failure->SetStringField(TEXT("property_name"), Pending.RequestedName);
-            Failure->SetStringField(TEXT("error_code"),
-                ResolveErrorCode.IsEmpty() ? TEXT("unknown_property") : ResolveErrorCode);
+            Failure->SetStringField(TEXT("error_code"), FailureCode);
             Failure->SetStringField(TEXT("error"), ResolveErrorMessage);
             FUnrealMCPCommonUtils::AddStringArrayField(Failure, TEXT("candidates"), PropertyCandidates);
+            if (!ResolvedPrefix.IsEmpty())
+            {
+                Failure->SetStringField(TEXT("path_prefix"), ResolvedPrefix);
+            }
+            if (!ResolveHint.IsEmpty())
+            {
+                Failure->SetStringField(TEXT("hint"), ResolveHint);
+            }
+            // The path never reached a leaf, so the target was not touched.
+            Failure->SetBoolField(TEXT("unchanged"), true);
+            if (FirstFailureCode.IsEmpty())
+            {
+                FirstFailureCode = FailureCode;
+                FirstFailureMessage = ResolveErrorMessage;
+                FirstFailureHint = ResolveHint;
+            }
             FailedJson.Add(MakeShared<FJsonValueObject>(Failure));
             continue;
         }
@@ -902,9 +982,19 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
                 Failure->SetNumberField(TEXT("failed_index"), WriteResult.FailedIndex);
             }
             Failure->SetBoolField(TEXT("unchanged"), WriteResult.bUnchanged);
+            if (!WriteResult.Hint.IsEmpty())
+            {
+                Failure->SetStringField(TEXT("hint"), WriteResult.Hint);
+            }
             if (ValueBefore.IsValid())
             {
                 Failure->SetField(TEXT("property_value_before"), ValueBefore);
+            }
+            if (FirstFailureCode.IsEmpty())
+            {
+                FirstFailureCode = WriteErrorCode;
+                FirstFailureMessage = WriteError;
+                FirstFailureHint = WriteResult.Hint;
             }
             FailedJson.Add(MakeShared<FJsonValueObject>(Failure));
             continue;
@@ -947,6 +1037,27 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
         WritesJson.Add(MakeShared<FJsonValueObject>(Written));
     }
 
+    // Guard rather than a known path: the loop above records one of the two outcomes per item, so this can
+    // only fire if a future resolution shape leaves an item with neither. It exists so "nothing happened,
+    // quietly" cannot come back through a new code path.
+    if (WritesJson.Num() == 0 && FailedJson.Num() == 0)
+    {
+        FString RequestedNames;
+        for (const FPendingWrite& Pending : Writes)
+        {
+            RequestedNames = RequestedNames.IsEmpty() ? Pending.RequestedName : RequestedNames + TEXT(", ") + Pending.RequestedName;
+        }
+        TSharedPtr<FJsonObject> Failure = MakeShared<FJsonObject>();
+        Failure->SetStringField(TEXT("property_name"), RequestedNames);
+        Failure->SetStringField(TEXT("error_code"), TEXT("path_not_found"));
+        Failure->SetStringField(TEXT("error"),
+            FString::Printf(TEXT("'%s' resolved to no writable leaf"), *RequestedNames));
+        Failure->SetBoolField(TEXT("unchanged"), true);
+        FailedJson.Add(MakeShared<FJsonValueObject>(Failure));
+        FirstFailureCode = TEXT("path_not_found");
+        FirstFailureMessage = FString::Printf(TEXT("'%s' resolved to no writable leaf"), *RequestedNames);
+    }
+
     // Exactly one save for the whole call: that is the point of the batch form (the editor is routinely
     // killed by the build script, and one-save-per-property turned a 5-property edit into 5 disk writes).
     bool bSaved = false;
@@ -985,6 +1096,22 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
         TArray<TSharedPtr<FJsonValue>> RenamedArray;
         RenamedArray.Add(MakeShared<FJsonValueObject>(Renamed));
         Data->SetArrayField(TEXT("renamed_params"), RenamedArray);
+    }
+
+    // Nothing landed: answer as an error. A `success: true` envelope whose only content is an empty
+    // `writes` array reads as "the call ran and did nothing", which is the exact failure mode this used to
+    // have - the per-item detail stays in `data` so a batch caller's parsing does not change.
+    if (WritesJson.Num() == 0)
+    {
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(
+            FirstFailureCode.IsEmpty() ? TEXT("write_failed") : FirstFailureCode,
+            FirstFailureMessage.IsEmpty() ? TEXT("No property was written") : FirstFailureMessage);
+        if (!FirstFailureHint.IsEmpty())
+        {
+            Error->SetStringField(TEXT("hint"), FirstFailureHint);
+        }
+        Error->SetObjectField(TEXT("data"), Data);
+        return Error;
     }
 
     return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);

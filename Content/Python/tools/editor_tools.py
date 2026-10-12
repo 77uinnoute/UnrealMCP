@@ -262,15 +262,24 @@ def register_editor_tools(mcp: FastMCP):
         property_value,
     ) -> Dict[str, Any]:
         """
-        Set a property on an actor.
-        
+        Set a property on an actor, or on one of its components.
+
+        Component properties (light intensity, camera FOV, a static mesh, component visibility) are written
+        as '<component>.<property>', e.g. name='Sun' property_name='LightComponent.intensity'. The component
+        is matched by its object name or by its class name (the U prefix and the 'Component' suffix are
+        optional). set_component_property is NOT a substitute: it writes a Blueprint's SCS template and has
+        nothing to say about an actor already standing in the level.
+
         Args:
             name: Name of the actor
-            property_name: Name of the property to set
+            property_name: Property name, or '<component>.<property>' for a component property
             property_value: Value to set the property to
-            
+
         Returns:
-            Dict containing response from Unreal with operation status
+            On success: actor, property, `property_value_after` (read back from the object that was written)
+            and `component` when the write went to a component. On failure: `components` (the names to choose
+            from) and - when a component owns a property resembling the request - `component_property_paths`
+            with the dotted paths that would work.
         """
         from unreal_mcp_server import get_unreal_connection
         
@@ -351,7 +360,8 @@ def register_editor_tools(mcp: FastMCP):
         blueprint_name: str,
         actor_name: str,
         location: List[float] = [0.0, 0.0, 0.0],
-        rotation: List[float] = [0.0, 0.0, 0.0]
+        rotation: List[float] = [0.0, 0.0, 0.0],
+        scale: List[float] = None
     ) -> Dict[str, Any]:
         """Spawn an actor from a Blueprint.
         
@@ -361,6 +371,10 @@ def register_editor_tools(mcp: FastMCP):
             actor_name: Name to give the spawned actor
             location: The [x, y, z] world location to spawn at
             rotation: The [pitch, yaw, roll] rotation in degrees
+            scale: The [x, y, z] scale. Applied after the spawn, not through the spawn
+                transform: a Blueprint actor's root component comes from the SCS, so the
+                engine rebuilds it and the transform's scale is lost (measured: [1.4,1.4,1.4]
+                came back (1,1,1) while location/rotation were exact).
             
         Returns:
             Dict containing the spawned actor's properties
@@ -380,6 +394,8 @@ def register_editor_tools(mcp: FastMCP):
                 "location": location or [0.0, 0.0, 0.0],
                 "rotation": rotation or [0.0, 0.0, 0.0]
             }
+            if scale is not None:
+                params["scale"] = scale
             
             # Validate location and rotation formats
             for param_name in ["location", "rotation"]:
@@ -569,27 +585,49 @@ def register_editor_tools(mcp: FastMCP):
 
     @mcp.tool()
     def take_screenshot(ctx: Context, filepath: str, source: str = "level_viewport",
-                        asset_path: Optional[str] = None) -> Dict[str, Any]:
+                        route: str = "auto", asset_path: Optional[str] = None) -> Dict[str, Any]:
         """Capture a PNG file (synchronous).
 
-        source="level_viewport" (default) reads the active level viewport backbuffer. That
+        source="level_viewport" (default) reads a level viewport backbuffer. That
         image never contains PIE or UMG: UMG is composited by Slate on top of the game
-        viewport, not drawn into the scene.
-        source="pie" takes a Slate screenshot of the running PIE game viewport widget, so
-        widgets added to the viewport ARE in it. Needs a running PIE (pie_not_running
-        otherwise). Use it for UI layout triage only (hit areas, scaling, clipping); it is
-        not an acceptance verdict - the user judges the result in the viewport.
+        viewport, not drawn into the scene. The level viewport is picked by world identity,
+        not by being the ACTIVE viewport, so it keeps working while PIE runs (the active
+        viewport is then the game one).
+        source="pie" reads the running PIE game viewport backbuffer, and route picks between
+        its two routes: "auto" (default, backbuffer first), "viewport" (backbuffer only) or
+        "slate" (a Slate screenshot of the game viewport widget). The backbuffer route needs
+        no visible window, so it works with a minimized editor, but its pixels NEVER contain
+        UMG - Slate is the only route that does, and it needs the editor window on screen.
+        Because the backbuffer route succeeds whenever PIE has a viewport, "auto" alone can
+        never show a widget: pass route="slate" for that. The reply says which route ran:
+        captured_via is "pie_viewport_readback" (includes_umg false) or "pie_slate"
+        (includes_umg true). Needs a running PIE (pie_not_running otherwise). Use it for UI
+        layout triage only (hit areas, scaling, clipping); it is not an acceptance verdict -
+        the user judges the result in the viewport.
         source="asset_editor" reads an asset editor's preview viewport (Persona, the material
         editor, ...). With asset_path the command focuses THAT asset's editor first and then
         captures its viewport; the editor is never opened for you (editor_not_open lists the
         open_* commands otherwise). Without asset_path it uses the focused asset editor
         viewport; several candidates with no focus come back as viewport_ambiguous with the
-        list instead of a guess. Also triage only, not an acceptance verdict.
+        list instead of a guess. A UMG designer is the special case: it has NO scene viewport,
+        so for a Widget Blueprint the capture is the designer preview's own Slate widget
+        instead of any viewport (captured_via="widget_preview_slate", includes_umg true,
+        camera null) - that is the asset's design, but the designer paints its own widget
+        outlines over the preview area and Slate's capture covers the whole window region, so
+        includes_editor_overlay is true here as well: for pixels WITHOUT them, use
+        source="pie" + route="slate". It needs the designer open (open_umg_designer) and the
+        editor window on screen. Also triage only, not an acceptance verdict.
+
+        If the widget preview comes back with no pixels (widget_preview_screenshot_failed), the designer
+        view itself is stale - it is not a window position problem: close and reopen the asset editor
+        (close_asset_editors then open_umg_designer) and retry.
 
         Writes to the EXACT path given — unlike unreal.AutomationLibrary.take_high_res_screenshot
         / the HighResShot console command, the filename is honored (no
         HighresScreenshot0000X.png renaming). Files that come out suspiciously small (<10KB)
-        are retried once.
+        are retried once. A small file is only an error for a scene readback: a pure UI capture
+        (includes_umg true) can legitimately compress below that, and comes back with a
+        "warning" field instead of being rejected.
 
         Args:
             ctx: The MCP context
@@ -597,13 +635,21 @@ def register_editor_tools(mcp: FastMCP):
                 "E:/proj/Saved/shot.png" (relative paths resolve against the
                 editor working directory and are unreliable)
             source: "level_viewport" (default), "pie" or "asset_editor"
+            route: With source="pie": "auto" (default), "viewport" (no UMG) or "slate"
+                (the only route that includes UMG).
             asset_path: With source="asset_editor": the asset whose editor to capture, e.g.
-                "/Game/MMD/FeiYing/Animation/Clips/Fei_Idle".
+                "/Game/MMD/FeiYing/Animation/Clips/Fei_Idle" (or a Widget Blueprint, which is
+                captured as its designer preview widget).
 
         Returns:
             Dict with status success and result carrying filepath, width, height,
-            file_size (bytes), source and (for asset_editor) editor_name /
-            resolved_viewport / focused
+            file_size (bytes), source, captured_via (level_viewport_readback /
+            pie_viewport_readback / pie_slate / widget_preview_slate), includes_umg,
+            includes_editor_overlay (true for level_viewport and asset_editor viewports: the
+            editor's sprite icons, grid and gizmo are IN the image - a light's sprite is not
+            scene content; false for the PIE Slate route, true for the widget-preview route
+            because the designer's widget outlines are painted over the preview area), and
+            (for asset_editor) editor_name / resolved_viewport / focused
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -613,7 +659,7 @@ def register_editor_tools(mcp: FastMCP):
                 logger.error("Failed to connect to Unreal Engine")
                 return {"status": "error", "error": "Failed to connect to Unreal Engine"}
 
-            params = {"filepath": filepath, "source": source}
+            params = {"filepath": filepath, "source": source, "route": route}
             if asset_path:
                 params["asset_path"] = asset_path
             response = unreal.send_command("take_screenshot", params)
@@ -623,19 +669,25 @@ def register_editor_tools(mcp: FastMCP):
             result_obj = response.get("result") or {}
             file_size = int(result_obj.get("file_size") or 0)
 
-            # 黑帧/陈旧帧防护：文件过小则重试一次
+            # 黑帧/陈旧帧防护：文件过小则重试一次。只对场景回读成立 —— 纯 UI 截图（含 UMG）本来就
+            # 可能很小（一个干净的控件预览比一帧 3D 画面小得多），那种情况下报错会把有效截图挡掉。
             if file_size < 10 * 1024:
                 logger.warning(f"Suspiciously small screenshot ({file_size} bytes), retrying once")
                 response = unreal.send_command("take_screenshot", params)
                 if response and response.get("status") == "success":
                     result_obj = response.get("result") or {}
                     file_size = int(result_obj.get("file_size") or 0)
-                if file_size < 10 * 1024:
+                if file_size < 10 * 1024 and not result_obj.get("includes_umg"):
                     return {
                         "status": "error",
                         "error": f"Screenshot file too small ({file_size} bytes) — viewport may be unfocused/idle",
                         "result": result_obj,
                     }
+                if file_size < 10 * 1024:
+                    result_obj["warning"] = (
+                        f"small capture ({file_size} bytes) - expected for a pure UI capture, "
+                        "check the PNG content rather than the size"
+                    )
             return response
 
         except Exception as e:

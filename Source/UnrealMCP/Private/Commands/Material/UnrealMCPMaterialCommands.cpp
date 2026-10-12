@@ -17,6 +17,9 @@
 #include "Materials/MaterialExpressionComponentMask.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "Components/PrimitiveComponent.h"
+#include "Engine/World.h"
+#include "UObject/UObjectIterator.h"
 #include "Factories/MaterialFactoryNew.h"
 #include "MaterialShared.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -27,6 +30,14 @@
 #include "Templates/Function.h"
 #include "Internationalization/Regex.h"
 #include "Editor.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "UnrealClient.h"
+#include "RHIGPUReadback.h"
+#include "RHICommandList.h"
+#include "RenderingThread.h"
+#include "PixelFormat.h"
+#include "Math/Float16.h"
+#include "ImageUtils.h"
 
 //==============================================================================
 // Property codecs for the material expression types the generic reflector cannot express.
@@ -543,6 +554,25 @@ void FUnrealMCPMaterialCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         }), MCPFlags(false, false, false),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("get_material_compile_errors"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleGetMaterialCompileErrors(P); }); }));
 
+    MCP_REGISTER_COMMAND(Registry, "read_render_target_stats", "material",
+        "Read a TextureRenderTarget2D back and report per-tile pixel statistics as floats, optionally "
+        "writing a PNG. Tiles are laid out row-major and are the same index a Grid2DCollection's attribute "
+        "table uses (tile = list_niagara_grid_attributes' first_slice - slot_count). The values are decoded "
+        "from the GPU texture itself, so RTF_R16F / RTF_R32F / RTF_RGBA16F all read at full precision - "
+        "unlike read_render_target_pixel (unreliable for float formats) or export_render_target (unusable PNG "
+        "for RGBA16F). Read-only, and it pumps the rendering thread (there is no timed variant of that wait in "
+        "the engine): use it as a diagnostic, not per frame, and not while a PIE start/stop or a level load is "
+        "still in flight - during one, the pump waits for the render thread and the editor stops answering until "
+        "it catches up (measured; see Docs/MCP_Findings_2026-10-09_RenderTargetReadback.md).",
+        (TArray<FMCPParamSpec>{
+            MCPParam(TEXT("asset_path"), TEXT("string"), TEXT("TextureRenderTarget2D asset path")),
+            MCPParamOpt(TEXT("tile_width"), TEXT("number"), TEXT("Tile width in pixels (default 256; the grid's NumCells.X)")),
+            MCPParamOpt(TEXT("tile_height"), TEXT("number"), TEXT("Tile height in pixels (default: same as tile_width)")),
+            MCPParamOpt(TEXT("sample_step"), TEXT("number"), TEXT("Sample every Nth pixel in x and y (default 8)")),
+            MCPParamOpt(TEXT("png_path"), TEXT("string"), TEXT("Optional path to also write the readback as a PNG (no file is written without it)")),
+        }), MCPFlags(false, false, false),
+        ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("read_render_target_stats"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleReadRenderTargetStats(P); }); }));
+
     MCP_REGISTER_COMMAND(Registry, "list_material_expressions", "material",
         "List a material's expressions with their live/orphan state.",
         (TArray<FMCPParamSpec>{
@@ -636,9 +666,14 @@ void FUnrealMCPMaterialCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("get_material_parameters"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleGetMaterialParameters(P); }); }));
 
     MCP_REGISTER_COMMAND(Registry, "set_material_parameters", "material",
-        "Write material instance parameter overrides from a name -> value object.",
+        "Write material parameter values from a name -> value object (scalar = number, vector = {r,g,b,a}). "
+        "For a base material it writes the parameter's DEFAULT value, for a material instance an override. "
+        "The reply says what the write reaches: affects_live_render / live_components_using_material / "
+        "live_render_worlds - a parameter value needs no recompile (the engine rebuilds the material's "
+        "uniform set on write, and a running PIE shares the same loaded material); recompile is for graph "
+        "changes.",
         (TArray<FMCPParamSpec>{
-            MCPParam(TEXT("asset_path"), TEXT("string"), TEXT("Material instance asset path")),
+            MCPParam(TEXT("asset_path"), TEXT("string"), TEXT("Material or material instance asset path")),
             MCPParam(TEXT("values"), TEXT("object"), TEXT("Object of parameter name -> value")),
             MCPParamOpt(TEXT("recompile"), TEXT("bool"), TEXT("Recompile after the write")),
         }), MCPFlags(false, false, false),
@@ -2521,6 +2556,108 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleGetMaterialParameters(
         TEXT("Asset is neither a material nor a material instance: %s"), *AssetPath));
 }
 
+namespace
+{
+    // How many primitive components in the loaded worlds render with this material - directly, or through an
+    // instance whose parent chain reaches it. That count is what makes `affects_live_render` a read fact
+    // instead of a promise: something is currently bound to the material (a running PIE world shares the
+    // same loaded object), so it is those draws that use the value written here from now on.
+    int32 CountLiveMaterialUse(UMaterialInterface* Material, TArray<FString>& OutWorldKinds)
+    {
+        OutWorldKinds.Reset();
+        if (!Material)
+        {
+            return 0;
+        }
+
+        TArray<TPair<UWorld*, FString>> Worlds;
+        if (GEditor)
+        {
+            if (UWorld* PlayWorld = GEditor->PlayWorld)
+            {
+                Worlds.Emplace(PlayWorld, TEXT("pie"));
+            }
+            if (UWorld* EditorWorld = GEditor->GetEditorWorldContext(/*bEnsureIsGWorld=*/false).World())
+            {
+                Worlds.Emplace(EditorWorld, TEXT("editor"));
+            }
+        }
+
+        int32 Count = 0;
+        for (TObjectIterator<UPrimitiveComponent> It; It; ++It)
+        {
+            UPrimitiveComponent* Component = *It;
+            if (!Component)
+            {
+                continue;
+            }
+
+            UWorld* World = Component->GetWorld();
+            if (!World)
+            {
+                continue;
+            }
+
+            FString WorldKind;
+            for (const TPair<UWorld*, FString>& Pair : Worlds)
+            {
+                if (Pair.Key == World)
+                {
+                    WorldKind = Pair.Value;
+                    break;
+                }
+            }
+            if (WorldKind.IsEmpty())
+            {
+                continue;
+            }
+
+            bool bUses = false;
+            const int32 MaterialCount = Component->GetNumMaterials();
+            for (int32 Index = 0; Index < MaterialCount && !bUses; ++Index)
+            {
+                for (UMaterialInterface* Chain = Component->GetMaterial(Index); Chain;)
+                {
+                    if (Chain == Material)
+                    {
+                        bUses = true;
+                        break;
+                    }
+                    UMaterialInstance* AsInstance = Cast<UMaterialInstance>(Chain);
+                    Chain = AsInstance ? AsInstance->Parent : nullptr;
+                }
+            }
+            if (!bUses)
+            {
+                continue;
+            }
+
+            ++Count;
+            OutWorldKinds.AddUnique(WorldKind);
+        }
+        return Count;
+    }
+
+    // The same answer for every parameter write, so the two branches cannot drift apart.
+    void AddLiveRenderReport(UMaterialInterface* Material, const FString& ParamScope,
+                            const TSharedPtr<FJsonObject>& ResultJson)
+    {
+        TArray<FString> WorldKinds;
+        const int32 LiveComponents = CountLiveMaterialUse(Material, WorldKinds);
+
+        ResultJson->SetStringField(TEXT("param_scope"), ParamScope);
+        ResultJson->SetNumberField(TEXT("live_components_using_material"), LiveComponents);
+        FUnrealMCPCommonUtils::AddStringArrayField(ResultJson, TEXT("live_render_worlds"), WorldKinds);
+        ResultJson->SetBoolField(TEXT("affects_live_render"), LiveComponents > 0);
+        ResultJson->SetStringField(TEXT("live_render_note"), LiveComponents > 0
+            ? TEXT("the components counted above render with this material right now, and a parameter default "
+                   "is pushed to them on write (a running PIE shares the same loaded material) - recompile is "
+                   "needed for a graph change, not for a value")
+            : TEXT("nothing in the loaded worlds renders with this material, so this value changes nothing "
+                   "visible until something does"));
+    }
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleSetMaterialParameters(const TSharedPtr<FJsonObject>& Params)
 {
     FString AssetPath;
@@ -2651,6 +2788,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleSetMaterialParameters(
         ResultJson->SetArrayField(TEXT("updated"), Updated);
         ResultJson->SetArrayField(TEXT("missing"), Missing);
         ResultJson->SetBoolField(TEXT("recompiled"), bRecompiled);
+        AddLiveRenderReport(Mat, TEXT("base_material_default"), ResultJson);
         return ResultJson;
     }
 
@@ -2724,6 +2862,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleSetMaterialParameters(
         ResultJson->SetArrayField(TEXT("missing"), Missing);
         ResultJson->SetBoolField(TEXT("recompiled"), false);
         ResultJson->SetStringField(TEXT("note"), TEXT("Material instances update deferred; no explicit recompile required"));
+        AddLiveRenderReport(MIC, TEXT("material_instance_override"), ResultJson);
         return ResultJson;
     }
 
@@ -3644,6 +3783,370 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleBuildMaterialPreview(c
     ResultJson->SetNumberField(TEXT("copied_nodes"), CloneMap.Num());
     ResultJson->SetArrayField(TEXT("outputs"), BuildOutputList(Target));
     return ResultJson;
+}
+
+// =====================================================================
+// read_render_target_stats: what a RenderTarget actually holds, in floats
+// =====================================================================
+
+namespace
+{
+    /** Per-channel statistics of one tile of the RenderTarget. */
+    struct FMCPRenderTargetTileStats
+    {
+        int32 Index = 0;
+        TArray<float> Min;
+        TArray<float> Max;
+        TArray<double> Sum;
+        TArray<int32> Nonzero;
+        int32 SampleCount = 0;
+    };
+
+    /** True for the formats this command decodes; anything else is refused with the supported list. */
+    bool IsSupportedRenderTargetPixelFormat(EPixelFormat Format, int32& OutChannels)
+    {
+        switch (Format)
+        {
+        case PF_R16F:
+        case PF_R32_FLOAT:
+            OutChannels = 1;
+            return true;
+        case PF_FloatRGBA:
+        case PF_B8G8R8A8:
+            OutChannels = 4;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    /** Read one pixel's channels as floats, normalised to 0..1 for the 8-bit formats. */
+    void DecodeRenderTargetPixel(EPixelFormat Format, const uint8* Pixel, float* OutChannels, int32 ChannelCount)
+    {
+        switch (Format)
+        {
+        case PF_R16F:
+        {
+            const float Value = reinterpret_cast<const FFloat16*>(Pixel)->GetFloat();
+            OutChannels[0] = Value;
+            break;
+        }
+        case PF_R32_FLOAT:
+            OutChannels[0] = *reinterpret_cast<const float*>(Pixel);
+            break;
+        case PF_FloatRGBA:
+        {
+            const FFloat16* Half = reinterpret_cast<const FFloat16*>(Pixel);
+            for (int32 Channel = 0; Channel < FMath::Min(ChannelCount, 4); ++Channel)
+            {
+                OutChannels[Channel] = Half[Channel].GetFloat();
+            }
+            break;
+        }
+        case PF_B8G8R8A8:
+            // Stored B,G,R,A - reported R,G,B,A like every other read path in this plugin.
+            OutChannels[0] = Pixel[2] / 255.0f;
+            OutChannels[1] = Pixel[1] / 255.0f;
+            OutChannels[2] = Pixel[0] / 255.0f;
+            OutChannels[3] = Pixel[3] / 255.0f;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleReadRenderTargetStats(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath) || AssetPath.IsEmpty())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"), TEXT("Missing 'asset_path' parameter"));
+    }
+
+    UObject* Asset = FUnrealMCPCommonUtils::FindAsset(AssetPath);
+    if (!Asset)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("load_failed"),
+            FString::Printf(TEXT("No asset at '%s'"), *AssetPath));
+    }
+    UTextureRenderTarget2D* RenderTarget = Cast<UTextureRenderTarget2D>(Asset);
+    if (!RenderTarget)
+    {
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("not_a_render_target"),
+            FString::Printf(TEXT("'%s' is a %s, not a TextureRenderTarget2D"), *AssetPath, *Asset->GetClass()->GetName()));
+        Error->SetStringField(TEXT("asset_class"), Asset->GetClass()->GetName());
+        return Error;
+    }
+
+    int32 TileWidth = 256;
+    if (Params->HasField(TEXT("tile_width")))
+    {
+        TileWidth = FMath::RoundToInt(Params->GetNumberField(TEXT("tile_width")));
+    }
+    int32 TileHeight = TileWidth;
+    if (Params->HasField(TEXT("tile_height")))
+    {
+        TileHeight = FMath::RoundToInt(Params->GetNumberField(TEXT("tile_height")));
+    }
+    int32 SampleStep = 8;
+    if (Params->HasField(TEXT("sample_step")))
+    {
+        SampleStep = FMath::RoundToInt(Params->GetNumberField(TEXT("sample_step")));
+    }
+    if (TileWidth <= 0 || TileHeight <= 0 || SampleStep <= 0)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
+            TEXT("'tile_width', 'tile_height' and 'sample_step' must be positive"));
+    }
+
+    FString PngPath;
+    Params->TryGetStringField(TEXT("png_path"), PngPath);
+
+    // GetFormat() is the UTexture override and answers the RHI pixel format; the asset's declared
+    // ETextureRenderTargetFormat is a separate field, reported for the caller's benefit only.
+    const EPixelFormat PixelFormat = RenderTarget->GetFormat();
+    const ETextureRenderTargetFormat DeclaredFormat = RenderTarget->RenderTargetFormat;
+    int32 ChannelCount = 0;
+    if (!IsSupportedRenderTargetPixelFormat(PixelFormat, ChannelCount))
+    {
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("unsupported_format"),
+            FString::Printf(TEXT("Pixel format '%s' is not decodable by this command"),
+                GPixelFormats[PixelFormat].Name));
+        TArray<TSharedPtr<FJsonValue>> Supported;
+        for (const TCHAR* Name : { TEXT("RTF_R16F"), TEXT("RTF_R32F"), TEXT("RTF_RGBA16F"), TEXT("RTF_RGBA8") })
+        {
+            Supported.Add(MakeShared<FJsonValueString>(Name));
+        }
+        Error->SetArrayField(TEXT("supported_formats"), Supported);
+        Error->SetStringField(TEXT("pixel_format"), GPixelFormats[PixelFormat].Name);
+        return Error;
+    }
+
+    // The resource is what the GPU wrote. A RenderTarget that was never rendered has none, and the only
+    // honest answer is that there is nothing to read - not a grid of zeroes.
+    FTextureRenderTargetResource* Resource = RenderTarget->GameThread_GetRenderTargetResource();
+    FRHITexture* Texture = Resource ? Resource->GetRenderTargetTexture() : nullptr;
+    const int32 Width = Texture ? static_cast<int32>(Texture->GetSizeX()) : 0;
+    const int32 Height = Texture ? static_cast<int32>(Texture->GetSizeY()) : 0;
+    if (!Texture || Width <= 0 || Height <= 0)
+    {
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_resource"),
+            FString::Printf(TEXT("'%s' has no GPU resource to read (%dx%d)"), *AssetPath, Width, Height));
+        Error->SetStringField(TEXT("hint"),
+            TEXT("A RenderTarget only holds data once something rendered into it: let the instance simulate for a frame "
+                 "and check the grid's NumAttributes / NumCellsX / NumCellsY (NumAttributes = 0 means no tiles are laid out)"));
+        return Error;
+    }
+
+    // Read the whole surface through the engine's own two-step readback model: the COPY goes out in one
+    // render command and is submitted by the flush, the LOCK happens in a second one. Both halves matter:
+    //   * EnqueueCopy OR Lock called from the game thread asserts -
+    //     "Assertion failed: IsInRenderingThread() [RHICommandList.cpp:1091]" (FRHICommandListExecutor::Submit);
+    //   * Lock called in the SAME render command as EnqueueCopy self-deadlocks - Lock maps the staging
+    //     surface through ImmediateFlush, which then waits for the very command list the copy sits in
+    //     (measured: the editor hung with its bridge port closed).
+    // The engine splits them for the same reason (LandscapePhysicalMaterial.cpp: Render_RenderThread enqueues
+    // the copy, FetchResults_RenderThread locks in a later pass).
+    //
+    // FlushRenderingCommands() is NOT optional here, and it is also the one honest wart of this command: the
+    // immediate command list is only submitted when the game thread pumps, so a poll of
+    // FRHIGPUMemoryReadback::IsReady() without pumping can never complete (measured: every RT answered
+    // "not ready" until the 5s deadline). Pumping is the only synchronous option the engine offers, and it
+    // has no timeout - hence the note in the tool description and Docs/MCP_Findings_2026-10-09_RenderTargetReadback.md §六.
+    const int32 BytesPerPixel = static_cast<int32>(GPixelFormats[PixelFormat].BlockBytes);
+    const int32 RowBytes = Width * BytesPerPixel;
+    TArray<uint8> RawData;
+    RawData.SetNumZeroed(static_cast<int64>(RowBytes) * Height);
+    bool bReadbackOk = false;
+    {
+        FRHIGPUTextureReadback Readback(TEXT("MCPRenderTargetStats"));
+        ENQUEUE_RENDER_COMMAND(MCPRenderTargetReadbackCopy)(
+            [&Readback, Texture](FRHICommandListImmediate& RHICmdList)
+            {
+                Readback.EnqueueCopy(RHICmdList, Texture);
+            });
+        FlushRenderingCommands();
+
+        ENQUEUE_RENDER_COMMAND(MCPRenderTargetReadbackFetch)(
+            [&Readback, &RawData, &bReadbackOk, Width, Height, RowBytes, BytesPerPixel]
+            (FRHICommandListImmediate& RHICmdList)
+            {
+                int32 RowPitchInPixels = 0;
+                const void* Source = Readback.Lock(RowPitchInPixels);
+                if (!Source)
+                {
+                    return;
+                }
+                const int64 RowPitchBytes = static_cast<int64>(
+                    RowPitchInPixels > 0 ? RowPitchInPixels : Width) * BytesPerPixel;
+                const uint8* SourceRows = static_cast<const uint8*>(Source);
+                for (int32 Row = 0; Row < Height; ++Row)
+                {
+                    FMemory::Memcpy(RawData.GetData() + static_cast<int64>(Row) * RowBytes,
+                        SourceRows + static_cast<int64>(Row) * RowPitchBytes, RowBytes);
+                }
+                Readback.Unlock();
+                bReadbackOk = true;
+            });
+        FlushRenderingCommands();
+    }
+    if (!bReadbackOk)
+    {
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("readback_failed"),
+            TEXT("The GPU readback did not return data"));
+        Error->SetStringField(TEXT("hint"), TEXT("Retry; a readback can fail while the RHI is mid-resize"));
+        return Error;
+    }
+
+    const int32 TilesX = (Width + TileWidth - 1) / TileWidth;
+    const int32 TilesY = (Height + TileHeight - 1) / TileHeight;
+    TArray<FMCPRenderTargetTileStats> Tiles;
+    Tiles.SetNum(TilesX * TilesY);
+    for (int32 Index = 0; Index < Tiles.Num(); ++Index)
+    {
+        FMCPRenderTargetTileStats& Tile = Tiles[Index];
+        Tile.Index = Index;
+        Tile.Min.Init(TNumericLimits<float>::Max(), ChannelCount);
+        Tile.Max.Init(TNumericLimits<float>::Lowest(), ChannelCount);
+        Tile.Sum.Init(0.0, ChannelCount);
+        Tile.Nonzero.Init(0, ChannelCount);
+    }
+
+    // One pass over the sampled pixels feeds both the statistics and the optional PNG.
+    TArray<FColor> PngPixels;
+    const bool bWantPng = !PngPath.IsEmpty();
+    if (bWantPng)
+    {
+        PngPixels.SetNumUninitialized(Width * Height);
+    }
+
+    float Channels[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (int32 Y = 0; Y < Height; ++Y)
+    {
+        const uint8* Row = RawData.GetData() + static_cast<int64>(Y) * RowBytes;
+        const int32 TileRow = Y / TileHeight;
+        const bool bSampleRow = (Y % SampleStep) == 0;
+        for (int32 X = 0; X < Width; ++X)
+        {
+            const int32 TileCol = X / TileWidth;
+            DecodeRenderTargetPixel(PixelFormat, Row + static_cast<int64>(X) * BytesPerPixel,
+                Channels, ChannelCount);
+
+            if (bWantPng)
+            {
+                FColor& Color = PngPixels[Y * Width + X];
+                if (ChannelCount == 1)
+                {
+                    // A single-channel target is viewable when it is shown as grey rather than as red-only.
+                    const uint8 Grey = static_cast<uint8>(FMath::Clamp(Channels[0], 0.0f, 1.0f) * 255.0f);
+                    Color = FColor(Grey, Grey, Grey, 255);
+                }
+                else
+                {
+                    Color = FColor(
+                        static_cast<uint8>(FMath::Clamp(Channels[0], 0.0f, 1.0f) * 255.0f),
+                        static_cast<uint8>(FMath::Clamp(Channels[1], 0.0f, 1.0f) * 255.0f),
+                        static_cast<uint8>(FMath::Clamp(Channels[2], 0.0f, 1.0f) * 255.0f),
+                        ChannelCount > 3 ? static_cast<uint8>(FMath::Clamp(Channels[3], 0.0f, 1.0f) * 255.0f) : 255);
+                }
+            }
+
+            if (!bSampleRow || (X % SampleStep) != 0)
+            {
+                continue;
+            }
+            const int32 TileIndex = TileRow * TilesX + TileCol;
+            if (!Tiles.IsValidIndex(TileIndex))
+            {
+                continue;
+            }
+            FMCPRenderTargetTileStats& Tile = Tiles[TileIndex];
+            ++Tile.SampleCount;
+            for (int32 Channel = 0; Channel < ChannelCount; ++Channel)
+            {
+                const float Value = Channels[Channel];
+                Tile.Min[Channel] = FMath::Min(Tile.Min[Channel], Value);
+                Tile.Max[Channel] = FMath::Max(Tile.Max[Channel], Value);
+                Tile.Sum[Channel] += Value;
+                if (FMath::Abs(Value) > SMALL_NUMBER)
+                {
+                    ++Tile.Nonzero[Channel];
+                }
+            }
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> TileJson;
+    for (const FMCPRenderTargetTileStats& Tile : Tiles)
+    {
+        TSharedPtr<FJsonObject> TileObject = MakeShared<FJsonObject>();
+        TileObject->SetNumberField(TEXT("index"), Tile.Index);
+        TileObject->SetNumberField(TEXT("sample_count"), Tile.SampleCount);
+        TArray<TSharedPtr<FJsonValue>> MinJson;
+        TArray<TSharedPtr<FJsonValue>> MaxJson;
+        TArray<TSharedPtr<FJsonValue>> MeanJson;
+        TArray<TSharedPtr<FJsonValue>> NonzeroJson;
+        for (int32 Channel = 0; Channel < ChannelCount; ++Channel)
+        {
+            // An unsampled range keeps its sentinel: report it as 0 rather than a meaningless float extreme.
+            const bool bHasSamples = Tile.SampleCount > 0;
+            MinJson.Add(MakeShared<FJsonValueNumber>(bHasSamples ? Tile.Min[Channel] : 0.0));
+            MaxJson.Add(MakeShared<FJsonValueNumber>(bHasSamples ? Tile.Max[Channel] : 0.0));
+            MeanJson.Add(MakeShared<FJsonValueNumber>(
+                bHasSamples ? Tile.Sum[Channel] / static_cast<double>(Tile.SampleCount) : 0.0));
+            NonzeroJson.Add(MakeShared<FJsonValueNumber>(Tile.Nonzero[Channel]));
+        }
+        TileObject->SetArrayField(TEXT("min"), MinJson);
+        TileObject->SetArrayField(TEXT("max"), MaxJson);
+        TileObject->SetArrayField(TEXT("mean"), MeanJson);
+        TileObject->SetArrayField(TEXT("nonzero"), NonzeroJson);
+        TileJson.Add(MakeShared<FJsonValueObject>(TileObject));
+    }
+
+    TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), Asset->GetPathName());
+    Data->SetNumberField(TEXT("size_x"), Width);
+    Data->SetNumberField(TEXT("size_y"), Height);
+    FString FormatName;
+    if (const UEnum* FormatEnum = StaticEnum<ETextureRenderTargetFormat>())
+    {
+        FormatName = FormatEnum->GetNameStringByValue(static_cast<int64>(DeclaredFormat));
+    }
+    if (FormatName.IsEmpty())
+    {
+        FormatName = GPixelFormats[PixelFormat].Name;
+    }
+    Data->SetStringField(TEXT("format"), FormatName);
+    Data->SetStringField(TEXT("pixel_format"), GPixelFormats[PixelFormat].Name);
+    Data->SetNumberField(TEXT("channels"), ChannelCount);
+    Data->SetNumberField(TEXT("tile_width"), TileWidth);
+    Data->SetNumberField(TEXT("tile_height"), TileHeight);
+    Data->SetNumberField(TEXT("sample_step"), SampleStep);
+    Data->SetNumberField(TEXT("tiles_x"), TilesX);
+    Data->SetNumberField(TEXT("tiles_y"), TilesY);
+    Data->SetNumberField(TEXT("tile_count"), Tiles.Num());
+    Data->SetArrayField(TEXT("tiles"), TileJson);
+
+    if (bWantPng)
+    {
+        // PNGCompressImageArray, NOT the deprecated CompressImageArray: the latter now forwards to
+        // ThumbnailCompressImageArray and writes a JPEG (measured: a file named .png starting with
+        // FF D8 FF E0 ... JFIF), which is not what a caller asking for png_path should get.
+        TArray64<uint8> Compressed;
+        FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(PngPixels), Compressed);
+        if (Compressed.Num() > 0 && FFileHelper::SaveArrayToFile(Compressed, *PngPath))
+        {
+            Data->SetStringField(TEXT("png_path"), PngPath);
+            Data->SetNumberField(TEXT("png_size"), IFileManager::Get().FileSize(*PngPath));
+        }
+        else
+        {
+            Data->SetBoolField(TEXT("png_write_failed"), true);
+        }
+    }
+
+    return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
 }
 
 

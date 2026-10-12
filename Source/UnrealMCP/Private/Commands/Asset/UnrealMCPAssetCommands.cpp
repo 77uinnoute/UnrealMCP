@@ -208,6 +208,19 @@ void FUnrealMCPAssetCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         }), MCPFlags(false, false, false),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleDeleteAssetSafe(Params); });
 
+    MCP_REGISTER_COMMAND(Registry, "delete_asset_with_level_switch", "asset",
+        "Delete an asset that a World Partition guard blocks, by switching to a scratch level, deleting, "
+        "and switching back. Only 'world_partition_open' is handled (a package referenced by a World "
+        "Partition external actor package stays refused); an unsaved level stops the command unless "
+        "save_dirty=true.",
+        (TArray<FMCPParamSpec>{
+            MCPParam(TEXT("asset_path"), TEXT("string"), TEXT("Asset object path to delete")),
+            MCPParamOpt(TEXT("target_level"), TEXT("string"), TEXT("Map to switch to; omit to open a blank untitled map (nothing is written to disk)")),
+            MCPParamOpt(TEXT("save_dirty"), TEXT("bool"), TEXT("Save the current level before switching (default false: a dirty level is refused)")),
+            MCPParamOpt(TEXT("force"), TEXT("bool"), TEXT("Break blocking references, then delete (default false)")),
+        }), MCPFlags(false, false, false),
+        [this](const TSharedPtr<FJsonObject>& Params) { return HandleDeleteAssetWithLevelSwitch(Params); });
+
     MCP_REGISTER_COMMAND(Registry, "duplicate_asset_safe", "asset",
         "Copy an asset with no modal dialog and no IAssetTools::DuplicateAsset (whose CanCreateAsset "
         "fully-loads the destination package): the package is created here and the copy is made with "
@@ -3327,10 +3340,53 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCreateAssetSafe(const TSh
 
     if (!FactoryClass)
     {
-        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_factory"),
-            FString::Printf(TEXT("factory '%s' did not resolve to a UFactory"), *FactoryKey));
-        FUnrealMCPCommonUtils::AddStringArrayField(Error, TEXT("candidates"), FactoryCandidates);
-        return Error;
+        // The caller's factory key is a guess when it comes from the asset class ("<Class>FactoryNew"),
+        // and that guess is wrong for several engine classes - a TextureRenderTarget2D is made by
+        // UTextureRenderTargetFactoryNew, so "created" quietly cost an editor round trip through python.
+        // Ask the factories instead: the one that reports this asset class as its supported class.
+        TArray<FString> ScanCandidates;
+        UClass* Scanned = nullptr;
+        for (TObjectIterator<UClass> It; It; ++It)
+        {
+            UClass* Candidate = *It;
+            if (!Candidate->IsChildOf(UFactory::StaticClass()) || Candidate->HasAnyClassFlags(CLASS_Abstract))
+            {
+                continue;
+            }
+            const UFactory* CandidateCDO = Cast<UFactory>(Candidate->GetDefaultObject());
+            if (!CandidateCDO || CandidateCDO->GetSupportedClass() != AssetClass)
+            {
+                continue;
+            }
+            ScanCandidates.Add(Candidate->GetName());
+            // "…FactoryNew" is the engine's own convention for the factory a "create new asset" flow
+            // wants (bCreateNew is protected, so the name is what can be read from here).
+            if (Candidate->GetName().EndsWith(TEXT("FactoryNew")))
+            {
+                Scanned = Candidate;
+                break;
+            }
+            if (!Scanned)
+            {
+                Scanned = Candidate;
+            }
+        }
+
+        if (Scanned)
+        {
+            FactoryClass = Scanned;
+            Data->SetStringField(TEXT("factory"), FactoryClass->GetName());
+            Data->SetStringField(TEXT("factory_source"), TEXT("scanned_by_supported_class"));
+        }
+        else
+        {
+            TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_factory"),
+                FString::Printf(TEXT("factory '%s' did not resolve to a UFactory, and no loaded factory "
+                                     "supports '%s'"), *FactoryKey, *AssetClass->GetName()));
+            FactoryCandidates.Append(ScanCandidates);
+            FUnrealMCPCommonUtils::AddStringArrayField(Error, TEXT("candidates"), FactoryCandidates);
+            return Error;
+        }
     }
 
     IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
@@ -3388,6 +3444,114 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDeleteAssetSafe(const TSh
     if (Result.IsValid())
     {
         Result->SetBoolField(TEXT("saved_before_delete"), bSaved);
+    }
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDeleteAssetWithLevelSwitch(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params.IsValid() || !Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"),
+            TEXT("Missing 'asset_path' parameter"));
+    }
+
+    // Try the normal path first. Only "a World Partition is open" is what a level switch can fix:
+    // "referenced by a World Partition external actor package" stays broken with the map closed.
+    TSharedPtr<FJsonObject> Direct = HandleSafeDeleteAsset(Params);
+    if (!Direct.IsValid())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("delete_failed"),
+            TEXT("The delete returned nothing"));
+    }
+
+    FString ErrorCode;
+    Direct->TryGetStringField(TEXT("error_code"), ErrorCode);
+    if (!ErrorCode.Equals(TEXT("world_partition_open")))
+    {
+        Direct->SetBoolField(TEXT("level_switched"), false);
+        return Direct;
+    }
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!World)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_editor_world"),
+            TEXT("There is no editor world to switch away from"));
+    }
+
+    const FString OriginalMap = World->GetOutermost() ? World->GetOutermost()->GetName() : World->GetName();
+    const bool bSaveDirty = [&Params]() {
+        bool bValue = false;
+        return Params->TryGetBoolField(TEXT("save_dirty"), bValue) && bValue;
+    }();
+
+    // Switching levels discards whatever is not saved, so a dirty level stops here unless the caller
+    // explicitly asked for it to be saved first.
+    if (World->GetOutermost() && World->GetOutermost()->IsDirty())
+    {
+        if (!bSaveDirty)
+        {
+            TSharedPtr<FJsonObject> Refused = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("level_dirty"),
+                FString::Printf(TEXT("'%s' has unsaved changes; switching levels to delete the asset would "
+                                     "discard them. Save the level first, or pass save_dirty=true to let this "
+                                     "command save it, or delete the package with the editor closed"),
+                    *OriginalMap));
+            Refused->SetStringField(TEXT("level"), OriginalMap);
+            FUnrealMCPCommonUtils::AddStringArrayField(Refused, TEXT("workarounds"), {
+                TEXT("save the level, then retry"),
+                TEXT("pass save_dirty=true to save it as part of this command"),
+            });
+            return Refused;
+        }
+        if (!UEditorLoadingAndSavingUtils::SaveCurrentLevel())
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("level_save_failed"),
+                FString::Printf(TEXT("Could not save '%s' before switching levels"), *OriginalMap));
+        }
+    }
+
+    FString TargetLevel;
+    Params->TryGetStringField(TEXT("target_level"), TargetLevel);
+    FString SwitchLevel;
+    if (!TargetLevel.IsEmpty())
+    {
+        // A World Partition target would trip the same guard, so it is refused up front.
+        UWorld* TargetMap = Cast<UWorld>(FUnrealMCPCommonUtils::FindAsset(TargetLevel));
+        if (!TargetMap)
+        {
+            TargetMap = LoadObject<UWorld>(nullptr, *TargetLevel);
+        }
+        if (!TargetMap)
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("target_level_not_found"),
+                FString::Printf(TEXT("No map at '%s'"), *TargetLevel));
+        }
+        if (TargetMap->GetWorldPartition())
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("target_level_is_world_partition"),
+                FString::Printf(TEXT("'%s' is a World Partition map; pick one that is not, or omit "
+                                     "target_level and let this command open a blank map"), *TargetLevel));
+        }
+        UEditorLoadingAndSavingUtils::LoadMap(TargetLevel);
+        SwitchLevel = TargetLevel;
+    }
+    else
+    {
+        // A brand new untitled map: nothing is written to disk, so no scratch map is left behind.
+        UEditorLoadingAndSavingUtils::NewBlankMap(/*bSaveExistingMap=*/false);
+        SwitchLevel = TEXT("<untitled blank map>");
+    }
+
+    TSharedPtr<FJsonObject> Result = HandleSafeDeleteAsset(Params);
+    UEditorLoadingAndSavingUtils::LoadMap(OriginalMap);
+
+    if (Result.IsValid())
+    {
+        Result->SetBoolField(TEXT("level_switched"), true);
+        Result->SetStringField(TEXT("switched_to"), SwitchLevel);
+        Result->SetStringField(TEXT("restored_level"), OriginalMap);
     }
     return Result;
 }

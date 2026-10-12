@@ -11,6 +11,7 @@ Two halves:
 |---|---|---|
 | Bridge (C++) | Editor plugin: a local TCP server that dispatches the commands | `Source/UnrealMCP` |
 | MCP server (Python) | FastMCP server: forwards MCP tool calls to the bridge | `Content/Python/unreal_mcp_server.py`, `Content/Python/tools` |
+| Python engine compat | Engine-version-dependent `unreal` python API, one helper per difference | `Content/Python/unreal_mcp_compat.py` |
 
 The bridge listens on `127.0.0.1:55557` once the editor has loaded the plugin.
 
@@ -18,7 +19,8 @@ The bridge listens on `127.0.0.1:55557` once the editor has loaded the plugin.
 
 - Unreal Engine 5.5 - 5.8 (installed build). All four build from this one source tree: every engine API that
   moved between those releases is guarded in `Source/UnrealMCP/Private/Compat/UnrealMCPVersionCompat.h`, so a new
-  engine version is a change there rather than a hunt through the command files.
+  engine version is a change there rather than a hunt through the command files. The same rule applies to the
+  `unreal` python API: `Content/Python/unreal_mcp_compat.py` is the one place a version difference lives.
 - Windows (the bridge and the build scripts are Windows-first).
 - A C++ toolchain UnrealBuildTool accepts. Visual Studio 2022 is the supported one; newer Visual Studio releases work
   as long as they ship the MSVC v143 toolset (UBT picks that toolset up and reports it as `Visual Studio 2022 14.3x`).

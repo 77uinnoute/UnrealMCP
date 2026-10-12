@@ -1012,7 +1012,20 @@ void FUnrealMCPParticleCommands::RegisterCommands(FMCPCommandRegistry& Registry)
             MCPParam(TEXT("lod_index"), TEXT("int"), TEXT("LOD level index")),
             MCPParam(TEXT("distance"), TEXT("float"), TEXT("Distance threshold")),
         }), MCPFlags(false, true, false),
-        ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("set_particle_lod_distance"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleSetParticleLODDistance(P); }); }));}
+        ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("set_particle_lod_distance"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleSetParticleLODDistance(P); }); }));
+
+    // Response shaping that RunCommand resolves for every particle command, before any handler runs - so it
+    // belongs to the domain's contract, not to a handful of registrations. Declared once here: without it
+    // these five were reachable and effective but absent from list_mcp_commands, and dispatch reported them
+    // as undeclared parameters.
+    Registry.AddParamsToCategory(TEXT("particle"), {
+        MCPParamOpt(TEXT("detail"), TEXT("string"), TEXT("Response detail: summary | full (writes default to full, reads to summary)")),
+        MCPParamOpt(TEXT("fields"), TEXT("array"), TEXT("Restrict the response to these fields; an unknown field name is rejected with the known set")),
+        MCPParamOpt(TEXT("return_state"), TEXT("bool"), TEXT("false selects the summary detail level")),
+        MCPParamOpt(TEXT("include_modules"), TEXT("bool"), TEXT("Include the module stack in the response")),
+        MCPParamOpt(TEXT("auto_close"), TEXT("bool"), TEXT("Close the asset's editors after a mutating write")),
+    });
+}
 
 TSharedPtr<FJsonObject> FUnrealMCPParticleCommands::RunCommand(const FString& CommandType,
                                                               const TSharedPtr<FJsonObject>& Params,

@@ -25,6 +25,8 @@ attach_parent                    # response field of attach_component_to_compone
 attach_socket                    # response field of attach_component_to_component (read back from the SCS)
 duplicate_components             # response field of get_blueprint_component_hierarchy (SCS names registered twice)
 create_failed                    # error code documented in a skill, not a tool
+is_dirty                         # unreal.Package python API (5.6+), named in the level skill's dirty-flag note
+set_dirty_flag                   # unreal.Package python API (5.6+), named in the level skill's dirty-flag note
 scan_strategy                    # response field of find_montages_using_animation, not a tool
 export_render_target             # unreal.RenderingLibrary python API quoted in the material skill (its PNG output is unusable, see preview_material_expression)
 render_settled                   # response field of preview_material_expression, not a tool
@@ -83,3 +85,30 @@ resolved_viewport                # response field of take_screenshot(source=asse
 editor_not_open                  # error code of take_screenshot(source=asset_editor), not a tool
 viewport_ambiguous               # error code of take_screenshot(source=asset_editor), not a tool
 rename_failed                    # error code of move_asset / move_directory when the engine refuses the rename, not a tool
+
+# 2026-10-09: identifiers the doc scan now sees because is_ / start_ / preview_ joined the tool verbs
+# (they had to: start_pie, preview_material_expression and friends are real tools and their skill
+# mentions were invisible before). Everything below is a response field, a python API or a struct
+# field name quoted in prose - none of them is on the command surface.
+is_override                      # response field of add_blueprint_function_graph / list_blueprint_function_graphs
+is_root                          # response field of get_blueprint_component_hierarchy (SCS root flag)
+is_inherited                     # response field of get_blueprint_component_hierarchy
+is_editable                      # response field of list_blueprint_graphs / get_graphs
+is_input_key_down                # unreal PlayerController python API, quoted to say there is no key-inject API on the PC
+is_looping                       # response field of get_next_section / list_sections
+is_branching_point               # response field of list_notifies / get_notify_info
+is_enabled                       # property key of set_widget_properties' props object
+start_position                   # FAnimSegment field documented in prose (AnimStartTime)
+start_bone                       # TargetChainSettings field name documented in prose
+preview_available                # response field of the animation editor session read
+preview_time                     # response field of the animation editor session read
+save_current_level               # unreal LevelEditorSubsystem python API named in the level skill's trigger list
+
+# 2026-10-10: the img-gen MCP server and the coding agent's own file tool, named in the
+# openai-image-proxy-wiring skill (that skill is about a non-UE image proxy, not this plugin).
+generate_image                   # img-gen MCP tool, not a UE command
+read_file                        # coding-agent file tool, not a UE command
+
+# 2026-10-12: the UMG skill's font-family chapter, where the composite Font asset can only be
+# filled in through the struct text round trip.
+import_text                      # unreal struct python API (the write half of export_text), not an MCP tool

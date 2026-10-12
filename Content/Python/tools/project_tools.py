@@ -18,17 +18,15 @@ def register_project_tools(mcp: FastMCP):
     def create_input_mapping(
         ctx: Context,
         action_name: str,
-        key: str,
-        input_type: str = "Action"
+        key: str
     ) -> Dict[str, Any]:
         """
-        Create an input mapping for the project.
-        
+        Create an ACTION input mapping for the project (axis mappings are not supported here).
+
         Args:
             action_name: Name of the input action
             key: Key to bind (SpaceBar, LeftMouseButton, etc.)
-            input_type: Type of input mapping (Action or Axis)
-            
+
         Returns:
             Response with action_name, key and `persisted`. `persisted: true` means the mapping was
             written to Config/DefaultInput.ini and therefore survives an editor restart; when it is
@@ -43,10 +41,12 @@ def register_project_tools(mcp: FastMCP):
                 logger.error("Failed to connect to Unreal Engine")
                 return {"success": False, "message": "Failed to connect to Unreal Engine"}
             
+            # No `input_type`: it used to be sent as "Action"/"Axis" and read by nobody - the command
+            # builds an FInputActionKeyMapping whatever it says, so an "Axis" request silently produced
+            # an action binding. Better to not offer the knob than to accept and ignore it.
             params = {
                 "action_name": action_name,
-                "key": key,
-                "input_type": input_type
+                "key": key
             }
             
             logger.info(f"Creating input mapping '{action_name}' with key '{key}'")

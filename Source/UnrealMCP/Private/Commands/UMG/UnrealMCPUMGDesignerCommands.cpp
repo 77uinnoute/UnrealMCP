@@ -10,6 +10,7 @@
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "WidgetBlueprintEditor.h"
 #include "Toolkits/AssetEditorToolkit.h"
+#include "Settings/WidgetDesignerSettings.h"
 #include "Editor.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Commands/UMG/UnrealMCPUMGCommandHelpers.h"
@@ -340,6 +341,87 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetUMGDesignSize(const TSha
 	Result->SetStringField(TEXT("scope"),
 		TEXT("designer preview only: the runtime size is decided by the widget's parent at play time"));
 	FinishWidgetWrite(Blueprint, Params, Result);
+	return Result;
+}
+
+// The designer's own view settings (dashed widget outlines, grid snapping). These are project-wide
+// USER settings - UWidgetDesignerSettings is UCLASS(config=EditorPerProjectUserSettings) - so there
+// is no blueprint_name here, and no asset to save: the write lands in the per-project ini.
+TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetUMGDesignerOverlay(const TSharedPtr<FJsonObject>& Params)
+{
+	UWidgetDesignerSettings* Settings = GetMutableDefault<UWidgetDesignerSettings>();
+	if (!Settings)
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("settings_unavailable"),
+			TEXT("UWidgetDesignerSettings is not available in this editor build"));
+	}
+
+	const bool bHasOutlines = Params->HasField(TEXT("show_outlines"));
+	const bool bHasGridSnap = Params->HasField(TEXT("grid_snap_enabled"));
+	double GridSnapSize = 0.0;
+	const bool bHasGridSize = Params->TryGetNumberField(TEXT("grid_snap_size"), GridSnapSize);
+	bool bSave = true;
+	Params->TryGetBoolField(TEXT("save"), bSave);
+
+	if (!bHasOutlines && !bHasGridSnap && !bHasGridSize)
+	{
+		TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("missing_parameter"),
+			TEXT("Pass at least one of 'show_outlines' / 'grid_snap_enabled' / 'grid_snap_size'"));
+		TArray<TSharedPtr<FJsonValue>> Supported;
+		for (const TCHAR* Field : { TEXT("show_outlines"), TEXT("grid_snap_enabled"),
+		                            TEXT("grid_snap_size"), TEXT("save") })
+		{
+			Supported.Add(MakeShared<FJsonValueString>(Field));
+		}
+		Error->SetArrayField(TEXT("supported_fields"), Supported);
+		return Error;
+	}
+
+	TSharedPtr<FJsonObject> Before = MakeShared<FJsonObject>();
+	Before->SetBoolField(TEXT("show_outlines"), Settings->bShowOutlines);
+	Before->SetBoolField(TEXT("grid_snap_enabled"), Settings->GridSnapEnabled != 0);
+	Before->SetNumberField(TEXT("grid_snap_size"), Settings->GridSnapSize);
+
+	TArray<TSharedPtr<FJsonValue>> Applied;
+	bool bOutlines = Settings->bShowOutlines;
+	if (bHasOutlines && Params->TryGetBoolField(TEXT("show_outlines"), bOutlines))
+	{
+		Settings->bShowOutlines = bOutlines;
+		Applied.Add(MakeShared<FJsonValueString>(TEXT("show_outlines")));
+	}
+	bool bGridSnap = Settings->GridSnapEnabled != 0;
+	if (bHasGridSnap && Params->TryGetBoolField(TEXT("grid_snap_enabled"), bGridSnap))
+	{
+		Settings->GridSnapEnabled = bGridSnap ? 1 : 0;
+		Applied.Add(MakeShared<FJsonValueString>(TEXT("grid_snap_enabled")));
+	}
+	if (bHasGridSize)
+	{
+		Settings->GridSnapSize = FMath::RoundToInt(GridSnapSize);
+		Applied.Add(MakeShared<FJsonValueString>(TEXT("grid_snap_size")));
+	}
+
+	const bool bSaved = bSave && Settings->TryUpdateDefaultConfigFile();
+
+	TSharedPtr<FJsonObject> After = MakeShared<FJsonObject>();
+	After->SetBoolField(TEXT("show_outlines"), Settings->bShowOutlines);
+	After->SetBoolField(TEXT("grid_snap_enabled"), Settings->GridSnapEnabled != 0);
+	After->SetNumberField(TEXT("grid_snap_size"), Settings->GridSnapSize);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetArrayField(TEXT("applied"), Applied);
+	Result->SetNumberField(TEXT("applied_count"), Applied.Num());
+	Result->SetObjectField(TEXT("settings_before"), Before);
+	Result->SetObjectField(TEXT("settings"), After);
+	Result->SetBoolField(TEXT("saved_config"), bSaved);
+	Result->SetStringField(TEXT("config_section"), TEXT("[/Script/UMGEditor.WidgetDesignerSettings]"));
+	Result->SetStringField(TEXT("scope"),
+		TEXT("project-wide user setting: the value is stored in the per-project user settings ini, "
+		     "not in any asset"));
+	// Honesty about when it takes effect: the designer view reads the setting while it builds its
+	// preview, so an already-open designer keeps the outlines it started with.
+	Result->SetBoolField(TEXT("existing_designer_views_may_need_reopen"), true);
 	return Result;
 }
 

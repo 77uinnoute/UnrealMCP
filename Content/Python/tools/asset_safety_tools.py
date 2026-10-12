@@ -17,7 +17,7 @@ referencer packages stale on disk and leaves no redirector behind).
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
 # Get logger
@@ -103,6 +103,58 @@ def register_asset_safety_tools(mcp: FastMCP):
 
         except Exception as e:
             error_msg = f"Error safely deleting asset: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
+    def delete_asset_with_level_switch(ctx: Context, asset_path: str, target_level: Optional[str] = None,
+                                       save_dirty: bool = False, force: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Delete an asset that the World Partition guard blocks, by switching levels around the delete.
+
+        Use it when safe_delete_asset answers `world_partition_open` (any level whose partition is
+        initialized refuses package deletion). The asset is deleted from a scratch level - a blank
+        untitled map by default, so nothing is written to disk - and the original level is loaded back
+        afterwards. Only that code is handled: an asset referenced by a World Partition external actor
+        package (`world_partition_referenced`) stays refused, because closing the map does not detach
+        those references.
+
+        Args:
+            asset_path: Asset object path to delete.
+            target_level: Map to switch to (must not be a World Partition map); omit it to let the
+                command open a blank untitled map.
+            save_dirty: Save the current level before switching. Default False, in which case a level
+                with unsaved changes is refused with `level_dirty` instead of being discarded silently.
+            force: Break blocking references, then delete (default False).
+
+        Returns:
+            The delete result (success / deleted / error_code / referencers) plus `level_switched`,
+            `switched_to` and `restored_level`; or a structured error
+            (level_dirty / level_save_failed / target_level_not_found /
+            target_level_is_world_partition / no_editor_world).
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            params = {"asset_path": asset_path, "save_dirty": save_dirty, "force": force}
+            if target_level is not None:
+                params["target_level"] = target_level
+            logger.info(f"Deleting asset across a level switch: {asset_path}")
+            response = unreal.send_command("delete_asset_with_level_switch", params)
+
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+
+            return response
+
+        except Exception as e:
+            error_msg = f"Error deleting asset across a level switch: {e}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 

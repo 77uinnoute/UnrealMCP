@@ -17,6 +17,7 @@
 #include "Commands/Asset/UnrealMCPAssetCommands.h"
 #include "Commands/Asset/UnrealMCPAssetEditCommands.h"
 #include "Commands/Particle/UnrealMCPParticleCommands.h"
+#include "Commands/Niagara/UnrealMCPNiagaraCommands.h"
 #include "Commands/Animation/UnrealMCPAnimationCommands.h"
 #include "Commands/PCG/UnrealMCPPCGCommands.h"
 #include "Commands/Clothing/UnrealMCPClothCommands.h"
@@ -85,6 +86,7 @@ private:
     TSharedPtr<FUnrealMCPAssetCommands> AssetCommands;
     TSharedPtr<FUnrealMCPAssetEditCommands> AssetEditCommands;
     TSharedPtr<FUnrealMCPParticleCommands> ParticleCommands;
+    TSharedPtr<FUnrealMCPNiagaraCommands> NiagaraCommands;
     TSharedPtr<FUnrealMCPAnimationCommands> AnimationCommands;
     TSharedPtr<FUnrealMCPPCGCommands> PCGCommands;
     TSharedPtr<FUnrealMCPReflectionCommands> ReflectionCommands;

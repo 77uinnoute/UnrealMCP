@@ -8,6 +8,7 @@
 #include "Components/CanvasPanelSlot.h"
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
+#include "Components/Border.h"
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
 #include "Components/VerticalBoxSlot.h"
@@ -1079,6 +1080,17 @@ namespace
 				if (Resource)
 				{
 					Brush.SetResourceObject(Resource);
+					// Box / Border / RoundedBox scale through ImageSize, and a brush that arrived with a
+					// resource but no size (python-built brushes always do) draws NOTHING in those modes.
+					// Seed it from the texture when it is still unset.
+					if (UTexture2D* Texture = Cast<UTexture2D>(Resource))
+					{
+						const UE::Slate::FDeprecateVector2DResult CurrentSize = Brush.GetImageSize();
+						if (CurrentSize.X <= 0.0 && CurrentSize.Y <= 0.0)
+						{
+							Brush.SetImageSize(FVector2D(Texture->GetSizeX(), Texture->GetSizeY()));
+						}
+					}
 				}
 				if (bHasMargin)
 				{
@@ -1905,6 +1917,329 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetWidgetProperties(const T
 	Result->SetArrayField(TEXT("failed"), Failed);
 	Result->SetNumberField(TEXT("failed_count"), Failed.Num());
 	Result->SetObjectField(TEXT("properties"), WidgetPropsToJson(Widget));
+	FinishWidgetEdit(WidgetBlueprint, Params, Result);
+	return Result;
+}
+
+// Full brush writer for a Border (Background) or an Image (Brush), including ImageSize.
+// Why this exists as a command: FSlateBrush::ImageSize is an FDeprecateSlateVector2D, which python
+// cannot construct (Vector2D / IntPoint are both rejected by the property setter), so a brush built
+// in python keeps Slate's default 32x32 and the caller cannot choose a 9-slice-consistent value.
+// MEASURED LIMIT (2026-10-10): draw_as=Box on a Border's Background drew NOTHING in this project -
+// at image_size 32 AND at 64 - while the very same widget rendered again with draw_as=Image. The
+// 9-slice modes are therefore unverified through this command; do not advertise them as working.
+TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetWidgetBrush(const TSharedPtr<FJsonObject>& Params)
+{
+	FString BlueprintName;
+	if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("missing_parameter"), TEXT("Missing 'blueprint_name' parameter"));
+	}
+	FString WidgetName;
+	if (!Params->TryGetStringField(TEXT("widget_name"), WidgetName))
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("missing_parameter"), TEXT("Missing 'widget_name' parameter"));
+	}
+
+	TSharedPtr<FJsonObject> Error;
+	UWidgetBlueprint* WidgetBlueprint = LoadWidgetBlueprintByParam(BlueprintName, Error);
+	if (!WidgetBlueprint)
+	{
+		return Error;
+	}
+	UWidget* Widget = FindWidgetOrError(WidgetBlueprint, WidgetName, BlueprintName, Error);
+	if (!Widget)
+	{
+		return Error;
+	}
+
+	UBorder* AsBorder = Cast<UBorder>(Widget);
+	UImage* AsImage = Cast<UImage>(Widget);
+	if (!AsBorder && !AsImage)
+	{
+		TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("unsupported_widget"),
+			FString::Printf(TEXT("'%s' is a %s; this command writes the brush of a Border (Background) or an Image (Brush)"),
+				*Widget->GetName(), *Widget->GetClass()->GetName()));
+		TArray<TSharedPtr<FJsonValue>> Supported;
+		Supported.Add(MakeShared<FJsonValueString>(TEXT("Border")));
+		Supported.Add(MakeShared<FJsonValueString>(TEXT("Image")));
+		Response->SetArrayField(TEXT("supported_widget_classes"), Supported);
+		return Response;
+	}
+
+	const bool bHasResource = Params->HasField(TEXT("resource"));
+	const bool bHasDrawAs = Params->HasField(TEXT("draw_as"));
+	const bool bHasMargin = Params->HasField(TEXT("margin"));
+	const bool bHasImageSize = Params->HasField(TEXT("image_size"));
+	const bool bHasTint = Params->HasField(TEXT("tint"));
+	const bool bHasColor = Params->HasField(TEXT("color"));
+	if (!bHasResource && !bHasDrawAs && !bHasMargin && !bHasImageSize && !bHasTint && !bHasColor)
+	{
+		TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("missing_parameter"),
+			TEXT("Pass at least one of 'resource' / 'draw_as' / 'margin' / 'image_size' / 'tint' / 'color'"));
+		TArray<TSharedPtr<FJsonValue>> Supported;
+		for (const TCHAR* Field : { TEXT("resource"), TEXT("draw_as"), TEXT("margin"), TEXT("image_size"),
+		                            TEXT("tint"), TEXT("color") })
+		{
+			Supported.Add(MakeShared<FJsonValueString>(Field));
+		}
+		Response->SetArrayField(TEXT("supported_fields"), Supported);
+		return Response;
+	}
+
+	auto DescribeBrush = [](const FSlateBrush& InBrush)
+	{
+		const UEnum* DrawTypeEnum = StaticEnum<ESlateBrushDrawType::Type>();
+		const UE::Slate::FDeprecateVector2DResult Size = InBrush.GetImageSize();
+		const FLinearColor Tint = InBrush.TintColor.GetSpecifiedColor();
+		return FString::Printf(
+			TEXT("resource=%s draw_as=%s margin=(%.1f,%.1f,%.1f,%.1f) image_size=(%.1f,%.1f) tint=(%.3f,%.3f,%.3f,%.3f)"),
+			InBrush.GetResourceObject() ? *InBrush.GetResourceObject()->GetPathName() : TEXT("None"),
+			DrawTypeEnum ? *DrawTypeEnum->GetNameStringByValue((int64)InBrush.DrawAs) : TEXT("?"),
+			InBrush.Margin.Left, InBrush.Margin.Top, InBrush.Margin.Right, InBrush.Margin.Bottom,
+			Size.X, Size.Y, Tint.R, Tint.G, Tint.B, Tint.A);
+	};
+
+	FSlateBrush Brush = AsBorder ? AsBorder->Background : AsImage->GetBrush();
+	const FString BrushBefore = DescribeBrush(Brush);
+	const FLinearColor ColorBefore = AsBorder ? AsBorder->GetBrushColor() : AsImage->GetColorAndOpacity();
+
+	TArray<TSharedPtr<FJsonValue>> Applied;
+	TArray<TSharedPtr<FJsonValue>> Failed;
+	auto RecordApplied = [&Applied](const FString& Key, const FString& Before, const FString& After)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("key"), Key);
+		Entry->SetStringField(TEXT("value_before"), Before);
+		Entry->SetStringField(TEXT("value_after"), After);
+		Applied.Add(MakeShared<FJsonValueObject>(Entry));
+	};
+	auto RecordFailed = [&Failed](const FString& Key, const FString& Code, const FString& Message)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("key"), Key);
+		Entry->SetStringField(TEXT("error"), Code);
+		Entry->SetStringField(TEXT("message"), Message);
+		Failed.Add(MakeShared<FJsonValueObject>(Entry));
+	};
+
+	Widget->Modify();
+	WidgetBlueprint->Modify();
+
+	FString ResourcePath;
+	if (bHasResource && Params->TryGetStringField(TEXT("resource"), ResourcePath) && !ResourcePath.IsEmpty())
+	{
+		UObject* Asset = FUnrealMCPCommonUtils::FindAsset(ResourcePath);
+		if (!Asset)
+		{
+			RecordFailed(TEXT("resource"), TEXT("asset_not_found"), FString::Printf(TEXT("no asset at '%s'"), *ResourcePath));
+		}
+		else if (!Asset->IsA<UTexture2D>() && !Asset->IsA<UMaterialInterface>())
+		{
+			RecordFailed(TEXT("resource"), TEXT("unsupported_resource"), FString::Printf(
+				TEXT("'%s' is a %s; a brush resource is a texture or a material"), *ResourcePath, *Asset->GetClass()->GetName()));
+		}
+		else
+		{
+			Brush.SetResourceObject(Asset);
+			// A zero image size silences Box/Border/RoundedBox drawing, and the engine only fills it in
+			// when the brush is authored in the details panel - so default it from the texture here.
+			if (UTexture2D* Texture = Cast<UTexture2D>(Asset))
+			{
+				const UE::Slate::FDeprecateVector2DResult Current = Brush.GetImageSize();
+				if (!bHasImageSize && Current.X <= 0.0 && Current.Y <= 0.0)
+				{
+					Brush.SetImageSize(FVector2D(Texture->GetSizeX(), Texture->GetSizeY()));
+					RecordApplied(TEXT("image_size"), TEXT("(0,0)"),
+						FString::Printf(TEXT("(%d,%d) from texture"), Texture->GetSizeX(), Texture->GetSizeY()));
+				}
+			}
+			RecordApplied(TEXT("resource"), TEXT("None"), Asset->GetPathName());
+		}
+	}
+	else if (bHasResource)
+	{
+		RecordFailed(TEXT("resource"), TEXT("missing_parameter"), TEXT("'resource' needs an asset path string"));
+	}
+
+	if (bHasDrawAs)
+	{
+		FString DrawAs;
+		Params->TryGetStringField(TEXT("draw_as"), DrawAs);
+		ESlateBrushDrawType::Type NewDrawAs = Brush.DrawAs;
+		if (DrawAs.Equals(TEXT("NoDrawType"), ESearchCase::IgnoreCase)) { NewDrawAs = ESlateBrushDrawType::NoDrawType; }
+		else if (DrawAs.Equals(TEXT("Image"), ESearchCase::IgnoreCase)) { NewDrawAs = ESlateBrushDrawType::Image; }
+		else if (DrawAs.Equals(TEXT("Box"), ESearchCase::IgnoreCase)) { NewDrawAs = ESlateBrushDrawType::Box; }
+		else if (DrawAs.Equals(TEXT("Border"), ESearchCase::IgnoreCase)) { NewDrawAs = ESlateBrushDrawType::Border; }
+		else if (DrawAs.Equals(TEXT("RoundedBox"), ESearchCase::IgnoreCase)) { NewDrawAs = ESlateBrushDrawType::RoundedBox; }
+		else
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("key"), TEXT("draw_as"));
+			Entry->SetStringField(TEXT("error"), TEXT("invalid_value"));
+			Entry->SetStringField(TEXT("message"), FString::Printf(TEXT("'%s' is not a draw type"), *DrawAs));
+			TArray<TSharedPtr<FJsonValue>> Candidates;
+			for (const TCHAR* Candidate : { TEXT("Image"), TEXT("Box"), TEXT("Border"), TEXT("RoundedBox"), TEXT("NoDrawType") })
+			{
+				Candidates.Add(MakeShared<FJsonValueString>(Candidate));
+			}
+			Entry->SetArrayField(TEXT("candidates"), Candidates);
+			Failed.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+		if (NewDrawAs != Brush.DrawAs)
+		{
+			const UEnum* DrawTypeEnum = StaticEnum<ESlateBrushDrawType::Type>();
+			const FString BeforeName = DrawTypeEnum ? DrawTypeEnum->GetNameStringByValue((int64)Brush.DrawAs) : FString();
+			Brush.DrawAs = NewDrawAs;
+			const FString AfterName = DrawTypeEnum ? DrawTypeEnum->GetNameStringByValue((int64)Brush.DrawAs) : FString();
+			RecordApplied(TEXT("draw_as"), BeforeName, AfterName);
+		}
+	}
+
+	if (bHasMargin)
+	{
+		FMargin NewMargin;
+		if (JsonMargin(Params->TryGetField(TEXT("margin")), NewMargin))
+		{
+			const FString Before = FString::Printf(TEXT("(%.1f,%.1f,%.1f,%.1f)"),
+				Brush.Margin.Left, Brush.Margin.Top, Brush.Margin.Right, Brush.Margin.Bottom);
+			Brush.Margin = NewMargin;
+			RecordApplied(TEXT("margin"), Before, FString::Printf(TEXT("(%.1f,%.1f,%.1f,%.1f)"),
+				NewMargin.Left, NewMargin.Top, NewMargin.Right, NewMargin.Bottom));
+		}
+		else
+		{
+			RecordFailed(TEXT("margin"), TEXT("unsupported_property_type"),
+				TEXT("'margin' takes a number, [l, t, r, b] or {left, top, right, bottom}"));
+		}
+	}
+
+	if (bHasImageSize)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* SizeArray = nullptr;
+		double SingleSize = 0.0;
+		FVector2D NewSize = FVector2D::ZeroVector;
+		bool bParsed = false;
+		if (Params->TryGetArrayField(TEXT("image_size"), SizeArray) && SizeArray && SizeArray->Num() >= 2)
+		{
+			double X = 0.0;
+			double Y = 0.0;
+			if ((*SizeArray)[0]->TryGetNumber(X) && (*SizeArray)[1]->TryGetNumber(Y))
+			{
+				NewSize = FVector2D(X, Y);
+				bParsed = true;
+			}
+		}
+		else if (Params->TryGetNumberField(TEXT("image_size"), SingleSize))
+		{
+			NewSize = FVector2D(SingleSize, SingleSize);
+			bParsed = true;
+		}
+		if (bParsed)
+		{
+			const UE::Slate::FDeprecateVector2DResult Before = Brush.GetImageSize();
+			Brush.SetImageSize(NewSize);
+			RecordApplied(TEXT("image_size"), FString::Printf(TEXT("(%.1f,%.1f)"), Before.X, Before.Y),
+				FString::Printf(TEXT("(%.1f,%.1f)"), NewSize.X, NewSize.Y));
+		}
+		else
+		{
+			RecordFailed(TEXT("image_size"), TEXT("unsupported_property_type"),
+				TEXT("'image_size' takes [width, height] (or one number for both)"));
+		}
+	}
+
+	if (bHasTint)
+	{
+		FLinearColor Tint;
+		if (JsonColor(Params->TryGetField(TEXT("tint")), Tint))
+		{
+			const FString Before = ColorToString(Brush.TintColor.GetSpecifiedColor());
+			Brush.TintColor = FSlateColor(Tint);
+			RecordApplied(TEXT("tint"), Before, ColorToString(Brush.TintColor.GetSpecifiedColor()));
+		}
+		else
+		{
+			RecordFailed(TEXT("tint"), TEXT("unsupported_property_type"), TEXT("'tint' takes [r, g, b, a]"));
+		}
+	}
+
+	FLinearColor NewColor = ColorBefore;
+	bool bColorApplied = false;
+	if (bHasColor)
+	{
+		if (JsonColor(Params->TryGetField(TEXT("color")), NewColor))
+		{
+			RecordApplied(TEXT("color"), ColorToString(ColorBefore), ColorToString(NewColor));
+			bColorApplied = true;
+		}
+		else
+		{
+			RecordFailed(TEXT("color"), TEXT("unsupported_property_type"),
+				TEXT("'color' takes [r, g, b, a] (Border.BrushColor / Image.ColorAndOpacity)"));
+		}
+	}
+
+	// Nothing landed: hand back an error envelope rather than a green receipt with an empty applied[].
+	if (Applied.Num() == 0 && Failed.Num() > 0)
+	{
+		const TSharedPtr<FJsonObject>* FirstFailed = nullptr;
+		FString Code = TEXT("brush_write_failed");
+		FString Message = TEXT("no brush field could be written");
+		if (Failed[0]->TryGetObject(FirstFailed) && FirstFailed->IsValid())
+		{
+			(*FirstFailed)->TryGetStringField(TEXT("error"), Code);
+			(*FirstFailed)->TryGetStringField(TEXT("message"), Message);
+		}
+		TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(Code, Message);
+		Response->SetArrayField(TEXT("failed"), Failed);
+		Response->SetStringField(TEXT("blueprint_name"), WidgetBlueprint->GetName());
+		Response->SetStringField(TEXT("widget_name"), Widget->GetName());
+		return Response;
+	}
+
+	const bool bBrushTouched = bHasResource || bHasDrawAs || bHasMargin || bHasImageSize || bHasTint;
+	if (bBrushTouched)
+	{
+		if (AsBorder)
+		{
+			AsBorder->Background = Brush;
+		}
+		else
+		{
+			AsImage->SetBrush(Brush);
+		}
+	}
+	if (bColorApplied)
+	{
+		if (AsBorder)
+		{
+			AsBorder->SetBrushColor(NewColor);
+		}
+		else
+		{
+			AsImage->SetColorAndOpacity(NewColor);
+		}
+	}
+	Widget->SynchronizeProperties();
+
+	TSharedPtr<FJsonObject> BrushJson = MakeShared<FJsonObject>();
+	BrushJson->SetStringField(TEXT("summary"), DescribeBrush(AsBorder ? AsBorder->Background : AsImage->GetBrush()));
+	BrushJson->SetStringField(TEXT("before"), BrushBefore);
+	BrushJson->SetStringField(TEXT("color_before"), ColorToString(ColorBefore));
+	BrushJson->SetStringField(TEXT("color_after"),
+		ColorToString(AsBorder ? AsBorder->GetBrushColor() : AsImage->GetColorAndOpacity()));
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("blueprint_name"), BlueprintName);
+	Result->SetStringField(TEXT("widget_name"), Widget->GetName());
+	Result->SetStringField(TEXT("widget_class"), Widget->GetClass()->GetName());
+	Result->SetStringField(TEXT("brush_property"), AsBorder ? TEXT("Background") : TEXT("Brush"));
+	Result->SetArrayField(TEXT("applied"), Applied);
+	Result->SetNumberField(TEXT("applied_count"), Applied.Num());
+	Result->SetArrayField(TEXT("failed"), Failed);
+	Result->SetNumberField(TEXT("failed_count"), Failed.Num());
+	Result->SetObjectField(TEXT("brush"), BrushJson);
 	FinishWidgetEdit(WidgetBlueprint, Params, Result);
 	return Result;
 }

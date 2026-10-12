@@ -309,6 +309,7 @@ UnrealMCP —— UE 编辑器控制面：300+ 条命令经本地 TCP bridge(127.
   umg           33  控件蓝图：控件树与槽、属性、绑定、控件动画、加入 PIE 视口
   material      23  材质图：表达式、连线、Custom HLSL 校验、后处理 blendable、单节点预览、重编译
   particle      19  Cascade 粒子：emitter/module/属性与分布曲线/LOD
+  niagara       24  Niagara：system/emitter(含 sim target 与渲染器材质)/编译诊断/用户参数/stack 模块(输入与摘除)/scratch-pad 与 Custom HLSL/关卡 Actor
   pcg           16  程序化生成：图节点、mesh selector、组件生成与清理
   editor        17  关卡 actor：增删查改、变换、视口聚焦、控制台变量、截图、资产编辑器开关
   asset         12  资产生命周期：create/delete/move(_directory)、引用阻断者、磁盘孤儿、后处理 blendable
@@ -369,6 +370,7 @@ from tools.ue_safe_api import register_ue_safe_api_tools
 from tools.asset_safety_tools import register_asset_safety_tools
 from tools.asset_pipeline_tools import register_asset_pipeline_tools
 from tools.particle_tools import register_particle_tools
+from tools.niagara_tools import register_niagara_tools
 from tools.animation_tools import register_animation_tools
 from tools.pcg_tools import register_pcg_tools
 from tools.reflection_tools import register_reflection_tools
@@ -387,6 +389,7 @@ register_ue_safe_api_tools(mcp)
 register_asset_safety_tools(mcp)
 register_asset_pipeline_tools(mcp)
 register_particle_tools(mcp)
+register_niagara_tools(mcp)
 register_animation_tools(mcp)
 register_pcg_tools(mcp)
 register_reflection_tools(mcp)

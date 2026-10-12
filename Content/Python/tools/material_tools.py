@@ -1078,6 +1078,13 @@ def register_material_tools(mcp: FastMCP):
         Scalar values are plain numbers; vector values are {r,g,b,a} objects.
         Unknown parameter names are reported in the `missing` array and skipped.
 
+        On a base material this writes the parameter's DEFAULT value, on a material instance an override.
+        The reply says what the write reaches, so "did it get to what I am looking at" is a read, not a
+        guess: `affects_live_render` plus `live_components_using_material` / `live_render_worlds`. A
+        parameter VALUE needs no recompile - a parameter default is pushed to the components bound to the
+        material on write, and a running PIE shares the same loaded material; `recompile` is for graph
+        changes (nodes/links), not for values.
+
         Args:
             asset_path: Full asset path (material or material instance)
             values: Mapping of parameter name to value, e.g.
@@ -1085,7 +1092,8 @@ def register_material_tools(mcp: FastMCP):
             recompile: recompile after the batch (materials only, default false)
 
         Returns:
-            Dict with updated and missing arrays
+            Dict with updated and missing arrays, plus param_scope / affects_live_render /
+            live_components_using_material / live_render_worlds / live_render_note
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -1282,6 +1290,72 @@ def register_material_tools(mcp: FastMCP):
 
         except Exception as e:
             error_msg = f"Error previewing material expression: {e}"
+            logger.error(error_msg)
+            return {"status": "error", "error": error_msg}
+
+    @mcp.tool()
+    def read_render_target_stats(ctx: Context, asset_path: str, tile_width: int = 256,
+                                 tile_height: Optional[int] = None, sample_step: int = 8,
+                                 png_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Read a TextureRenderTarget2D back and report what is actually in it, per tile, in floats.
+
+        This is the read path for a GPU-written target (a Grid2DCollection's output being the
+        case that forced it). Two python routes exist and neither works:
+        unreal.RenderingLibrary.read_render_target_pixel answers (255,0,0,255) for every
+        float format regardless of content, and export_render_target writes a 16-bit PNG for
+        RTF_R16F (which silently decodes as all-zero when read as 8-bit) and an undecodable
+        file for RTF_RGBA16F. This command decodes the GPU texture itself, so no value is
+        quantised to 8 bits and no intermediate file appears unless png_path asks for one.
+
+        Tiles are row-major and are the SAME index the grid's attribute table uses:
+        tile = list_niagara_grid_attributes' first_slice - slot_count. Use that command for
+        the index <-> attribute-name map; use this one to find out which tiles hold data at all
+        (a target nothing rendered into reads as the engine's clear colour, not as zeroes).
+
+        Read-only, but it pumps the rendering thread and that wait has no timeout in the engine: use it
+        as a diagnostic, not per frame, and NOT while a PIE start/stop or a level load is still in flight
+        (during one the pump waits for the render thread and the editor stops answering until it catches up).
+
+        Args:
+            asset_path: TextureRenderTarget2D asset path.
+            tile_width: Tile width in pixels (default 256 - the grid's NumCells.X).
+            tile_height: Tile height in pixels (default: same as tile_width).
+            sample_step: Sample every Nth pixel in x and y (default 8).
+            png_path: Optional path; the readback is encoded to a PNG only when this is given.
+
+        Returns:
+            Dict with size_x, size_y, format, pixel_format, channels, tile_width, tile_height,
+            sample_step, tiles_x, tiles_y, tile_count and tiles[] where each tile carries
+            index, sample_count and per-channel arrays min / max / mean / nonzero (an
+            unsampled tile reports 0s, and nonzero > 0 is how you tell "this tile has data").
+            Errors: load_failed / not_a_render_target (the asset is another class),
+            unsupported_format (supported_formats lists the decodable ones),
+            no_resource (never rendered - hint points at the grid's NumAttributes / NumCells),
+            readback_failed.
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        if not asset_path:
+            return {"status": "error", "error": "Missing 'asset_path' parameter"}
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
+
+            params: Dict[str, Any] = {"asset_path": asset_path,
+                                      "tile_width": tile_width,
+                                      "sample_step": sample_step}
+            if tile_height is not None:
+                params["tile_height"] = tile_height
+            if png_path:
+                params["png_path"] = png_path
+            return unreal.send_command("read_render_target_stats", params)
+
+        except Exception as e:
+            error_msg = f"Error reading render target stats: {e}"
             logger.error(error_msg)
             return {"status": "error", "error": error_msg}
 

@@ -23,6 +23,10 @@
 #include "Components/SceneComponent.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Selection.h"
+#include "Engine/Level.h"
+#include "Engine/World.h"
+#include "Editor.h"
+#include "ScopedTransaction.h"
 #include "EditorAssetLibrary.h"
 #include "FileHelpers.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -187,6 +191,232 @@ void FUnrealMCPCommonUtils::AddEditorState(const TSharedPtr<FJsonObject>& Respon
     Response->SetObjectField(TEXT("editor_state"), State);
 }
 
+void FUnrealMCPCommonUtils::AddEditorWorldWriteWarning(const TSharedPtr<FJsonObject>& Response, const FString& CommandName)
+{
+    if (!Response.IsValid() || !ResponseIndicatesSuccess(Response))
+    {
+        return;
+    }
+
+    // The editor world is the one these commands write; PIE renders its own copy of it.
+    if (!GEditor || !GEditor->PlayWorld)
+    {
+        return;
+    }
+
+    // Never overwrite a warning the handler itself produced (e.g. a partially applied write).
+    if (Response->HasField(TEXT("warning")))
+    {
+        return;
+    }
+
+    Response->SetStringField(TEXT("warning"),
+        FString::Printf(TEXT("%s wrote the EDITOR world, and a PIE session is running: the play session renders "
+                             "its own copy, so nothing in it changes until PIE is restarted. Two captures taken "
+                             "before and after this call will look identical. Stop PIE, apply the change, then "
+                             "start PIE again - or make the change through a runtime path (execute_python_* "
+                             "against the play world) if it has to happen mid-session."),
+            *CommandName));
+}
+
+namespace
+{
+    // "UDirectionalLightComponent" / "directional_light_component" / "DirectionalLight" all have to reach the
+    // same component: the selector in a property path is written by hand, so the U prefix, the Component
+    // suffix and the casing cannot be load-bearing.
+    FString NormalizeComponentToken(const FString& In)
+    {
+        FString Token = In.TrimStartAndEnd();
+        if (Token.Len() > 1 && (Token[0] == TEXT('U') || Token[0] == TEXT('A')) && FChar::IsUpper(Token[1]))
+        {
+            Token = Token.RightChop(1);
+        }
+        Token = Token.ToLower();
+        Token.ReplaceInline(TEXT("_"), TEXT(""));
+        Token.ReplaceInline(TEXT(" "), TEXT(""));
+        if (Token.EndsWith(TEXT("component")) && Token.Len() > 9)
+        {
+            Token = Token.LeftChop(9);
+        }
+        return Token;
+    }
+}
+
+UActorComponent* FUnrealMCPCommonUtils::FindActorComponentBySelector(AActor* Actor, const FString& Selector)
+{
+    if (!Actor || Selector.IsEmpty())
+    {
+        return nullptr;
+    }
+
+    TArray<UActorComponent*> Components;
+    Actor->GetComponents(Components);
+
+    // 1. the component's own object name, verbatim - that is what the outliner and get_actor_properties show.
+    for (UActorComponent* Component : Components)
+    {
+        if (Component && Component->GetName().Equals(Selector, ESearchCase::IgnoreCase))
+        {
+            return Component;
+        }
+    }
+
+    // 2. a class match anywhere in the component's own class chain, so "LightComponent.intensity" reaches the
+    //    UDirectionalLightComponent of a light actor (the shape that had no MCP route before).
+    const FString Wanted = NormalizeComponentToken(Selector);
+    TArray<UActorComponent*> Matches;
+    for (UActorComponent* Component : Components)
+    {
+        if (!Component)
+        {
+            continue;
+        }
+        for (UClass* Class = Component->GetClass(); Class && Class != UObject::StaticClass(); Class = Class->GetSuperClass())
+        {
+            if (NormalizeComponentToken(Class->GetName()) == Wanted)
+            {
+                Matches.AddUnique(Component);
+                break;
+            }
+        }
+    }
+
+    if (Matches.Num() == 1)
+    {
+        return Matches[0];
+    }
+    if (Matches.Num() > 1)
+    {
+        // Several components of that kind: the root is the one a dot path is understood to mean (the light
+        // component of a light actor), and anything else is reported instead of guessed.
+        if (UActorComponent* Root = Actor->GetRootComponent())
+        {
+            if (Matches.Contains(Root))
+            {
+                return Root;
+            }
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
+void FUnrealMCPCommonUtils::DescribeActorComponents(AActor* Actor, TArray<FString>& OutDescriptions)
+{
+    OutDescriptions.Reset();
+    if (!Actor)
+    {
+        return;
+    }
+
+    TArray<UActorComponent*> Components;
+    Actor->GetComponents(Components);
+    for (UActorComponent* Component : Components)
+    {
+        if (!Component)
+        {
+            continue;
+        }
+        OutDescriptions.Add(FString::Printf(TEXT("%s (%s)"), *Component->GetName(), *Component->GetClass()->GetName()));
+        if (OutDescriptions.Num() >= 16)
+        {
+            break;
+        }
+    }
+}
+
+void FUnrealMCPCommonUtils::MarkActorModified(AActor* Actor)
+{
+    if (!Actor)
+    {
+        return;
+    }
+
+    // Modify() records the state in the transaction the dispatcher opened for this command.
+    Actor->Modify();
+
+    // The properties these commands write live on the components (LightComponent0.Intensity), and that is
+    // also where the render state sits, so they belong in the same record.
+    TArray<UActorComponent*> Components;
+    Actor->GetComponents(Components);
+    for (UActorComponent* Component : Components)
+    {
+        if (Component)
+        {
+            Component->Modify();
+        }
+    }
+}
+
+FUnrealMCPCommonUtils::FMCPEditorWorldWriteScope::FMCPEditorWorldWriteScope(const FString& CommandName)
+{
+    if (!GEditor)
+    {
+        return;
+    }
+
+    EditorWorld = GEditor->GetEditorWorldContext(/*bEnsureIsGWorld=*/false).World();
+
+    // The level package records its actor list, which is what makes spawn/delete undoable; the transaction
+    // is what makes Ctrl+Z possible at all (the editor opens one for user actions, and nobody opens one for
+    // a command that arrives over a socket).
+    if (EditorWorld)
+    {
+        EditorWorld->Modify();
+        if (ULevel* Level = EditorWorld->GetCurrentLevel())
+        {
+            Level->Modify();
+        }
+    }
+
+    Transaction = MakeUnique<FScopedTransaction>(
+        FText::FromString(FString::Printf(TEXT("UnrealMCP %s"), *CommandName)));
+}
+
+FUnrealMCPCommonUtils::FMCPEditorWorldWriteScope::~FMCPEditorWorldWriteScope()
+{
+    if (!bFinished)
+    {
+        // No Finish() means the handler never reported success: leave no undo step behind.
+        Finish(/*bChanged=*/false);
+    }
+}
+
+void FUnrealMCPCommonUtils::FMCPEditorWorldWriteScope::Finish(bool bChanged)
+{
+    if (bFinished)
+    {
+        return;
+    }
+    bFinished = true;
+
+    if (Transaction.IsValid())
+    {
+        if (!bChanged)
+        {
+            Transaction->Cancel();
+        }
+        Transaction.Reset();
+    }
+
+    if (!bChanged)
+    {
+        return;
+    }
+
+    // The half that used to be missing entirely: without a dirty flag nothing prompts anyone to save, and
+    // the write lives only in memory until the editor is closed (measured 2026-10-09: set_actor_property
+    // answered success with a correct read-back while get_dirty_map_packages() stayed empty).
+    if (EditorWorld)
+    {
+        EditorWorld->MarkPackageDirty();
+        if (ULevel* Level = EditorWorld->GetCurrentLevel())
+        {
+            Level->MarkPackageDirty();
+        }
+    }
+}
+
 FString FUnrealMCPCommonUtils::ClassifyAssetLoadFailure(const FString& AssetPath)
 {
     if (!IsPlaySessionRunning() || !AssetPath.StartsWith(TEXT("/")))
@@ -330,6 +560,73 @@ FVector2D FUnrealMCPCommonUtils::GetVector2DFromJson(const TSharedPtr<FJsonObjec
     return Result;
 }
 
+namespace
+{
+    /** One number out of a JSON value; a numeric string is accepted too (tool schemas use both). */
+    bool ReadJsonNumber(const TSharedPtr<FJsonValue>& Value, double& OutNumber)
+    {
+        if (!Value.IsValid())
+        {
+            return false;
+        }
+        if (Value->Type == EJson::Number)
+        {
+            OutNumber = Value->AsNumber();
+            return true;
+        }
+        if (Value->Type == EJson::String)
+        {
+            const FString Text = Value->AsString();
+            if (Text.IsNumeric())
+            {
+                OutNumber = FCString::Atod(*Text);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A vector/rotator written as an object instead of an array: "x"/"y"/"z" (any case) for a vector,
+     * "pitch"/"yaw"/"roll" for a rotator.
+     *
+     * The bridge accepts both shapes on purpose: the tool schemas declare `{"x": .., "y": .., "z": ..}`
+     * while other callers pass `[x, y, z]`, and only reading the array silently dropped the argument
+     * (the actor landed at the origin with a success receipt).
+     */
+    bool ReadNamedTriple(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName,
+                         const TCHAR* FirstKey, const TCHAR* SecondKey, const TCHAR* ThirdKey,
+                         double& OutFirst, double& OutSecond, double& OutThird)
+    {
+        const TSharedPtr<FJsonObject>* SubObject = nullptr;
+        if (!JsonObject->TryGetObjectField(FieldName, SubObject) || !SubObject || !(*SubObject).IsValid())
+        {
+            return false;
+        }
+
+        auto ReadByKeys = [&SubObject](std::initializer_list<const TCHAR*> Keys, double& OutValue)
+        {
+            for (const TCHAR* Key : Keys)
+            {
+                for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*SubObject)->Values)
+                {
+                    if (Pair.Key.Equals(Key, ESearchCase::IgnoreCase)
+                        && ReadJsonNumber(Pair.Value, OutValue))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        const bool bAll = ReadByKeys({ FirstKey }, OutFirst)
+            & ReadByKeys({ SecondKey }, OutSecond)
+            & ReadByKeys({ ThirdKey }, OutThird);
+        return bAll;
+    }
+}
+
 FVector FUnrealMCPCommonUtils::GetVectorFromJson(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName)
 {
     FVector Result(0.0f, 0.0f, 0.0f);
@@ -345,6 +642,15 @@ FVector FUnrealMCPCommonUtils::GetVectorFromJson(const TSharedPtr<FJsonObject>& 
         Result.X = (float)(*JsonArray)[0]->AsNumber();
         Result.Y = (float)(*JsonArray)[1]->AsNumber();
         Result.Z = (float)(*JsonArray)[2]->AsNumber();
+        return Result;
+    }
+
+    double X = 0.0, Y = 0.0, Z = 0.0;
+    if (ReadNamedTriple(JsonObject, FieldName, TEXT("x"), TEXT("y"), TEXT("z"), X, Y, Z))
+    {
+        Result.X = (float)X;
+        Result.Y = (float)Y;
+        Result.Z = (float)Z;
     }
     
     return Result;
@@ -365,6 +671,15 @@ FRotator FUnrealMCPCommonUtils::GetRotatorFromJson(const TSharedPtr<FJsonObject>
         Result.Pitch = (float)(*JsonArray)[0]->AsNumber();
         Result.Yaw = (float)(*JsonArray)[1]->AsNumber();
         Result.Roll = (float)(*JsonArray)[2]->AsNumber();
+        return Result;
+    }
+
+    double Pitch = 0.0, Yaw = 0.0, Roll = 0.0;
+    if (ReadNamedTriple(JsonObject, FieldName, TEXT("pitch"), TEXT("yaw"), TEXT("roll"), Pitch, Yaw, Roll))
+    {
+        Result.Pitch = (float)Pitch;
+        Result.Yaw = (float)Yaw;
+        Result.Roll = (float)Roll;
     }
     
     return Result;

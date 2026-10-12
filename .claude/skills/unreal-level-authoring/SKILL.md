@@ -99,9 +99,10 @@ print(unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages())
 
 | 需求 | 用 | 关键点 |
 |---|---|---|
-| 摆引擎类 actor（光源、雾、相机、StaticMeshActor…） | `spawn_actor(name, type, location, rotation)` | `type` 是 AActor 子类名；`name` 必须唯一，会在当前关卡里新建 |
-| 摆蓝图 actor | `spawn_blueprint_actor(blueprint_name, actor_name, location, rotation)` | 回执里 `class` 带 `_C` 后缀（`BP_InventoryHost_C`） |
+| 摆引擎类 actor（光源、雾、相机、StaticMeshActor…） | `spawn_actor(name, type, location, rotation, scale?)` | `type` 是 AActor 子类名；`name` 必须唯一，会在当前关卡里新建 |
+| 摆蓝图 actor | `spawn_blueprint_actor(blueprint_name, actor_name, location, rotation, scale?)` | 回执里 `class` 带 `_C` 后缀（`BP_InventoryHost_C`）；`scale` 由命令在 spawn 之后补写（蓝图根组件来自 SCS，spawn 变换里的 scale 会被引擎重建掉）——**不用再补一次 `set_actor_transform`** |
 | 改已存在 actor 的属性 | `set_actor_property` / `set_actor_transform` / `set_actor_location_safe` | 按类走结构化读写，别手搓指针 |
+| 改**组件上的**属性（灯强度、相机 FOV、组件可见性、网格） | `set_actor_property(property_name='<组件>.<属性>')`，如 `LightComponent0.Intensity` | 组件选择器 = 组件对象名**或**组件类名（`U` 前缀/`Component` 后缀可省），所以 `LightComponent.Intensity` 也能命中灯的 `DirectionalLightComponent`。`set_component_property` **不是**替代品：它写蓝图的 SCS 模板，对关卡里已放置的 actor 无效。失败回包里带 `components`（该 actor 的组件清单）与 `component_property_paths`（每条可用点号路径），照着写即可；成功回包带 `component` 与 `property_value_after` |
 | 删 actor | `delete_actor(name, flush?)` | **`Destroy()` 只标 pending-kill**：立刻退出所有 actor 清单，但**名字要到 GC 才释放** ⇒ 紧接着同名 `spawn_*` 是引擎 Fatal，且存盘会把它写回来。回执带 `pending_kill` + `hint`；`flush=true` 会**无条件 GC** 并用引擎同款判据复验（`pending_kill=false` = 名字已释放、`flushed=true` 表示 GC 真跑过），但**同名重建仍要等下一次调用**（见下条） |
 
 - **同名重建的 recipe（实测定案）**：`delete_actor` → `unreal.SystemLibrary.collect_garbage()`（或 `delete_actor(flush=true)`，它现在会真的 GC）→ **另一次 MCP 调用**里再 spawn 同名。两个前提缺一不可：① **GC 真的跑过**（没跑的话名字一直被占，连存盘都会把这个 actor 写回去）；② **重建发生在"新的一帧"** —— 即另一次 MCP 调用；同一个 `execute_python_file` 脚本里删完立刻重建，**即使 GC 跑过也撞引擎 Fatal**（`LevelActor.cpp:585` "Cannot generate unique name"）。
@@ -112,6 +113,10 @@ print(unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages())
 - **`name` 重名会被拒**（不会静默改名或复制）——批量摆件时用带序号的唯一名。
 - `get_actors_in_level` 回**一次**全量（`{"actors": [...], "count": N}`，每个带 name/class/location/rotation/scale），比逐个查便宜；**断言"某个 actor 在不在"就用它**。
 - `spawn_*` 只关卡，**不落盘**：要留下来必须自己存关卡（§一末）。
+- **写关卡的命令现在会留下痕迹了**：`spawn_actor` / `create_actor` / `spawn_particle_actor` / `spawn_blueprint_actor` / `delete_actor` / `set_actor_transform` / `set_actor_property` / `set_actor_location_safe` / `set_actor_custom_depth_safe` 每条 = **一个 undo 步**（`Ctrl+Z`，或 `execute_console_command(world, 'TRANSACTION UNDO')`），并且会把关卡包**标脏**（`get_dirty_map_packages()` 从此不再为空）⇒ 关编辑器/自动保存会真的问你要不要存，不会再出现"回包 success、关卡却干净、改动静默消失"。**但标脏 ≠ 落盘**：仍要显式存（§一末）。
+- **脚本里读写"包脏不脏"一律走 `unreal_mcp_compat`**（编辑器 python 直接 `import unreal_mcp_compat`，`Content/Python` 已在 sys.path）：`is_package_dirty` / `set_package_dirty` / `dirty_packages` / `engine_version` / `class_available`。**别自己写 `hasattr` 探测** —— 引擎版本差异（5.5 的 `unreal.Package` 既没有 `set_dirty_flag` 也没有 `is_dirty`，`modify()` 只能**置**脏、5.5 没有任何 python API 能**清**脏）集中在那个文件里，新版本来了改那里。
+- **PIE 运行中写关卡 = 白写**：`spawn_*` / `delete_actor` / `set_actor_transform` / `set_actor_property` / `set_actor_location_safe` / `set_actor_custom_depth_safe` 作用在**编辑器世界**，而 PIE 渲染的是它自己的副本 ⇒ 命令回 success、编辑器世界回读也对，**PIE 里画面完全不变**（两轮 A/B 截图会几乎逐字节相同）。这些命令现在会在 `pie_running=true` 时于回包里附 `warning` —— 看到它就**别拿改动后的画面做判断**：先 `stop_pie` → 改 → 再 `start_pie`。
+- 任何命令收到**未声明的参数**（例如给 `take_screenshot` 传 `width`）会在回包里带 `undeclared_params` + `undeclared_params_hint`：那是"这个命令不认这个参数"，不是生效了。
 
 ### 关卡里放 UMG 入口 Actor 的坑
 
@@ -141,7 +146,7 @@ print(world.get_world_settings().get_editor_property("default_game_mode"))   # �
    （`create_blueprint` 只能落在 `/Game/Blueprints/`，之后用 `move_asset` 搬到目标目录；`move_asset` 回 `redirector_left: false` 说明没留 redirector。）
 2. **GM 指向 PC**：`set_blueprint_property(blueprint_name=<GM>, property_name="PlayerControllerClass", property_value="<PC 资产路径>_C")` —— 回执给 `property_value_before / property_value_after`（实测 `before = /Script/Engine.PlayerController`，`after` 就是新类），可自证。
 3. **关卡覆盖 GM**：`set_actor_property(name=<WorldSettings actor 名>, property_name="default_game_mode", property_value="<GM 资产路径>_C")`。
-   **回执不可信**：`set_actor_property` 只给 `success` + 该 actor 的属性 dump，即使 dump 现在含 `DefaultGameMode`（路径字符串）也是**写入后**的值。判据只有两个 —— python 回读 `world.get_world_settings().get_editor_property("default_game_mode")`，以及存盘后**下一轮 PIE 的 `LogLoad: Game class is '...'`**。
+   **回执不可信**：`set_actor_property` 只给 `success` + 该 actor 的属性 dump，即使 dump 现在含 `DefaultGameMode`（路径字符串）也是**写入后**的值（新增的 `property_value_after` 同样只是那个字段的值，不证明引擎真的改了游戏模式）。判据只有两个 —— python 回读 `world.get_world_settings().get_editor_property("default_game_mode")`，以及存盘后**下一轮 PIE 的 `LogLoad: Game class is '...'`**。
 4. **存盘**：改 WorldSettings 只改内存，`LevelEditorSubsystem.save_current_level()` 之后才算落到关卡资产（用 `.umap` 的 mtime 自证）。
 5. **判据**：`start_pie` 之后读
    - `unreal.GameplayStatics.get_player_controller(world, 0).get_class().get_name() == "<PC>_C"` ⇒ 整条链生效；
@@ -194,5 +199,5 @@ check(any(x["class"] == "DirectionalLight"
 print("RESULT: " + json.dumps({"count": len(a), "failures": FAIL}, ensure_ascii=False))
 ```
 
-- 断言只用**存在性 / 变换 / 属性回读**；亮度与观感交给人看（禁止截图当验收）。
+- 断言优先用**存在性 / 变换 / 属性回读**；亮度与观感现在**允许用 `take_screenshot`**（2026-10-08 起）作为验收/定位手段，与结构化回读一起写进结论。
 - 存盘后用 `.umap` 的 mtime 复核真的写盘，别拿"命令返回 success"当证据。

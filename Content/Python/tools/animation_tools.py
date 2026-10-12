@@ -2244,4 +2244,51 @@ def register_animation_tools(mcp: FastMCP):
             Errors: asset_not_blend_space, invalid_params, write_failed.
         """
         return send_command("set_blend_space_samples", {"asset_path": asset_path, "samples": samples,
-                                                        "finalize": finalize, "persist": persist})
+                                                       "finalize": finalize, "persist": persist})
+
+    @mcp.tool()
+    def finalize_blend_space(ctx: Context, asset_path: str, persist: bool = True) -> Dict[str, Any]:
+        """
+        Force a BlendSpace's runtime data (segment/triangle table) to be built, verify it by reading the
+        samples back, then save.
+
+        A BlendSpace whose SampleData was written by script has no runtime data at all - the engine only
+        rebuilds it from an asset editor - so the blend output is empty (a T-pose in PIE) until this runs.
+        set_blend_space_samples already finalizes unless finalize=False was passed; this is the explicit
+        second step for that case, and the way to repair an asset that was written earlier.
+
+        Args:
+            asset_path: BlendSpace asset path.
+            persist: Save the asset after a successful finalize (default True).
+
+        Returns:
+            Dict with the rebuilt runtime data read back (triangle_count and the samples), plus saved.
+            Errors: asset_not_blend_space, finalize_failed, load_failed.
+        """
+        return send_command("finalize_blend_space", {"asset_path": asset_path, "persist": persist})
+
+    @mcp.tool()
+    def set_curve_metadata_flags(ctx: Context, asset_path: str, curve_names: List[str],
+                                 morphtarget: bool = True, material: bool = False,
+                                 persist: bool = True) -> Dict[str, Any]:
+        """
+        Flag curve names as morph-target / material curves in an asset's skeleton curve metadata.
+
+        This metadata is what makes an animation curve actually drive a morph target or a material
+        parameter; python cannot read it (UAnimCurveMetaData is not exposed), so the flag has to be set
+        through here and read back with reflect_probe on the skeleton's AssetUserData.
+
+        Args:
+            asset_path: Skeleton, skeletal mesh or anim sequence asset path.
+            curve_names: Curve names to flag.
+            morphtarget: Set the morph target flag; default True.
+            material: Set the material flag; default False.
+            persist: Save the skeleton after the command (default True).
+
+        Returns:
+            Dict with curves[] (each curve's morphtarget / metadata_count) read back after the write.
+            Errors: skeleton_not_found, curve_not_found (candidates), load_failed.
+        """
+        return send_command("set_curve_metadata_flags", {
+            "asset_path": asset_path, "curve_names": curve_names, "morphtarget": morphtarget,
+            "material": material, "persist": persist})

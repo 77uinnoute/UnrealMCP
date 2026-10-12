@@ -1179,6 +1179,145 @@ def register_umg_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
 
     @mcp.tool()
+    def set_umg_designer_overlay(
+        ctx: Context,
+        show_outlines: Optional[bool] = None,
+        grid_snap_enabled: Optional[bool] = None,
+        grid_snap_size: Optional[int] = None,
+        save: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Write the widget designer's own view settings: the dashed widget outlines and grid snapping.
+
+        These are project-wide USER settings (UWidgetDesignerSettings is
+        config=EditorPerProjectUserSettings), not per-asset values: there is no blueprint_name, and
+        nothing is written into any asset - the value lands in the per-project user settings ini.
+
+        Why a command and not a script: python cannot reach the class at all (it is not exposed to
+        python), so a script-side lookup returns nothing.
+
+        An already-open designer view keeps the state it was created with; reopen the designer (or the
+        editor) to see a change.
+
+        Args:
+            show_outlines: Draw the dashed widget outlines in the designer
+                ("Show Dashed Outlines By Default" in Editor Preferences > Widget Designer)
+            grid_snap_enabled: Snap widget positions to the grid
+            grid_snap_size: Grid snap size
+            save: Write the per-project user settings ini; default true
+
+        Returns:
+            Dict with applied, settings_before, settings (read back), saved_config and the config
+            section the value lives in.
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            params: Dict[str, Any] = {"save": save}
+            if show_outlines is not None:
+                params["show_outlines"] = show_outlines
+            if grid_snap_enabled is not None:
+                params["grid_snap_enabled"] = grid_snap_enabled
+            if grid_snap_size is not None:
+                params["grid_snap_size"] = grid_snap_size
+
+            logger.info(f"Setting UMG designer overlay with params: {params}")
+            response = unreal.send_command("set_umg_designer_overlay", params)
+
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+
+            return response
+
+        except Exception as e:
+            error_msg = f"Error setting UMG designer overlay: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
+    def set_widget_brush(
+        ctx: Context,
+        blueprint_name: str,
+        widget_name: str,
+        resource: Optional[str] = None,
+        draw_as: Optional[str] = None,
+        margin: Optional[List[float]] = None,
+        image_size: Optional[List[float]] = None,
+        tint: Optional[List[float]] = None,
+        color: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Write the brush of a Border (its Background) or an Image (its Brush), per key, with every
+        change read back.
+
+        This is the only route that can write the brush's ImageSize: that field
+        (FDeprecateSlateVector2D) cannot be constructed from python, so a script-side brush keeps
+        Slate's default 32x32 and the caller has no say. Giving a texture resource here seeds
+        image_size from the texture whenever the caller does not pass one.
+
+        MEASURED LIMIT: draw_as="Box" on a Border's Background drew NOTHING in this project, at both
+        image_size 32 and 64, while the same widget renders fine again with draw_as="Image" - so the
+        9-slice modes are unverified here. Prefer "Image" stretch unless you check the result.
+
+        Args:
+            blueprint_name: Name or path of the target Widget Blueprint
+            widget_name: Border or Image widget whose brush is written
+            resource: Asset path of a texture or material to use as the brush resource
+            draw_as: "Image" / "Box" / "Border" / "RoundedBox" / "NoDrawType"
+            margin: 9-slice margin as [l, t, r, b] (also accepts one number or
+                {"left","top","right","bottom"})
+            image_size: Brush image size [w, h]; defaults to the texture's size with a texture resource
+            tint: Brush tint [r, g, b, a]
+            color: Widget colour [r, g, b, a] (Border.BrushColor / Image.ColorAndOpacity). These are
+                LINEAR values, not sRGB - convert a target sRGB colour before sending it
+
+        Returns:
+            Dict with applied[] (key / value_before / value_after), failed[], brush{before, summary,
+            color_before, color_after} and the usual compiled / saved receipt.
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            params: Dict[str, Any] = {"blueprint_name": blueprint_name, "widget_name": widget_name}
+            if resource is not None:
+                params["resource"] = resource
+            if draw_as is not None:
+                params["draw_as"] = draw_as
+            if margin is not None:
+                params["margin"] = margin
+            if image_size is not None:
+                params["image_size"] = image_size
+            if tint is not None:
+                params["tint"] = tint
+            if color is not None:
+                params["color"] = color
+
+            logger.info(f"Setting widget brush with params: {params}")
+            response = unreal.send_command("set_widget_brush", params)
+
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+
+            return response
+
+        except Exception as e:
+            error_msg = f"Error setting widget brush: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
     def create_widget_animation(
         ctx: Context, blueprint_name: str, animation_name: str
     ) -> Dict[str, Any]:

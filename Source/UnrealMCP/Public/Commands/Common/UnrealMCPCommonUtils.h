@@ -21,6 +21,7 @@ class UMaterial;
 class UMaterialFunction;
 class USCS_Node;
 class UWorld;
+class FScopedTransaction;
 
 /**
  * Common utilities for UnrealMCP commands
@@ -77,6 +78,16 @@ public:
     static void AddEditorState(const TSharedPtr<FJsonObject>& Response);
 
     /**
+     * Attach a `warning` when a command that writes the editor world answered successfully WHILE PIE runs:
+     * the write landed on the editor world copy, and the play session keeps rendering the other one until
+     * it is restarted. Callers have produced byte-identical "before/after" captures over this, so the reply
+     * says it instead of leaving the caller to diff two screenshots.
+     *
+     * A no-op when PIE is not running or the reply is not a success (a failure already says something else).
+     */
+    static void AddEditorWorldWriteWarning(const TSharedPtr<FJsonObject>& Response, const FString& CommandName);
+
+    /**
      * Error code to use when a path did not resolve: "load_failed_in_pie" when a play session is
      * running AND the asset registry knows the package (so the asset exists, it just cannot be loaded
      * in play mode), otherwise an empty string, which means "keep the existing code".
@@ -125,6 +136,59 @@ public:
      *  UBlueprintGeneratedClass for a parent blueprint's SCS component, a native class otherwise. */
     static UActorComponent* FindWritableComponentTemplate(UBlueprint* Blueprint, const FString& ComponentName,
         FString& OutErrorCode, FString& OutErrorMessage, UClass** OutOwnerClass = nullptr);
+
+    /**
+     * Resolve one of an actor's components from the selector a property path uses
+     * ("LightComponent.intensity"). The selector is matched against the component's object name first, then
+     * against its class name (U prefix and "Component" suffix optional) so a base-class spelling reaches a
+     * subclass component. A class match on several components resolves to the root component when it is one
+     * of them, otherwise to nullptr - callers report the candidates rather than guessing.
+     */
+    static UActorComponent* FindActorComponentBySelector(AActor* Actor, const FString& Selector);
+
+    /** "Name (UClass)" for every component of the actor, capped - the candidate list for a failed write. */
+    static void DescribeActorComponents(AActor* Actor, TArray<FString>& OutDescriptions);
+
+    /**
+     * Record an actor (and its components) BEFORE changing it, inside the command's transaction.
+     *
+     * Without this a property / transform write has no undo record: the object simply changes, and
+     * Ctrl+Z cannot take it back. The components are recorded too, because that is where the written
+     * properties live (LightComponent0.Intensity) and they carry the render state.
+     */
+    static void MarkActorModified(AActor* Actor);
+
+    /**
+     * One MCP command that writes the EDITOR world = one undo step, and the level must end up SAVEABLE.
+     *
+     * Two separate failures motivated this:
+     *  - the writes answered success with a correct read-back while `get_dirty_map_packages()` stayed EMPTY,
+     *    so nothing asked the caller to save and the change could be dropped silently at close;
+     *  - with no transaction around it there was no undo entry either.
+     *
+     * Usage: construct it in the dispatcher (the registry flag bWritesEditorWorld is the trigger), call
+     * Finish() with the result's success, and let it go out of scope.
+     */
+    struct FMCPEditorWorldWriteScope
+    {
+        explicit FMCPEditorWorldWriteScope(const FString& CommandName);
+        ~FMCPEditorWorldWriteScope();
+
+        FMCPEditorWorldWriteScope(const FMCPEditorWorldWriteScope&) = delete;
+        FMCPEditorWorldWriteScope& operator=(const FMCPEditorWorldWriteScope&) = delete;
+
+        /**
+         * Close the write. `bChanged == false` cancels the transaction, so a refused command leaves no undo
+         * step behind; `true` keeps it and flags the level package unsaved.
+         */
+        void Finish(bool bChanged);
+
+    private:
+        /** FScopedTransaction lives in ScopedTransaction.h; kept out of this header on purpose. */
+        TUniquePtr<FScopedTransaction> Transaction;
+        UWorld* EditorWorld = nullptr;
+        bool bFinished = false;
+    };
 
     // Verify the blueprint's SimpleConstructionScript can accept component commands, compiling once if
     // it is not ready yet. Returns false with OutErrorCode == "blueprint_not_ready" when it still cannot.

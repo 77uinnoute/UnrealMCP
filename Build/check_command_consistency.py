@@ -19,9 +19,23 @@ What fails (exit 1):
     command (the same name meaning two things in the two layers)
 
 What only warns (exit 0):
-  - a registered, non-hidden command that no python tool ever sends
   - a registered, non-hidden command no skill document mentions
+  - a tool that sends a key its command does not declare inline
   - a plain rename between the tool argument and the bridge key
+
+The parameter comparison resolves the two ways a spec list is built without inline literals, so that
+"the registration does not mention this parameter" means exactly that:
+  - file-local helpers: `const auto FooParam = []() { return MCPParamOpt(TEXT("foo"), ...); };` and arrays
+    built from them (`SectionLocatorParams`), which the entry block then references by name;
+  - category-wide parameters: `Registry.AddParamsToCategory(TEXT("particle"), {...})`, which a domain's
+    RunCommand consumes for every command in that category.
+
+What fails (exit 1):
+  - a python send site names an unregistered command
+  - a registered, non-hidden command that no python tool ever sends (dead code, or a missing wrapper)
+  - a tool that does not expose a required parameter of the command it forwards
+  - two tools with the same name / a skill naming something that does not exist
+  - a command-name comparison left outside the registry
 
 Usage:
     python Build/check_command_consistency.py                 # full check
@@ -57,10 +71,20 @@ TOOL_VERBS = (
     "reflect_", "poll_", "execute_", "take_", "close_", "toggle_", "save_", "load_", "render_",
     "heal_", "fix_", "rename_", "update_", "refresh_", "inspect_", "describe_", "generate_",
     "convert_", "focus_", "bind_", "open_", "mark_", "select_", "verify_",
+    "start_", "stop_", "play_", "preview_", "compress_", "inject_", "implement_", "unimplement_",
+    "recombine_", "split_", "reorder_", "reparent_", "prune_", "unbind_", "jump_", "is_", "equal_",
 )
+
+# Call shapes that take the command name as their first argument. send_mcp_command is the raw-bridge
+# helper the script fixtures use; _bridge_result is the material preview module's wrapper.
+SEND_CALL_NAMES = ("send_command", "_send", "_bridge", "_bridge_result", "send_mcp_command")
 
 REGISTER_MACRO = re.compile(r'MCP_REGISTER_COMMAND\s*\([^,]+,\s*"([a-z0-9_]+)"')
 REGISTER_TABLE = re.compile(r'Registry\.Register\s*\(\s*\{\s*TEXT\("([a-z0-9_]+)"\)')
+REGISTER_WITH_FLAGS = re.compile(
+    r'(?:MCP_REGISTER_COMMAND\s*\(\s*Registry\s*,\s*"|Registry\.Register\s*\(\s*\{\s*TEXT\(")'
+    r'([a-z0-9_]+)"\)?(.*?)MCPFlags\s*\(([^)]*)\)',
+    re.DOTALL)
 COMMAND_COMPARISON = re.compile(r'CommandType\s*==\s*TEXT\("([a-z0-9_]+)"\)')
 C_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 BACKTICK = re.compile(r"`([^`\n]+)`")
@@ -160,6 +184,18 @@ def collect_registered():
     return found
 
 
+def collect_hidden():
+    """Registered commands whose MCPFlags mark them hidden (protocol/internal, not on the tool surface)."""
+    hidden = set()
+    for path in cpp_files():
+        text = read_text(path)
+        for match in REGISTER_WITH_FLAGS.finditer(text):
+            flags = [part.strip() for part in match.group(3).split(",")]
+            if len(flags) >= 3 and "true" in flags[2].lower():
+                hidden.add(match.group(1))
+    return hidden
+
+
 def collect_param_names():
     """Every parameter name declared by any command (used to ignore doc mentions of parameters)."""
     pattern = re.compile(r'MCPParam(?:Opt)?\(\s*TEXT\("([a-z0-9_]+)"\)')
@@ -180,6 +216,23 @@ def collect_legacy_routing():
     return found
 
 
+def module_string_constants(tree):
+    """`NAME = "literal"` at module level, so a send whose command name is a constant still counts.
+
+    mcp_material_preview.py holds its command name in PREVIEW_COMMAND and passes the variable; the
+    literal-only rule made that real send site invisible, which read as "nobody sends this command".
+    """
+    constants = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            constants[target.id] = node.value.value
+    return constants
+
+
 def collect_python_sends():
     """Command name -> list of "file:line" py send sites."""
     sends = {}
@@ -187,6 +240,7 @@ def collect_python_sends():
         tree = parse_python(path)
         if tree is None:
             continue
+        constants = module_string_constants(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not node.args:
                 continue
@@ -194,12 +248,14 @@ def collect_python_sends():
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
             # _bridge() is the local forwarding helper in tools/ue_safe_api.py: it takes the command
             # name as a literal first argument, exactly like send_command does.
-            if name not in ("send_command", "_send", "_bridge"):
+            if name not in SEND_CALL_NAMES:
                 continue
             first = node.args[0]
-            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
-                continue  # a computed name cannot be checked; the spec asks for literals
-            sends.setdefault(first.value, []).append(rel(path, node.lineno))
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                sends.setdefault(first.value, []).append(rel(path, node.lineno))
+            elif isinstance(first, ast.Name) and first.id in constants:
+                sends.setdefault(constants[first.id], []).append(rel(path, node.lineno))
+            # anything else computes the name; the spec asks for literals
     return sends
 
 
@@ -216,6 +272,21 @@ def collect_python_tools():
             if tool_decorated(node):
                 tools.setdefault(node.name, []).append(rel(path, node.lineno))
     return tools
+
+
+COMPAT_MODULE = PYTHON_DIR / "unreal_mcp_compat.py"
+
+
+def collect_compat_helpers():
+    """Public functions of Content/Python/unreal_mcp_compat.py.
+
+    That module is the documented single home for engine-version-dependent `unreal` python API, so a skill
+    naming one of its helpers names a real callable - the same standing as a python tool, except it is not
+    an MCP tool and never was.
+    """
+    if not COMPAT_MODULE.exists():
+        return set()
+    return set(re.findall(r'^def ([a-zA-Z_][a-zA-Z0-9_]*)\(', read_text(COMPAT_MODULE), re.MULTILINE))
 
 
 def collect_tool_supplied_params():
@@ -290,18 +361,81 @@ def collect_required_params():
 
 ANY_PARAM = re.compile(r'MCPParam(?:Opt)?\(\s*TEXT\("([a-z0-9_]+)"\)')
 
+# `const auto FooParam = []() { return MCPParamOpt(TEXT("foo"), ...); };`
+HELPER_LAMBDA = re.compile(
+    r'(?:const\s+)?auto\s+(\w+)\s*=\s*\[\s*[^\]]*\]\s*\(\s*\)\s*\{\s*return\s+MCPParam(?:Opt)?\(\s*TEXT\("([a-z0-9_]+)"\)')
+# `const TArray<FMCPParamSpec> FooParams = { BarParam(), MCPParam(TEXT("baz"), ...) };`
+SPEC_ARRAY = re.compile(r'(?:const\s+)?(?:TArray<FMCPParamSpec>|auto)\s+(\w+)\s*=\s*\{(.*?)\}\s*;', re.DOTALL)
+# `Registry.AddParamsToCategory(TEXT("particle"), { MCPParamOpt(TEXT("detail"), ...), ... });`
+CATEGORY_PARAMS = re.compile(r'AddParamsToCategory\(\s*TEXT\("([a-z0-9_]+)"\)\s*,\s*\{(.*?)\}\s*\)', re.DOTALL)
+# the category argument of a registration: MCP_REGISTER_COMMAND(Registry, "name", "category", ...)
+ENTRY_CATEGORY = re.compile(r'^\s*,\s*"([a-z0-9_]+)"')
+
+
+def collect_local_spec_helpers(text):
+    """(single-param helpers, named spec arrays) declared inside one C++ file.
+
+    A registration routinely writes its parameters through helpers instead of inline literals:
+    `AssetPathParam()`, `MontagePathParam()`, `SectionLocatorParams = { MontagePathParam(), ... }`.
+    Resolving them here keeps the comparison honest; without it every such parameter looked
+    undeclared, and 42 noise warnings hid the two real drifts that were in the same list.
+    """
+    helpers = {name: param for name, param in HELPER_LAMBDA.findall(text)}
+
+    arrays = {}
+    for name, body in SPEC_ARRAY.findall(text):
+        names = set(ANY_PARAM.findall(body))
+        for helper, param in helpers.items():
+            if re.search(r'\b%s\s*\(' % re.escape(helper), body):
+                names.add(param)
+        if names:
+            arrays[name] = names
+    return helpers, arrays
+
+
+def collect_category_params():
+    """Category -> parameters the domain declares for every command in it (AddParamsToCategory)."""
+    out = {}
+    for path in cpp_files():
+        text = read_text(path)
+        for match in CATEGORY_PARAMS.finditer(text):
+            names = ANY_PARAM.findall(match.group(2))
+            if names:
+                out.setdefault(match.group(1), set()).update(names)
+    return out
+
+
+def collect_command_categories():
+    """Command name -> its registered category, for the category-wide parameter lookup."""
+    out = {}
+    for path in cpp_files():
+        text = read_text(path)
+        for match in ENTRY_BLOCK.finditer(text):
+            category = ENTRY_CATEGORY.match(match.group(2))
+            if category:
+                out[match.group(1)] = category.group(1)
+    return out
+
 
 def collect_command_params():
     """Command name -> every parameter name its registration declares (required or optional).
 
-    Only registrations that list their parameters inline are covered; a command whose entry block
+    Only registrations that end up listing parameters are covered; a command whose entry block
     declares none is left out (its spec is unknown here, so it is not compared).
     """
     params = {}
     for path in cpp_files():
         text = read_text(path)
+        helpers, arrays = collect_local_spec_helpers(text)
         for match in ENTRY_BLOCK.finditer(text):
-            names = ANY_PARAM.findall(match.group(2))
+            body = match.group(2)
+            names = set(ANY_PARAM.findall(body))
+            for helper, param in helpers.items():
+                if re.search(r'\b%s\s*\(\s*\)' % re.escape(helper), body):
+                    names.add(param)
+            for array, array_names in arrays.items():
+                if re.search(r'\b%s\b' % re.escape(array), body):
+                    names.update(array_names)
             if names:
                 params.setdefault(match.group(1), set()).update(names)
     return params
@@ -380,30 +514,67 @@ def collect_tool_send_params():
     return sites
 
 
-def collect_doc_mentions(registered_param_names):
+def frontmatter_description_line(path):
+    """(line number, text) of the YAML frontmatter description, or None.
+
+    The trigger list a skill declares for itself lives there ("准备调用以下任一 MCP 工具前 MUST 加载
+    本 Skill —— create_anim_sequence / add_bone_track / ..."), and it is the one place a skill states
+    which tools it covers, so it counts as a mention.
+    """
+    lines = read_text(path).splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for number, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            break
+        if line.lstrip().startswith("description:"):
+            return number, line
+    return None
+
+
+def collect_doc_mentions(registered_param_names, known_names):
     """Tool-shaped identifier -> list of "file:line".
 
     Two shapes are NOT tool references even though they look like one:
       - a parameter name of a registered command (docs name parameters in backticks constantly);
       - anything on a line that documents the python reflection library (`lib.*`), whose methods
         share the verb prefixes but live in the plugin's C++ library rather than the command table.
+
+    A call signature after a KNOWN name is stripped, so `add_widget(…)` counts as a mention of
+    add_widget. An unknown identifier followed by a signature stays ignored: that is how engine and
+    python API calls are quoted (`get_bone_pose(...)`, `is_root(…)`), and flagging them would make
+    the doc check fire on prose that never claims to be a tool.
     """
     mentions = {}
+
+    def add(token, where):
+        if not token.startswith(TOOL_VERBS) or "." in token or " " in token:
+            return
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", token):
+            return
+        if token in registered_param_names:
+            return
+        mentions.setdefault(token, []).append(where)
+
     if not SKILLS_DIR.exists():
         return mentions
     for path in sorted(SKILLS_DIR.rglob("*.md")):
         for number, line in enumerate(read_text(path).splitlines(), start=1):
             if "lib." in line:
                 continue
-            for token in BACKTICK.findall(line):
-                token = token.strip()
-                if not token.startswith(TOOL_VERBS) or "." in token or "(" in token or " " in token:
+            for raw in BACKTICK.findall(line):
+                token = raw.strip()
+                if "(" in token and token.split("(", 1)[0].strip() not in known_names:
                     continue
-                if not re.fullmatch(r"[a-z][a-z0-9_]*", token):
-                    continue
-                if token in registered_param_names:
-                    continue
-                mentions.setdefault(token, []).append(rel(path, number))
+                add(token.split("(", 1)[0].strip(), rel(path, number))
+
+        description = frontmatter_description_line(path)
+        if description:
+            number, line = description
+            for segment in line.split(":", 1)[-1].split("/"):
+                match = re.match(r"[a-z][a-z0-9_]*", segment.strip())
+                if match:
+                    add(match.group(0), rel(path, number))
     return mentions
 
 
@@ -443,7 +614,8 @@ def main():
 
     sends = collect_python_sends()
     tools = collect_python_tools()
-    docs = collect_doc_mentions(collect_param_names())
+    docs = collect_doc_mentions(collect_param_names(),
+                                set(tools) | set(registered) | collect_compat_helpers())
 
     # --- ERROR: a python send site names an unregistered command -------------------------------
     for name in sorted(sends):
@@ -472,12 +644,16 @@ def main():
     # --- ERROR: a tool sends keys the command does not declare, or forwards an argument under a
     # different key that is itself one of the command's parameters (same name, two meanings) -----
     command_params = collect_command_params()
+    category_params = collect_category_params()
+    command_categories = collect_command_categories()
     compared = 0
     skipped = []
     for tool, command, entries, site in collect_tool_send_params():
         declared = command_params.get(command)
         if declared is None:
             continue
+        # A domain can declare parameters for every command it owns (AddParamsToCategory): those count.
+        declared = declared | category_params.get(command_categories.get(command, ""), set())
         if entries is None:
             skipped.append("%s -> %s at %s" % (tool, command, site))
             continue
@@ -511,7 +687,7 @@ def main():
             fail("tool '%s' is registered %d times: %s" % (name, len(sites), ", ".join(sites)))
 
     # --- ERROR: documentation names something that does not exist ------------------------------
-    known = set(tools) | set(registered)
+    known = set(tools) | set(registered) | collect_compat_helpers()
     for name, sites in sorted(docs.items()):
         if name in known:
             continue
@@ -525,15 +701,19 @@ def main():
     for name, site in sorted(legacy.items()):
         fail("command name compared in dispatch code outside the registry: '%s' at %s" % (name, site))
 
-    # --- WARNING: registered commands nobody sends / nobody documents --------------------------
+    # --- ERROR: a registered, non-hidden command no python tool ever sends ---------------------
+    # A registered command that nothing sends is either dead code or a missing tool wrapper, and both
+    # are defects worth failing on: the command surface IS the promise the docs make to the caller.
+    hidden = collect_hidden()
     for name in sorted(registered):
-        if name in sends:
+        if name in sends or name in hidden or name in allowlist:
             continue
-        if name in allowlist:
-            continue
-        warn("registered command '%s' is never sent from python (%s)" % (name, registered[name]))
+        fail("registered command '%s' is never sent from python and is not marked hidden (%s)"
+             % (name, registered[name]))
+
+    # --- WARNING: a tool no skill documents / a command nobody sends ----------------------------
     for name in sorted(tools):
-        if any(name in line for line in docs.values()) or name in docs:
+        if name in docs:
             continue
         warn("python tool '%s' is not mentioned by any skill doc" % name)
 
@@ -548,8 +728,8 @@ def main():
     print("tool send sites param-checked: %d (skipped, not static: %d)" % (compared, len(skipped)))
     if exempted:
         report("allowlisted (reviewed, not a mistake):", exempted)
-    report("WARNINGS (%d):" % len(warnings), warnings)
     report("ERRORS (%d):" % len(errors), errors)
+    report("WARNINGS (%d):" % len(warnings), warnings)
 
     if errors and not args.warn_only:
         print("")

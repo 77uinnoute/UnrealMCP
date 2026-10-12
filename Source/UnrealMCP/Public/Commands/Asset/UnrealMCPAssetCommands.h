@@ -57,6 +57,7 @@ private:
     TSharedPtr<FJsonObject> HandleAddBlendableToPostVolume(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCreateAssetSafe(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDeleteAssetSafe(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleDeleteAssetWithLevelSwitch(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDuplicateAssetSafe(const TSharedPtr<FJsonObject>& Params);
 
     // Shared resolution: given an asset object path, collect blocking referencer

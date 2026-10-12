@@ -21,6 +21,8 @@
    - 只要注册，就已可分派、可被 `list_mcp_commands` 看到 —— 没有第二处清单要改。
 2. **python 工具包装**（可选但通常需要）：在 `Content/Python/tools/<domain>_tools.py` 加 `@mcp.tool()` 函数，内部 `unreal.send_command("get_foo", params)`。改完 `Content/Python/` 下的文件需要**重启 unrealMCP server** 才生效。
 
+   > 新命令**不留 python 包装**就会被门禁判成 ERROR（见下"判定口径"）。确实只给 `execute_python_*` 回环或脚本用的，要么标 `MCPFlags(…, bHidden=true)`，要么进白名单写清原因。
+
 不需要动：`UnrealMCPBridge.cpp`（已无按域路由）、桥本地的任何清单、`UnrealMCPPythonAPI` 的回环名单。
 
 ## flags 的含义（策略的唯一来源）
@@ -42,9 +44,19 @@ python Build\check_command_consistency.py --baseline  # 打印"旧链命令名 v
 
 判定口径：
 
-- **ERROR（退出码 1）**：python 发送了未注册的命令；两个 `@mcp.tool` 重名；技能文档点名了既不是工具也不是命令的名字；工具没有暴露它转发命令的必填参数；**源码里重新出现 `CommandType == TEXT("...")` 形式的命令名比较**。
-- **WARNING（不影响退出码）**：已注册但没有任何 python 工具发送、且未标 `hidden` 的命令（可能是死命令）；没有任何技能文档提到的工具。
+- **ERROR（退出码 1）**：python 发送了未注册的命令；**已注册、未标 `hidden`、且没有任何 python 工具发送的命令**（死命令，或漏了工具包装）；两个 `@mcp.tool` 重名；技能文档点名了既不是工具也不是命令的名字；工具没有暴露它转发命令的必填参数；**源码里重新出现 `CommandType == TEXT("...")` 形式的命令名比较**。
+- **WARNING（不影响退出码）**：工具发送了命令没有内联声明的键（参数规格可能由 helper 构造，提取器看不见）；没有任何技能文档提到的工具。
 - 白名单：`Build/command_consistency_allowlist.txt`，每行必须写原因；无原因的行本身报 ERROR。
+
+**"未标 hidden 的死命令"为什么是 ERROR**：命令面就是文档对调用方的承诺，一个谁都不发的命令要么是死代码、要么是漏掉的工具包装 —— 两者都该在构建时红。
+真正的协议/内部命令（`ping`）用 `MCPFlags(…, bHidden=true)` 声明，门禁认这个 flag（`Registry.Register({…})` 表形式与 `MCP_REGISTER_COMMAND` 宏两种写法都识别）。
+
+**扫描口径（别把真发送点藏起来，藏了就会误报成死命令）**：
+
+- 发送点按 `send_command` / `_send` / `_bridge` / `_bridge_result` / `send_mcp_command` 的**首个实参**识别；实参可以是字面量，也可以是模块级 `NAME = "literal"` 常量（`mcp_material_preview.py` 的 `PREVIEW_COMMAND` 就是这种）。
+- 新增命令时，python 包装里请保持**字面量** `send_command("命令名", …)`：命令名变成局部变量会让门禁看不见这个发送点。
+- 工具文档提及：反引号 token 若**已是一个已知工具/命令**名，允许带尾部调用签名（`` `add_widget(…)` `` 计为提及 `add_widget`）；未知标识符带签名则整条忽略（那是引擎/python API 引用，如 `get_bone_pose(...)`）。技能 frontmatter `description` 的触发清单（`/` 分隔段）同样计入提及。
+
 
 ## 计数口径
 

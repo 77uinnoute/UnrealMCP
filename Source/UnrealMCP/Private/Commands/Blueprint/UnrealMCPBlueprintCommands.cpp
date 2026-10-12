@@ -144,6 +144,7 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
             MCPParam(TEXT("component_name"), TEXT("string"), TEXT("Primitive component variable name")),
             MCPParamOpt(TEXT("simulate_physics"), TEXT("bool"), TEXT("Enable physics simulation")),
+            MCPParamOpt(TEXT("gravity_enabled"), TEXT("bool"), TEXT("Enable gravity on the body (bEnableGravity). Ignored nothing: it used to be accepted and never read")),
             MCPParamOpt(TEXT("mass"), TEXT("float"), TEXT("Mass override in kg")),
             MCPParamOpt(TEXT("linear_damping"), TEXT("float"), TEXT("Linear damping")),
             MCPParamOpt(TEXT("angular_damping"), TEXT("float"), TEXT("Angular damping")),
@@ -706,6 +707,10 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleAddComponentToBluepri
     ResultObj->SetStringField(TEXT("component_template"), NewNode->ComponentTemplate->GetPathName());
     ResultObj->SetArrayField(TEXT("applied"), AppliedArray);
     ResultObj->SetArrayField(TEXT("failed"), FailedArray);
+    // A new component exists on the SCS template only: an instance already standing in the level does not
+    // grow one (measured 2026-10-09: the instance's component list showed the component with an empty mesh
+    // and no material, while the template read back complete). Same report set_component_property gives.
+    FUnrealMCPCommonUtils::AddTemplateInstanceReport(Blueprint, ResultObj);
     return ResultObj;
 }
 
@@ -1172,6 +1177,13 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetPhysicsProperties(
         PrimComponent->SetSimulatePhysics(Params->GetBoolField(TEXT("simulate_physics")));
     }
 
+    // `gravity_enabled` was sent by the tool and read by nobody (the whole command surface had no mention of
+    // it), so a caller asking for zero gravity got a plain success and a body that still fell.
+    if (Params->HasField(TEXT("gravity_enabled")))
+    {
+        PrimComponent->SetEnableGravity(Params->GetBoolField(TEXT("gravity_enabled")));
+    }
+
     if (Params->HasField(TEXT("mass")))
     {
         float Mass = Params->GetNumberField(TEXT("mass"));
@@ -1195,6 +1207,17 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetPhysicsProperties(
 
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
     ResultObj->SetStringField(TEXT("component"), ComponentName);
+
+    // Read back what the component template now holds: "the command reported success" and "the body has the
+    // requested settings" are two different claims, and gravity in particular was accepted for a long time
+    // without any effect at all (nothing read the parameter).
+    TSharedPtr<FJsonObject> After = MakeShared<FJsonObject>();
+    After->SetBoolField(TEXT("simulate_physics"), PrimComponent->IsSimulatingPhysics());
+    After->SetBoolField(TEXT("gravity_enabled"), PrimComponent->BodyInstance.bEnableGravity);
+    After->SetNumberField(TEXT("mass"), PrimComponent->GetMass());
+    After->SetNumberField(TEXT("linear_damping"), PrimComponent->GetLinearDamping());
+    After->SetNumberField(TEXT("angular_damping"), PrimComponent->GetAngularDamping());
+    ResultObj->SetObjectField(TEXT("physics_properties_after"), After);
     return ResultObj;
 }
 
@@ -1519,6 +1542,9 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetStaticMeshProperti
 
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
     ResultObj->SetStringField(TEXT("component"), ComponentName);
+    // Mesh/material landed on the SCS template; a placed instance keeps its own copy and keeps rendering
+    // whatever it had (measured 2026-10-09: instance mesh/material stayed None while the template was right).
+    FUnrealMCPCommonUtils::AddTemplateInstanceReport(Blueprint, ResultObj);
     return ResultObj;
 }
 

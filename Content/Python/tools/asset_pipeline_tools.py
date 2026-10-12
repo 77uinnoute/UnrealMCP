@@ -473,3 +473,184 @@ def register_asset_pipeline_tools(mcp: FastMCP):
             error_msg = f"Error inspecting skeletal mesh: {e}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
+
+    def _physics_send(command: str, params: dict) -> Dict[str, Any]:
+        """Forward to one of the physics-asset commands. The dispatch stays literal on purpose:
+        Build/check_command_consistency.py identifies "which tool sends which command" from literals,
+        so building the name in a variable makes it report the command as dead."""
+        from unreal_mcp_server import get_unreal_connection
+
+        if not params.get("asset_path"):
+            return {"success": False, "error_code": "invalid_params", "message": "Missing 'asset_path' parameter"}
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            senders = {
+                "add_physics_asset_body": lambda payload: unreal.send_command("add_physics_asset_body", payload),
+                "add_physics_asset_constraint": lambda payload: unreal.send_command("add_physics_asset_constraint", payload),
+                "set_physics_asset_collision": lambda payload: unreal.send_command("set_physics_asset_collision", payload),
+                "remove_physics_asset_body": lambda payload: unreal.send_command("remove_physics_asset_body", payload),
+                "remove_physics_asset_constraint": lambda payload: unreal.send_command("remove_physics_asset_constraint", payload),
+                "list_physics_asset_bodies": lambda payload: unreal.send_command("list_physics_asset_bodies", payload),
+            }
+            response = senders[command](params)
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+            return response
+        except Exception as e:  # noqa: BLE001 - the tool contract is a structured dict, never a raise
+            error_msg = f"{command} failed: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
+    def list_physics_asset_bodies(ctx: Context, asset_path: str) -> Dict[str, Any]:
+        """
+        Read every body (bone, shapes, radii) and constraint (bones, limits) of a PhysicsAsset.
+
+        This is the read side of the physics-asset commands, and the only way to see
+        collision_disabled_with for a body: those pairs live in UPhysicsAsset::CollisionDisableTable,
+        a map keyed by a struct the property reflector cannot address.
+
+        Args:
+            asset_path: PhysicsAsset path, e.g. "/Game/MCP/Ganyu/Ganyu_UE_PhysicsAsset".
+
+        Returns:
+            Dict with the asset's bodies[] and constraints[] as the bridge reads them back.
+            Errors: load_failed (no asset at the path), not_a_physics_asset.
+        """
+        return _physics_send("list_physics_asset_bodies", {"asset_path": asset_path})
+
+    @mcp.tool()
+    def add_physics_asset_body(ctx: Context, asset_path: str, bone_name: str, radius: float,
+                              length: float = 0.0, mesh_path: Optional[str] = None,
+                              simulate: bool = False, persist: bool = True) -> Dict[str, Any]:
+        """
+        Add a collision body (sphere, or a capsule aligned to the bone) for one bone of a PhysicsAsset.
+
+        The only scriptable way to author PhysicsAsset bodies - FPhysicsAssetUtils::CreateNewBody has no
+        python binding. Nothing is simulated by this command: a RigidBody node or a physical animation
+        component still has to be pointed at the asset.
+
+        Args:
+            asset_path: PhysicsAsset path.
+            bone_name: Bone to create the body for.
+            radius: Sphere/capsule radius in cm.
+            length: Capsule segment length in cm; 0 (default) creates a sphere.
+            mesh_path: Mesh used to resolve the bone (default: the loaded mesh whose PhysicsAsset is this asset).
+            simulate: Mark the body PhysType_Simulated (dynamic in a RigidBody node); false (default) = kinematic.
+            persist: Save the asset after the command (default true).
+
+        Returns:
+            Dict with the created body read back from the asset; Errors: bone_not_found (candidates list
+            the skeleton's bones), body_exists, load_failed, not_a_physics_asset.
+        """
+        params: Dict[str, Any] = {"asset_path": asset_path, "bone_name": bone_name,
+                                  "radius": radius, "length": length, "simulate": simulate,
+                                  "persist": persist}
+        if mesh_path:
+            params["mesh_path"] = mesh_path
+        return _physics_send("add_physics_asset_body", params)
+
+    @mcp.tool()
+    def add_physics_asset_constraint(ctx: Context, asset_path: str, child_bone: str, parent_bone: str,
+                                     swing1_deg: float = 30.0, swing2_deg: float = 30.0,
+                                     twist_deg: float = 20.0, linear: str = "locked",
+                                     disable_collision: bool = True,
+                                     persist: bool = True) -> Dict[str, Any]:
+        """
+        Add a constraint between two already-present bodies of a PhysicsAsset.
+
+        The child bone names the constraint, as in the editor. Linear axes are locked or free; the three
+        angular limits are given in degrees. The parent must already have a body.
+
+        Args:
+            asset_path: PhysicsAsset path.
+            child_bone: Bone whose body is constrained (ConstraintBone1).
+            parent_bone: Bone it is constrained to (ConstraintBone2); must already have a body.
+            swing1_deg: Swing1 limit in degrees (default 30).
+            swing2_deg: Swing2 limit in degrees (default 30).
+            twist_deg: Twist limit in degrees (default 20).
+            linear: "locked" (default) or "free".
+            disable_collision: Disable collision between the two bodies (default true).
+            persist: Save the asset after the command (default true).
+
+        Returns:
+            Dict with the created constraint read back; Errors: body_not_found (candidates list bodies),
+            constraint_exists, invalid_linear, load_failed.
+        """
+        return _physics_send("add_physics_asset_constraint", {
+            "asset_path": asset_path, "child_bone": child_bone, "parent_bone": parent_bone,
+            "swing1_deg": swing1_deg, "swing2_deg": swing2_deg, "twist_deg": twist_deg,
+            "linear": linear, "disable_collision": disable_collision, "persist": persist})
+
+    @mcp.tool()
+    def set_physics_asset_collision(ctx: Context, asset_path: str, bone_name: str,
+                                    other_bones: Optional[List[str]] = None, disable: bool = True,
+                                    persist: bool = True) -> Dict[str, Any]:
+        """
+        Disable (or re-enable) collision between one body of a PhysicsAsset and other bodies.
+
+        The only scriptable way to narrow what a body collides with: the pairs live in
+        UPhysicsAsset::CollisionDisableTable, which the property reflector cannot address, and the
+        solver-side switch only covers the pair a constraint joins.
+
+        Args:
+            asset_path: PhysicsAsset path.
+            bone_name: Body whose collision set is changed.
+            other_bones: Bones to pair with; omitted or empty = every other body of the asset.
+            disable: true (default) disables those pairs, false re-enables them.
+            persist: Save the asset after the command (default true).
+
+        Returns:
+            Dict with the body's collision_disabled_with read back; Errors: body_not_found,
+            other_bone_not_found (candidates), load_failed.
+        """
+        params: Dict[str, Any] = {"asset_path": asset_path, "bone_name": bone_name,
+                                  "disable": disable, "persist": persist}
+        if other_bones:
+            params["other_bones"] = other_bones
+        return _physics_send("set_physics_asset_collision", params)
+
+    @mcp.tool()
+    def remove_physics_asset_body(ctx: Context, asset_path: str, bone_name: str,
+                                  persist: bool = True) -> Dict[str, Any]:
+        """
+        Remove a body from a PhysicsAsset for good, with every constraint that referenced it and its
+        collision-table entries (the remaining table indices are renumbered so each key still addresses
+        the same pair). Until this existed a body could only be parked as PhysType_Kinematic.
+
+        Args:
+            asset_path: PhysicsAsset path.
+            bone_name: Bone whose body is removed.
+            persist: Save the asset after the command (default true).
+
+        Returns:
+            Dict with the remaining bodies/constraints; Errors: body_not_found, load_failed.
+        """
+        return _physics_send("remove_physics_asset_body",
+                             {"asset_path": asset_path, "bone_name": bone_name, "persist": persist})
+
+    @mcp.tool()
+    def remove_physics_asset_constraint(ctx: Context, asset_path: str, child_bone: str, parent_bone: str,
+                                        persist: bool = True) -> Dict[str, Any]:
+        """
+        Remove one constraint of a PhysicsAsset, identified by the same (child, parent) bone pair
+        add_physics_asset_constraint uses.
+
+        Args:
+            asset_path: PhysicsAsset path.
+            child_bone: ConstraintBone1 of the constraint to remove.
+            parent_bone: ConstraintBone2 of the constraint to remove.
+            persist: Save the asset after the command (default true).
+
+        Returns:
+            Dict with the remaining constraints; Errors: constraint_not_found, load_failed.
+        """
+        return _physics_send("remove_physics_asset_constraint", {
+            "asset_path": asset_path, "child_bone": child_bone, "parent_bone": parent_bone,
+            "persist": persist})

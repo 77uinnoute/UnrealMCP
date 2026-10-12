@@ -43,10 +43,13 @@ public class UnrealMCP : ModuleRules
 				"InputCore",
 				"Networking",
 				"Sockets",
-				"HTTP",
-				"Json",
-				"JsonUtilities",
-				"DeveloperSettings"
+					"HTTP",
+					"Json",
+					"JsonUtilities",
+					"DeveloperSettings",
+					"Niagara",
+					"NiagaraCore",
+					"NiagaraShader"
 			}
 		);
 		
@@ -59,6 +62,9 @@ public class UnrealMCP : ModuleRules
 					"Slate",
 					"SlateCore",
 					"RHI",                 // For GetFeatureLevelShaderPlatform (material resource lookup on 5.7+)
+					"RenderCore",          // For FRHIGPUTextureReadback's game-thread side: ENQUEUE_RENDER_COMMAND
+					                       // and FlushRenderingCommands live here, not in RHI (read_render_target_stats
+					                       // compiles without it and then fails at LNK2019 on those two symbols)
 					"ApplicationCore",     // For IPlatformInputDeviceMapper::Get, which the inline
 					                       // FInputKeyEventArgs(FInputDeviceId, ...) constructor references
 					                       // (inject_key). Slate/SlateCore pull the module in, but a static
@@ -90,10 +96,12 @@ public class UnrealMCP : ModuleRules
 							"UMGEditor",           // For WidgetBlueprint.h and other UMG editor functionality
 							"PythonScriptPlugin",  // For executing Python commands in editor
 							"MaterialEditor",      // For material expression editing (UMaterialEditingLibrary)
-							"AnimGraph",           // For UAnimPreviewInstance (animation editor session / preview control)
-							"LevelEditor",         // For ULevelEditorSubsystem (PIE lifecycle: play / end play / is playing)
-							"PCG"                  // For the read-only PCG probing commands (UPCGGraph / UPCGComponent / FPCGDataCollection)
-						}
+								"AnimGraph",           // For UAnimPreviewInstance (animation editor session / preview control)
+								"LevelEditor",         // For ULevelEditorSubsystem (PIE lifecycle: play / end play / is playing)
+								"PCG",                 // For the read-only PCG probing commands (UPCGGraph / UPCGComponent / FPCGDataCollection)
+								"NiagaraEditor",       // For UNiagaraGraph / FNiagaraStackGraphUtilities / FNiagaraSystemViewModel
+								"NiagaraEditorWidgets" // For Niagara stack widget integration
+							}
 					);
 				}
 		
