@@ -2481,6 +2481,15 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintNodeCommands::HandleDeleteBlueprintNo
     ResultObj->SetArrayField(TEXT("failed"), FailedArray);
     ResultObj->SetNumberField(TEXT("deleted_count"), DeletedArray.Num());
     ResultObj->SetNumberField(TEXT("failed_count"), FailedArray.Num());
+    // Nothing deleted with failures listed = the call did not do what it says (the guids in failed[]
+    // already explain each one); MakeWriteResult had set success: true for the graph write.
+    if (DeletedArray.Num() == 0 && FailedArray.Num() > 0)
+    {
+        ResultObj->SetBoolField(TEXT("success"), false);
+        ResultObj->SetStringField(TEXT("error_code"), TEXT("nothing_deleted"));
+        ResultObj->SetStringField(TEXT("error"), FString::Printf(
+            TEXT("no node was deleted: all %d guid(s) failed (see failed[])"), FailedArray.Num()));
+    }
     ResultObj->SetNumberField(TEXT("remaining_nodes"), Graph->Nodes.Num());
     ResultObj->SetBoolField(TEXT("force"), bForce);
     if (bForce)

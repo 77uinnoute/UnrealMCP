@@ -902,6 +902,12 @@ static bool ParseCommonImportParams(const TSharedPtr<FJsonObject>& Params, FMCPI
 
 static TSharedPtr<FJsonObject> RunImportRequest(const FMCPImportRequest& Request)
 {
+    // Shared by all four import commands; precedes cvar changes, factories and directory creation.
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("asset import")))
+    {
+        return Busy;
+    }
+
     const TArray<FString>& SourcePaths = Request.SourcePaths;
     const FString DestinationPath = Request.DestinationPath;
     const bool bForceLegacy = Request.bForceLegacy;
@@ -1580,7 +1586,17 @@ static TSharedPtr<FJsonObject> RunImportRequest(const FMCPImportRequest& Request
         Entry->SetArrayField(TEXT("save_failures"), SaveFailuresJson);
     }
 
-    ResultJson->SetBoolField(TEXT("success"), true);
+    // "Nothing imported" is a FAILURE, not a batch that reports success while producing no asset at
+    // all (results[] already named why each file failed). A partial batch stays a success: the
+    // per-file entries and failed_count carry the rest.
+    const bool bAnyImported = ImportedCount > 0 || FailedCount == 0;
+    ResultJson->SetBoolField(TEXT("success"), bAnyImported);
+    if (!bAnyImported)
+    {
+        ResultJson->SetStringField(TEXT("error_code"), TEXT("import_failed"));
+        ResultJson->SetStringField(TEXT("error"), FString::Printf(
+            TEXT("no asset was imported: all %d file(s) failed (see results[])"), FailedCount));
+    }
     ResultJson->SetStringField(TEXT("destination_path"), DestinationPath);
     ResultJson->SetStringField(TEXT("importer"), bForceLegacy ? TEXT("legacy") : TEXT("interchange"));
     // 类型化命令的类型标识（`import_assets` 不带该字段），以及该命令接受的源文件扩展名。
@@ -2189,7 +2205,17 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetEditCommands::HandleSetAssetProperties(co
     Asset->MarkPackageDirty();
 
     TSharedPtr<FJsonObject> ResultJson = MakeShareable(new FJsonObject);
-    ResultJson->SetBoolField(TEXT("success"), true);
+    // A write where EVERY property failed changed nothing: `success` must not cover it (a partial
+    // batch stays a success - failed[] names the ones that did not take).
+    const bool bAnyApplied = AppliedJson.Num() > 0 || FailedJson.Num() == 0;
+    ResultJson->SetBoolField(TEXT("success"), bAnyApplied);
+    if (!bAnyApplied)
+    {
+        ResultJson->SetStringField(TEXT("error_code"), TEXT("no_property_applied"));
+        ResultJson->SetStringField(TEXT("error"), FString::Printf(
+            TEXT("none of the %d propert%s was applied (see failed[])"), FailedJson.Num(),
+            FailedJson.Num() == 1 ? TEXT("y") : TEXT("ies")));
+    }
     ResultJson->SetStringField(TEXT("asset_path"), Asset->GetPathName());
     ResultJson->SetArrayField(TEXT("applied"), AppliedJson);
     ResultJson->SetArrayField(TEXT("failed"), FailedJson);

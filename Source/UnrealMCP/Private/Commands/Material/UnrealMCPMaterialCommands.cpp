@@ -2235,7 +2235,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleWipeMaterialGraph(cons
         {
             UMaterialEditingLibrary::DeleteMaterialExpression(Mat, Expr);
         }
-        CollectGarbage(RF_NoFlags);
+        UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("wipe_material_graph leftover reclaim"));
         DeletedTotal += FMath::Max(0, Before - Exprs.Num());
     }
 

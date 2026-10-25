@@ -117,7 +117,6 @@ def register_ue_safe_api_tools(mcp: FastMCP):
         package_path: str,
         asset_class: Optional[str] = None,
         factory_name: Optional[str] = None,
-        recreate: bool = False,
         persist: bool = True,
         asset_class_name: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -125,10 +124,12 @@ def register_ue_safe_api_tools(mcp: FastMCP):
 
         Checks existence first: if the asset already exists it returns a structured
         'asset_exists' error instead of popping the blocking dialog that freezes the
-        whole MCP bridge. With recreate=True an existing asset is silently saved and
-        deleted first (no save prompt), then recreated — if the deletion is still
-        pending in the asset registry it returns 'delete_pending' (retry) instead of
-        risking a modal. Uses AssetToolsHelpers.get_asset_tools().create_asset()
+        whole MCP bridge. It NEVER overwrites - to replace something, delete it first
+        with safe_delete_asset (which reports blockers and refuses when it cannot
+        finish), or better, edit in place: wipe_material_graph for a material,
+        set_material_parameters for a material instance, import_assets(replace_existing=True)
+        for a mesh or texture. In-place edits keep the asset identity, so live references
+        and render proxies stay valid. Uses AssetToolsHelpers.get_asset_tools().create_asset()
         (unreal.EditorAssetLibrary.create_asset does not exist).
 
         Args:
@@ -138,7 +139,6 @@ def register_ue_safe_api_tools(mcp: FastMCP):
                 "MaterialInstanceConstant", "ParticleSystem", "NiagaraSystem", "SoundCue"
             factory_name: Optional factory class override
                 (default: built-in mapping or "<class>FactoryNew" convention)
-            recreate: Delete an existing asset first, then create (default False)
             persist: Save the new asset's package (default True). The asset is created in memory and
                 marked dirty; without this it never reaches the disk and is silently lost when the
                 editor is killed or the current level is switched. Pass False only when batching
@@ -148,7 +148,7 @@ def register_ue_safe_api_tools(mcp: FastMCP):
 
         Returns:
             Dict with status success (result = created asset path) or a structured error
-            (asset_exists / delete_pending / unknown_class / no_factory / create_failed)
+            (asset_exists / unknown_class / no_factory / create_failed / removed_parameter)
         """
         if asset_class and asset_class_name and asset_class != asset_class_name:
             return {"status": "error", "error": "invalid_params",
@@ -168,7 +168,6 @@ def register_ue_safe_api_tools(mcp: FastMCP):
             "package_path": package_path,
             "asset_class": asset_class,
             "factory": factory_name,
-            "recreate": bool(recreate),
             "persist": bool(persist),
         })
         data = _payload(response)

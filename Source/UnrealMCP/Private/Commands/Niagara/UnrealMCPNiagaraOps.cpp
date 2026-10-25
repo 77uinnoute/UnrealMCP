@@ -1,4 +1,5 @@
 #include "Commands/Niagara/UnrealMCPNiagaraOps.h"
+#include "Core/MCPGCSafety.h"
 
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/Niagara/UnrealMCPNiagaraFactories.h"
@@ -1483,7 +1484,7 @@ bool FUnrealMCPNiagaraOps::CreateSystem(const FString& Name, const FString& Fold
         if (!IsValid(Existing) || Existing->IsUnreachable())
         {
             Existing->MarkAsGarbage();
-            CollectGarbage(RF_NoFlags);
+            UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("niagara system leftover reclaim"));
         }
         else
         {
@@ -1545,7 +1546,7 @@ bool FUnrealMCPNiagaraOps::DuplicateSystem(const FString& SourcePath, const FStr
         return false;
     }
 
-    if (UObject* Existing = FUnrealMCPCommonUtils::FindAsset(Destination))
+    if (FUnrealMCPCommonUtils::DoesAssetPackageExist(Destination))
     {
         Fail(Out, TEXT("asset_exists"), FString::Printf(TEXT("Asset already exists: %s"), *Destination));
         return false;

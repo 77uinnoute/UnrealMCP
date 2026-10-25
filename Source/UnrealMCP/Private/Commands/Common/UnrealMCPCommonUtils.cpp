@@ -38,6 +38,9 @@
 #include "Materials/MaterialFunction.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/FileManager.h"
+#include "Compat/UnrealMCPVersionCompat.h"
+#include "UObject/SavePackage.h"
 #include "UObject/UnrealType.h"
 #include "UObject/TopLevelAssetPath.h"
 #include "UObject/Package.h"
@@ -57,6 +60,30 @@
 bool FUnrealMCPCommonUtils::IsPlaySessionRunning()
 {
     return GEditor && (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor);
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(
+    const FString& CommandName, const FString& ErrorCode)
+{
+    // Session info covers startup/teardown; the queued request covers the frame before PlayWorld exists.
+    if (!IsPlaySessionRunning() && !(GEditor && GEditor->IsPlaySessionInProgress()))
+    {
+        return nullptr;
+    }
+
+    TSharedPtr<FJsonObject> Busy = CreateErrorResponse(ErrorCode,
+        FString::Printf(TEXT("%s is refused while a PIE/SIE session is running or pending; no asset lifecycle work was performed"), *CommandName));
+    Busy->SetStringField(TEXT("hint"), TEXT("Call stop_pie, then wait until the PIE/SIE session and pending play request have ended before retrying"));
+    Busy->SetBoolField(TEXT("pie_running"), GEditor && GEditor->PlayWorld != nullptr);
+    Busy->SetBoolField(TEXT("simulating_in_editor"), GEditor && GEditor->bIsSimulatingInEditor);
+    Busy->SetBoolField(TEXT("play_request_pending"), GEditor && GEditor->IsPlaySessionRequestQueued());
+    return Busy;
+}
+
+bool FUnrealMCPCommonUtils::DoesAssetPackageExist(const FString& AssetPath)
+{
+    const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
+    return FindPackage(nullptr, *PackageName) != nullptr || FPackageName::DoesPackageExist(PackageName);
 }
 
 int32 FUnrealMCPCommonUtils::CountPlacedInstances(const UBlueprint* Blueprint, FString& OutWorldKind)
@@ -1693,6 +1720,8 @@ TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::ObjectPropertiesToJson(UObject* O
 
     return PropertiesObj;
 }
+DEFINE_LOG_CATEGORY_STATIC(LogUnrealMCPCommon, Log, All);
+
 // Blueprint persistence: our own build script kills the editor, so unsaved graph /
 // component edits are routinely lost. Every successful mutation is written out.
 bool FUnrealMCPCommonUtils::SaveAssetForObject(UObject* Object)
@@ -1709,16 +1738,58 @@ bool FUnrealMCPCommonUtils::SaveAssetForObject(UObject* Object)
     // (BlueprintEditorUtils.cpp:1986) - and every structural graph edit compiles the skeleton right away
     // (BlueprintEditorUtils.cpp:1967), so "edit and compile" is one call stack. The editor's build script
     // then kills the process, so "looks clean" must not mean "skip the write": that is how
-    // BP_TPSDemoGameMode kept losing its HUD wiring. UEditorLoadingAndSavingUtils::SavePackages saves the
-    // package regardless of its dirty state once bOnlyDirty is false.
+    // BP_TPSDemoGameMode kept losing its HUD wiring. Hence: save regardless of the dirty state.
     UPackage* Package = Object->GetOutermost();
     if (!Package || Package == GetTransientPackage())
     {
         return false;
     }
 
+    const FString PackageFile = FPackageName::LongPackageNameToFilename(
+        Package->GetName(), FPackageName::GetAssetPackageExtension());
+    if (PackageFile.IsEmpty())
+    {
+        UE_LOG(LogUnrealMCPCommon, Warning,
+            TEXT("SaveAssetForObject: '%s' does not resolve to a writable package path; not saving"), *Package->GetName());
+        return false;
+    }
+
+    // A read-only file is the case the engine would normally resolve by asking source control to check the
+    // package out. We never ask, so failing here is the honest outcome - and it has to be reported from
+    // here, because the file already exists: a downstream "does the .uasset exist" check cannot tell that
+    // nothing was written.
+    if (IFileManager::Get().FileExists(*PackageFile) && IFileManager::Get().IsReadOnly(*PackageFile))
+    {
+        UE_LOG(LogUnrealMCPCommon, Warning,
+            TEXT("SaveAssetForObject: %s is read-only; refusing to save it (check it out yourself first)"), *PackageFile);
+        return false;
+    }
+
     Package->MarkPackageDirty();
-    return UEditorLoadingAndSavingUtils::SavePackages({ Package }, /*bOnlyDirty=*/false);
+
+    // Deliberately NOT UEditorLoadingAndSavingUtils::SavePackages (nor any of the wrappers around it:
+    // UEditorAssetSubsystem::SaveAsset / SaveLoadedAsset / SaveLoadedAssets all funnel into it - the engine
+    // comments even say "checking out is done in UEditorLoadingAndSavingUtils::SavePackages"). That path
+    // runs FEditorFileUtils::InternalPromptForCheckoutAndSave, which tries to check the package out from
+    // source control and pops a modal dialog when it cannot. A modal owns the game thread, so every bridge
+    // command - including read-only ones - times out until a human closes it. UPackage::SavePackage writes
+    // the file and never talks to source control. From here on, "this needs a checkout" is REPORTED (the
+    // call returns false and the caller says so), never negotiated through a dialog.
+    FStringOutputDevice SaveErrors;
+    FSavePackageArgs SaveArgs;
+    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+    SaveArgs.SaveFlags = SAVE_NoError;
+    SaveArgs.Error = &SaveErrors;
+    // True by default, and it is a message box.
+    SaveArgs.bWarnOfLongFilename = false;
+
+    const bool bSaved = UPackage::SavePackage(Package, /*InAsset=*/nullptr, *PackageFile, SaveArgs);
+    if (!bSaved)
+    {
+        UE_LOG(LogUnrealMCPCommon, Warning, TEXT("SaveAssetForObject: SavePackage failed for %s: %s"),
+            *PackageFile, *SaveErrors);
+    }
+    return bSaved;
 }
 
 bool FUnrealMCPCommonUtils::IsPersistRequested(const TSharedPtr<FJsonObject>& Params)

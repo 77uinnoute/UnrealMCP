@@ -1,6 +1,6 @@
 ---
 name: unreal-level-authoring
-description: "UE5（UnrealMCP）里用 MCP 工具程序化新建/保存地图、给地图补天空与光照、往关卡里放 actor 的方法：新建地图的唯一入口与它会把编辑器当前关卡切走的副作用（先查 dirty map 避免模态框）、**新建地图后必须补一套天空/光照 actor（SkyLight + DirectionalLight + SkyAtmosphere，可选 VolumetricCloud / ExponentialHeightFog），否则视口与 PIE 都是黑的**、这套 actor 可直接照抄的起手变换值、spawn_actor 与 spawn_blueprint_actor 的取舍与重名拒绝语义、关卡里放 UMG 入口 Actor 时 BeginPlay 早于 PlayerController 的坑、以及不靠截图的存在性断言与存盘收口。触发场景：准备调用 get_actors_in_level / spawn_actor / spawn_blueprint_actor / set_actor_property / get_actor_properties / delete_actor / start_pie / stop_pie / add_widget_to_viewport，或在 `execute_python_*` 里调用 LevelEditorSubsystem.new_level / save_current_level / EditorLoadingAndSavingUtils.* 之前；以及任何涉及「新建一张地图/关卡、地图打开是黑的、进 PIE 一片黑、PIE 起不来（`pie_blocked_by_compile_errors`）、给新地图补天空光/平行光/大气/雾、往关卡里摆 actor、关卡怎么存盘」的任务。"
+description: "UE5（UnrealMCP）里用 MCP 工具程序化新建/保存地图、给地图补天空与光照、往关卡里放 actor 的方法：新建地图的唯一入口与它会把编辑器当前关卡切走的副作用（先查 dirty map 避免模态框）、**新建地图后必须补一套天空/光照 actor（SkyLight + DirectionalLight + SkyAtmosphere，可选 VolumetricCloud / ExponentialHeightFog），否则视口与 PIE 都是黑的**、这套 actor 可直接照抄的起手变换值、spawn_actor 与 spawn_blueprint_actor 的取舍与重名拒绝语义、关卡里放 UMG 入口 Actor 时 BeginPlay 早于 PlayerController 的坑、不靠截图的存在性断言与存盘收口，以及 **PIE 期怎么可靠判「资产在不在」（EditorScriptingUtilities 那族在 play 模式下拒答并把拒答编码成 false / None，要改用 asset_status 或 unreal.load_asset）**。触发场景：准备调用 get_actors_in_level / spawn_actor / spawn_blueprint_actor / set_actor_property / get_actor_properties / asset_status / delete_actor / start_pie / stop_pie / add_widget_to_viewport，或在 `execute_python_*` 里调用 LevelEditorSubsystem.new_level / save_current_level / EditorLoadingAndSavingUtils.* 之前；以及任何涉及「新建一张地图/关卡、地图打开是黑的、进 PIE 一片黑、PIE 起不来（`pie_blocked_by_compile_errors`）、PIE 期间判资产存在性只拿到 false / None、给新地图补天空光/平行光/大气/雾、往关卡里摆 actor、关卡怎么存盘」的任务。"
 metadata:
   version: "1.0.0"
   upstream: ~
@@ -103,9 +103,18 @@ print(unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages())
 | 摆蓝图 actor | `spawn_blueprint_actor(blueprint_name, actor_name, location, rotation, scale?)` | 回执里 `class` 带 `_C` 后缀（`BP_InventoryHost_C`）；`scale` 由命令在 spawn 之后补写（蓝图根组件来自 SCS，spawn 变换里的 scale 会被引擎重建掉）——**不用再补一次 `set_actor_transform`** |
 | 改已存在 actor 的属性 | `set_actor_property` / `set_actor_transform` / `set_actor_location_safe` | 按类走结构化读写，别手搓指针 |
 | 改**组件上的**属性（灯强度、相机 FOV、组件可见性、网格） | `set_actor_property(property_name='<组件>.<属性>')`，如 `LightComponent0.Intensity` | 组件选择器 = 组件对象名**或**组件类名（`U` 前缀/`Component` 后缀可省），所以 `LightComponent.Intensity` 也能命中灯的 `DirectionalLightComponent`。`set_component_property` **不是**替代品：它写蓝图的 SCS 模板，对关卡里已放置的 actor 无效。失败回包里带 `components`（该 actor 的组件清单）与 `component_property_paths`（每条可用点号路径），照着写即可；成功回包带 `component` 与 `property_value_after` |
+| 改 actor **自己持有的结构体/对象里的成员**（关卡后处理的 `FPostProcessSettings`、组件的 `RootComponent.RelativeLocation`…） | 同一个 `set_actor_property`，`property_name` 直接写路径：`Settings.bOverride_AutoExposureMethod` / `Settings.AutoExposureMethod` / `RootComponent.RelativeLocation` / `LodData[0].PhysicalMeshData.Values` | 两种读法**同时支持，顺序固定**：先当**组件选择器**（`<组件>.<属性>`，既有语义，不会改道），组件没命中才当**属性路径**（段用 `.` 分隔，`[i]` 数组下标、`[key]` map 键，中途可以是 struct / object / array / map；与 `reflect_probe` / `set_object_property` **共用同一份解析器**，所以一条路径可以先 probe 再写）。成功回包在 `property_value_after` 之外带 `resolved_property`（叶子真名）。路径第 1 段解析成功、后面失败 ⇒ 回 `unknown_property` + `path_prefix` + 该层全字段 `candidates`（**不是** `component_not_found`）；两路都不成立 ⇒ `component_not_found` + `components` + `path_error`/`path_candidates`。**注意**：`reflect_probe` 的 `target` **不认关卡 actor**（只认资产/类/子对象），所以这种写法要靠 `set_actor_property` 自己的 `property_value_after` 回读自证；位域成员（`bOverride_*`）python 也读不到 |
 | 删 actor | `delete_actor(name, flush?)` | **`Destroy()` 只标 pending-kill**：立刻退出所有 actor 清单，但**名字要到 GC 才释放** ⇒ 紧接着同名 `spawn_*` 是引擎 Fatal，且存盘会把它写回来。回执带 `pending_kill` + `hint`；`flush=true` 会**无条件 GC** 并用引擎同款判据复验（`pending_kill=false` = 名字已释放、`flushed=true` 表示 GC 真跑过），但**同名重建仍要等下一次调用**（见下条） |
 
 - **同名重建的 recipe（实测定案）**：`delete_actor` → `unreal.SystemLibrary.collect_garbage()`（或 `delete_actor(flush=true)`，它现在会真的 GC）→ **另一次 MCP 调用**里再 spawn 同名。两个前提缺一不可：① **GC 真的跑过**（没跑的话名字一直被占，连存盘都会把这个 actor 写回去）；② **重建发生在"新的一帧"** —— 即另一次 MCP 调用；同一个 `execute_python_file` 脚本里删完立刻重建，**即使 GC 跑过也撞引擎 Fatal**（`LevelActor.cpp:585` "Cannot generate unique name"）。
+- **一轮（同一脚本）内重建同名：可以，靠"给僵尸改名"**（2026-10-12 实测通过）。判据只有一条 —— `ULevel::SpawnActor` 查 `StaticFindObjectFast(nullptr, Level, Name)`（`LevelActor.cpp:564`），即**名字是否被对象图里仍存在的对象占着**；而 `Destroy()` 后对象通常**不会**被 GC 收掉（python 局部变量、undo 事务都持有引用），所以名字一直占着 ⇒ 默认 `FActorSpawnParameters::NameMode == Required_Fatal`（`World.cpp:428`）的 spawn（脚本里手写的、`EditorLevelLibrary.spawn_actor_from_class` 一族）**直接 Fatal 崩编辑器**。把僵尸**改名挪开**就当场释放名字，与 GC、帧都无关：
+  ```python
+  bridge("delete_actor", name=NAME, flush=True)                 # 或 actor.destroy_actor()
+  zombie = unreal.find_object(None, level_path + "." + NAME)     # 仍在对象图里
+  zombie.rename(NAME + "_Dead")                                  # 名字当场释放
+  bridge("spawn_actor", name=NAME, type="...")                   # 同脚本内立刻建，成功
+  ```
+  改名**不等于复活**：对象仍是 pending-kill，不回 actor 清单、不参与存盘。未实测的两条同效路径：① 反向做（临时名建 → 删旧 → 新 actor 改名成目标名，`UObject::Rename` 不走 spawn 的唯一性检查）；② 让 spawn 走引擎 `NameMode::Requested`（`LevelActor.cpp:569-571` 自动加 `_2` 后缀），代价是拿不到精确名字。
 - **误用不会再崩编辑器**：三个 spawn 命令现在先按引擎同款判据（`StaticFindObjectFast(nullptr, Level, Name)`）检查名字，被占就回 **`name_taken` + `hint`**（讲清上面那套 recipe），并给 `SpawnActor` 传 `NameMode = Required_ErrorAndReturnNull` 兜底 —— 实测**同一调用内**再 spawn 同名只是被拒，编辑器照常。（这一条是"能查就别崩"的落地：以前这个形状直接 Fatal。）
 - **别用 `get_all_level_actors()` 的 label 判断"东西还在不在"来清理**：对蓝图实例它可能取不到 label ⇒ 清理静默不生效、实例还活着 ⇒ 后续同名 spawn 直接 Fatal（本轮踩过）。
 - **删过的 actor 不能再按名字删第二次**：它已从 actor 清单里消失，第二次 `delete_actor` 直接回 `Actor not found`（回执里没有 `pending_kill`），而名字仍在对象图里占着 ⇒ 要回收只能靠 GC（`flush=true`，或 python 侧 `unreal.SystemLibrary.collect_garbage()`），不能靠"再删一遍"。
@@ -171,7 +180,10 @@ print(world.get_world_settings().get_editor_property("default_game_mode"))   # �
 - `start_pie` / `stop_pie` 都是**只发请求、立刻返回**：PIE 在后面的帧才起来。**不要在同一次派发里等它**（脚本占着 GameThread，PIE 永远起不来）—— 拆成"这次派发 start_pie →（真实时间过去）→ 下一次派发断言 → 再一次派发清理"。
 - **PIE 起不来先看 `pie_blocked_by_compile_errors`**：只要有任何蓝图处于 `BS_Error`，引擎就**拒绝启动 PIE 并弹模态框**问"是否强制"；插件里**没有任何全局模态抑制**（唯一设 `GIsRunningUnattendedScript` 的地方在 asset 域），所以从外面看就是"静默什么都不做"（`pie_running` 永远 false、日志里也没有别的线索）。`start_pie` 现在会先做这个预检并回 `success:false` + `compile_error_blueprints[]`（含资产路径与节点错误）+ `log_errors_tail[]`（`LogBlueprint: Error` / `[AssetLog]` 行 —— **RigVM/自定义编译器的真实错误文本只在日志里**，节点自带的 `ErrorMsg` 很短）；确要强起传 `force=true`。
 - PIE 运行期间不要删夹具资产（`safe_delete_asset` 有 `pie_running` 守卫，整调用拒），清理一律放 `stop_pie` 之后。
-- PIE 期间 `unreal.EditorAssetLibrary.does_asset_exist` / `list_assets` 会**回空/False 说谎**，别拿它当门禁。
+- PIE 期间 `unreal.EditorAssetLibrary.*`（`does_asset_exist` / `load_asset` / `list_assets` 等**全部入口**）**一律拒答，并把拒答编码成假值**（`false` / `None` / 空数组）。根因：`UEditorAssetSubsystem` 的每个入口都以 `if (!EditorScriptingHelpers::CheckIfInEditorAndPIE() || !EnsureAssetsLoaded()) return <中性值>;` 开头，而前者 = `IsInEditorAndNotPlaying()`，在 `GEditor->PlayWorld` 非空时恒为 false。⇒ 它的 `false` **区分不了**"资产没了"和"我不能回答"。
+  - **别拿它当存在性门禁**：`if not does_asset_exist(p): create_asset(p)` 会走进创建分支 ⇒ 引擎弹**重名模态框** ⇒ GameThread 被占，连只读命令都超时，必须人工关框。
+  - **正解（按用途选）**：判存在性 → 命令 **`asset_status`**（回 `in_memory` / `on_disk` / `registry` / `referencers` 四路，无 PIE 闸，python 回环里也能调 —— 它存在的意义就是区分"没加载"与"没了"）；拿对象 → `unreal.load_asset` / `unreal.load_object`（python 层 `PyCore` 走裸 `LoadObject`，同样无闸）；建/删 → `create_asset_safe` / `safe_delete_asset`。
+  - 两个 guard 的日志行为不同：`CheckIfInEditorAndPIE()` 失败会写 `LogEditorScripting: Error: The Editor is currently in a play mode.`，而 `EnsureAssetsLoaded()` 失败**静默** ⇒ 日志里没有那行 Error **不能**证明与 PIE 无关。
 
 ---
 

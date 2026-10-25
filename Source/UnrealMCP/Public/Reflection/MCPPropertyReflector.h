@@ -108,6 +108,36 @@ struct UNREALMCP_API FPropertyDescriptor
 };
 
 /**
+ * Where a dotted/indexed property path landed, or why it did not.
+ *
+ * A failed resolution is reported with the segment it reached (`ResolvedPrefix`), the legal names at the
+ * segment that failed (`Candidates`) and, where one exists, the way out (`Hint`) - the same "answer with a
+ * route" rule the write errors follow.
+ */
+struct UNREALMCP_API FMCPPropertyPathResult
+{
+    /** Leaf property, null when the path did not resolve. */
+    FProperty* Property = nullptr;
+
+    /** Leaf value address; meaningful only when Property is set. */
+    void* Address = nullptr;
+
+    FString ErrorCode;
+    FString ErrorMessage;
+
+    /** Segments that did resolve, joined with '.', so a failure says where the walk stopped. */
+    FString ResolvedPrefix;
+
+    /** Legal field names at the step that failed. */
+    TArray<FString> Candidates;
+
+    /** What to do about this particular failure (write the whole array, add a subscript, ...). */
+    FString Hint;
+
+    bool IsResolved() const { return Property != nullptr; }
+};
+
+/**
  * The single property read/write implementation.
  *
  * Every property command must go through here: handlers must not dispatch on property type themselves
@@ -121,6 +151,19 @@ struct UNREALMCP_API FPropertyDescriptor
 class UNREALMCP_API FMCPPropertyReflector
 {
 public:
+    /**
+     * Resolve a dotted/indexed property path to its leaf property and value address.
+     *
+     * A path is the only way to reach data that is not a property of the target object itself: a member of
+     * a struct property ("Settings.bOverride_AutoExposureMethod"), a value behind an object reference, an
+     * element of an array or map. Intermediate segments may be structs, objects, arrays or maps, and a
+     * container segment needs a subscript ("LodData[0].PhysicalMeshData.WeightMaps[1].Values").
+     *
+     * This is the ONE path grammar in the plugin: every command that accepts a dotted property name goes
+     * through it, so the accepted spelling cannot drift between the actor commands and the reflection ones.
+     */
+    static FMCPPropertyPathResult ResolvePath(UObject* RootObject, const FString& Path);
+
     /** Property -> JSON. Handles structs and containers recursively. */
     static TSharedPtr<FJsonValue> ToJson(FProperty* Property, const void* ValuePtr);
 

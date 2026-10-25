@@ -262,24 +262,33 @@ def register_editor_tools(mcp: FastMCP):
         property_value,
     ) -> Dict[str, Any]:
         """
-        Set a property on an actor, or on one of its components.
+        Set a property on an actor, on one of its components, or inside a struct/object property it holds.
 
-        Component properties (light intensity, camera FOV, a static mesh, component visibility) are written
-        as '<component>.<property>', e.g. name='Sun' property_name='LightComponent.intensity'. The component
-        is matched by its object name or by its class name (the U prefix and the 'Component' suffix are
-        optional). set_component_property is NOT a substitute: it writes a Blueprint's SCS template and has
-        nothing to say about an actor already standing in the level.
+        Two dotted forms are accepted, tried in this order:
+
+        * '<component>.<property>' - a component property (light intensity, camera FOV, a static mesh,
+          component visibility), e.g. name='Sun' property_name='LightComponent.intensity'. The component is
+          matched by its object name or by its class name (the U prefix and the 'Component' suffix are
+          optional). set_component_property is NOT a substitute: it writes a Blueprint's SCS template and has
+          nothing to say about an actor already standing in the level.
+        * a property path inside the actor itself, e.g. name='PPV_0'
+          property_name='Settings.bOverride_AutoExposureMethod' (a field of the FPostProcessSettings struct
+          property 'Settings'), or 'LodData[0].PhysicalMeshData.Values'. This is the same path grammar
+          reflect_probe / set_object_property resolve, so a path can be probed before it is written.
 
         Args:
             name: Name of the actor
-            property_name: Property name, or '<component>.<property>' for a component property
+            property_name: Property name, '<component>.<property>', or a path like
+                'Settings.bOverride_AutoExposureMethod'
             property_value: Value to set the property to
 
         Returns:
-            On success: actor, property, `property_value_after` (read back from the object that was written)
-            and `component` when the write went to a component. On failure: `components` (the names to choose
-            from) and - when a component owns a property resembling the request - `component_property_paths`
-            with the dotted paths that would work.
+            On success: actor, property, `property_value_after` (read back from the object that was written),
+            `component` when the write went to a component, and `resolved_property` when a path was walked.
+            On failure: the reflector's error code, `components` (the names to choose from),
+            `component_property_paths` when a component owns a property resembling the request, and -
+            for a dotted name - `path_prefix` / `path_candidates` / `path_error` describing how far the path
+            got and which fields exist at the step that failed.
         """
         from unreal_mcp_server import get_unreal_connection
         
@@ -459,6 +468,9 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Dict with 'status': 'success' carries 'result' (with 'success', evaluation 'result',
             and 'log' entries); on failure 'status': 'error' with the traceback in 'error'.
+            result also carries 'duration_ms' (the whole bridge-side handler: banned-API scan +
+            python exec + log collection) and 'python_ms' (the engine's python call alone).
+            Both exclude the TCP round trip and this tool wrapper.
         """
         from unreal_mcp_server import get_unreal_connection
 
@@ -536,7 +548,7 @@ def register_editor_tools(mcp: FastMCP):
 
         Returns:
             Same shape as execute_python_command; additionally result carries file_path
-            and code_bytes.
+            and code_bytes, plus the same duration_ms / python_ms timing fields.
         """
         from unreal_mcp_server import get_unreal_connection
 

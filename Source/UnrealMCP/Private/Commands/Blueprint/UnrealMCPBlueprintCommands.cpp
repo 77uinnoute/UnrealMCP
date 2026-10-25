@@ -163,14 +163,21 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
     // it there, so this domain's arm for it was unreachable. Registering it here as well would only
     // produce a duplicate at Seal().
 
-    MCP_REGISTER_COMMAND(Registry, "set_blueprint_property", "blueprint", "Set one property on a Blueprint's class default object.",
+    MCP_REGISTER_COMMAND(Registry, "set_blueprint_property", "blueprint", "Set one property on a Blueprint's class default object. The property name takes the C++ name or the python spelling (\"HudWidgetClass\" / \"hud_widget_class\"); the reply reports the resolved name in `property` and the caller's spelling in `property_requested`.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
-            MCPParam(TEXT("property_name"), TEXT("string"), TEXT("Property name on the Blueprint class")),
+            MCPParam(TEXT("property_name"), TEXT("string"), TEXT("Property name on the Blueprint class (C++ name or python spelling)")),
             MCPParam(TEXT("property_value"), TEXT("string"), TEXT("Value to set (number / bool / string / array / object)")),
             MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save after the command; default true. Pass false to batch writes and flush once yourself.")),
         }), MCPFlags(false, false, false, true),
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("set_blueprint_property"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleSetBlueprintProperty(P); }); }));
+
+    MCP_REGISTER_COMMAND(Registry, "get_blueprint_property", "blueprint", "Read one property off a Blueprint's class default object: the value in the same JSON shapes set_blueprint_property accepts, its export text, and the native (C++) default so a caller can tell a landed write from an inherited default.",
+        (TArray<FMCPParamSpec>{
+            MCPParam(TEXT("blueprint_name"), TEXT("string"), TEXT("Name of the target Blueprint")),
+            MCPParam(TEXT("property_name"), TEXT("string"), TEXT("Property name on the Blueprint class (C++ or python spelling)")),
+        }), MCPFlags(false, false, false, false) /* read-only */,
+        ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("get_blueprint_property"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleGetBlueprintProperty(P); }); }));
 
     MCP_REGISTER_COMMAND(Registry, "set_static_mesh_properties", "blueprint", "Set the static mesh and material of a Blueprint's StaticMeshComponent.",
         (TArray<FMCPParamSpec>{
@@ -415,6 +422,11 @@ void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry
 
 TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_blueprint")))
+    {
+        return Busy;
+    }
+
     // Get required parameters
     FString BlueprintName;
     if (!Params->TryGetStringField(TEXT("name"), BlueprintName))
@@ -425,7 +437,7 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
     // Check if blueprint already exists
     FString PackagePath = TEXT("/Game/Blueprints/");
     FString AssetName = BlueprintName;
-    if (UEditorAssetLibrary::DoesAssetExist(PackagePath + AssetName))
+    if (FUnrealMCPCommonUtils::DoesAssetPackageExist(PackagePath + AssetName))
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("asset_exists"),
             FString::Printf(TEXT("Blueprint already exists: %s"), *BlueprintName));
@@ -1441,11 +1453,25 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetBlueprintProperty(
     // Set the property value
     if (Params->HasField(TEXT("property_value")))
     {
-        FProperty* Property = FindFProperty<FProperty>(DefaultObject->GetClass(), *PropertyName);
+        // Normalized lookup, the same one get_blueprint_property uses: the python spelling
+        // ("hud_widget_class") resolves to HudWidgetClass instead of being rejected here, so the write
+        // half and the read half agree on names. SetObjectProperty below already resolves that way -
+        // this line is the gate plus the property the before/after readback goes through.
+        FProperty* Property = FUnrealMCPCommonUtils::FindPropertyByNameNormalized(DefaultObject->GetClass(), PropertyName);
         if (!Property)
         {
-            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("unknown_property"),
+            TArray<FString> Suggestions;
+            FUnrealMCPCommonUtils::FindPropertyNameSuggestions(DefaultObject, PropertyName, Suggestions);
+
+            TSharedPtr<FJsonObject> Failure = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("unknown_property"),
                 FString::Printf(TEXT("Property '%s' not found on '%s'"), *PropertyName, *DefaultObject->GetClass()->GetName()));
+            TArray<TSharedPtr<FJsonValue>> CandidatesJson;
+            for (const FString& Suggestion : Suggestions)
+            {
+                CandidatesJson.Add(MakeShared<FJsonValueString>(Suggestion));
+            }
+            Failure->SetArrayField(TEXT("candidates"), CandidatesJson);
+            return Failure;
         }
         TSharedPtr<FJsonValue> Before = FUnrealMCPCommonUtils::PropertyValueToJson(
             Property, Property->ContainerPtrToValuePtr<void>(DefaultObject));
@@ -1458,7 +1484,10 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetBlueprintProperty(
             FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
             TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-            ResultObj->SetStringField(TEXT("property"), PropertyName);
+            // `property` is the RESOLVED reflection name (property_requested echoes what the caller
+            // wrote), the same key-vs-property split the batch writers use.
+            ResultObj->SetStringField(TEXT("property"), Property->GetName());
+            ResultObj->SetStringField(TEXT("property_requested"), PropertyName);
             ResultObj->SetField(TEXT("property_value_before"), Before);
             ResultObj->SetField(TEXT("property_value_after"), FUnrealMCPCommonUtils::PropertyValueToJson(
                 Property, Property->ContainerPtrToValuePtr<void>(DefaultObject)));
@@ -1476,6 +1505,102 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetBlueprintProperty(
     }
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_value' parameter"));
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleGetBlueprintProperty(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"), TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString PropertyName;
+    if (!Params->TryGetStringField(TEXT("property_name"), PropertyName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_params"), TEXT("Missing 'property_name' parameter"));
+    }
+
+    UBlueprint* Blueprint = FUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("blueprint_not_found"),
+            FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    UClass* Class = Blueprint->GeneratedClass;
+    UObject* DefaultObject = Class ? Class->GetDefaultObject() : nullptr;
+    if (!DefaultObject)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("no_default_object"),
+            FString::Printf(TEXT("'%s' has no generated class default object yet (compile it first)"), *BlueprintName));
+    }
+
+    // The setter's own lookup, so both spellings land ("hud_widget_class" and "HudWidgetClass").
+    FProperty* Property = FUnrealMCPCommonUtils::FindPropertyByNameNormalized(DefaultObject->GetClass(), PropertyName);
+    if (!Property)
+    {
+        TArray<FString> Suggestions;
+        FUnrealMCPCommonUtils::FindPropertyNameSuggestions(DefaultObject, PropertyName, Suggestions);
+
+        TSharedPtr<FJsonObject> Failure = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("unknown_property"),
+            FString::Printf(TEXT("Property '%s' not found on '%s'"), *PropertyName, *DefaultObject->GetClass()->GetName()));
+        TArray<TSharedPtr<FJsonValue>> CandidatesJson;
+        for (const FString& Suggestion : Suggestions)
+        {
+            CandidatesJson.Add(MakeShared<FJsonValueString>(Suggestion));
+        }
+        Failure->SetArrayField(TEXT("candidates"), CandidatesJson);
+        Failure->SetStringField(TEXT("class"), DefaultObject->GetClass()->GetName());
+        return Failure;
+    }
+
+    void* ValuePtr = Property->ContainerPtrToValuePtr<void>(DefaultObject);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("success"), true);
+    Result->SetStringField(TEXT("blueprint_name"), Blueprint->GetName());
+    Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+    Result->SetStringField(TEXT("class"), DefaultObject->GetClass()->GetName());
+    Result->SetStringField(TEXT("property"), Property->GetName());
+    Result->SetStringField(TEXT("property_type"), Property->GetCPPType());
+    Result->SetStringField(TEXT("declared_by"),
+        Property->GetOwnerClass() ? Property->GetOwnerClass()->GetName() : FString());
+    // Same JSON shapes the setters use (class / object / soft references come back as paths), so a
+    // value read here can be written straight back with set_blueprint_property.
+    Result->SetField(TEXT("value"), FUnrealMCPCommonUtils::PropertyValueToJson(Property, ValuePtr));
+
+    // Exact form, plus the native (C++) default: together they answer "did my write land" and "is this
+    // just the engine's default" without a second call. Blueprint ancestors are skipped on purpose -
+    // the immediate parent is usually another blueprint, whose value is not the native default.
+    FString ValueText;
+    Property->ExportTextItem_Direct(ValueText, ValuePtr, nullptr, DefaultObject, PPF_None);
+    Result->SetStringField(TEXT("value_text"), ValueText);
+
+    UClass* NativeClass = Class->GetSuperClass();
+    while (NativeClass && NativeClass->IsChildOf(UBlueprintGeneratedClass::StaticClass()))
+    {
+        NativeClass = NativeClass->GetSuperClass();
+    }
+    if (NativeClass)
+    {
+        if (FProperty* NativeProperty = FindFProperty<FProperty>(NativeClass, Property->GetFName()))
+        {
+            if (UObject* NativeDefaultObject = NativeClass->GetDefaultObject())
+            {
+                FString NativeText;
+                NativeProperty->ExportTextItem_Direct(NativeText,
+                    NativeProperty->ContainerPtrToValuePtr<void>(NativeDefaultObject), nullptr, NativeDefaultObject, PPF_None);
+
+                Result->SetStringField(TEXT("native_class"), NativeClass->GetName());
+                Result->SetField(TEXT("native_default"), FUnrealMCPCommonUtils::PropertyValueToJson(NativeProperty,
+                    NativeProperty->ContainerPtrToValuePtr<void>(NativeDefaultObject)));
+                Result->SetBoolField(TEXT("value_differs_from_native_default"), ValueText != NativeText);
+            }
+        }
+    }
+
+    return Result;
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetStaticMeshProperties(const TSharedPtr<FJsonObject>& Params)

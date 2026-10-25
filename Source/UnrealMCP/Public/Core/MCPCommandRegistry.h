@@ -26,6 +26,8 @@ struct FMCPParamSpec
  * Policy flags. Each one replaces a hand-written command-name list that used to live
  * somewhere else (see the loopback blacklist and the material graph-mutating list).
  */
+#include "Core/MCPGCSafety.h"
+
 struct FMCPCommandFlags
 {
     /** Reject over the editor python loopback: these re-enter the GameThread queue / python VM. */

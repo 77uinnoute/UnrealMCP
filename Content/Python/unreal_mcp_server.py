@@ -403,7 +403,12 @@ register_pie_tools(mcp)
 # those removes the capability outright - a client cannot search for a tool that is not registered.
 HIDDEN_TOOLS = (
     "anim_self_check",             # liveness probe for the animation domain - same role as ping
-    "asset_status",                # read-only asset triage; does_asset_exist + list_asset_blockers cover the daily case
+    # asset_status is deliberately NOT hidden (un-hidden 2026-10-12). It was withdrawn with the note
+    # "does_asset_exist + list_asset_blockers cover the daily case" - but does_asset_exist is the exact
+    # API that refuses to answer while PIE runs (EditorScriptingUtilities guards every entry point with
+    # IsInEditorAndNotPlaying() and encodes the refusal as false / None), and list_asset_blockers does
+    # not answer existence at all. Hiding it left the honest triage (in_memory / on_disk / registry)
+    # unreachable from the tool surface, so callers fell back to the API that lies during play.
     "get_source_files",            # import provenance, rarely needed after the import itself
     "list_disk_only_assets",       # orphan .uasset scan, hand-run only
     "prune_widget_bindings",       # only reports leftovers; the fix is a graph edit

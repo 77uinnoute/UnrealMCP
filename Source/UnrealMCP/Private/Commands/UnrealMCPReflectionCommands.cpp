@@ -19,420 +19,6 @@
 
 namespace
 {
-    /** Exact C++ name first, then a case/underscore insensitive match (same rule the write path uses). */
-    FString NormalizePropertyToken(const FString& In)
-    {
-        FString Out;
-        Out.Reserve(In.Len());
-        for (const TCHAR Char : In)
-        {
-            if (Char != TEXT('_'))
-            {
-                Out.AppendChar(FChar::ToLower(Char));
-            }
-        }
-        return Out;
-    }
-
-    /** Exact C++ name first, then a case/underscore insensitive match (one rule for classes and structs). */
-    FProperty* ResolveStructField(UStruct* Struct, const FString& PropertyName, TArray<FString>& OutCandidates)
-    {
-        OutCandidates.Reset();
-        if (!Struct)
-        {
-            return nullptr;
-        }
-
-        FProperty* NormalizedMatch = nullptr;
-        const FString Wanted = NormalizePropertyToken(PropertyName);
-        for (TFieldIterator<FProperty> PropIt(Struct); PropIt; ++PropIt)
-        {
-            FProperty* Property = *PropIt;
-            if (!Property)
-            {
-                continue;
-            }
-            OutCandidates.Add(Property->GetName());
-            if (Property->GetName().Equals(PropertyName, ESearchCase::CaseSensitive))
-            {
-                return Property;
-            }
-            if (!NormalizedMatch && NormalizePropertyToken(Property->GetName()) == Wanted)
-            {
-                NormalizedMatch = Property;
-            }
-        }
-        return NormalizedMatch;
-    }
-
-    FProperty* ResolveProperty(UClass* Class, const FString& PropertyName, TArray<FString>& OutCandidates)
-    {
-        return ResolveStructField(Class, PropertyName, OutCandidates);
-    }
-
-    /** One step of a property path: a field name plus an optional container subscript ("LodData[0]"). */
-    struct FPathStep
-    {
-        FString Name;
-        bool bHasSubscript = false;
-        FString Subscript;
-    };
-
-    /** Split "LodData[0].PhysicalMeshData.WeightMaps[1].Values" into its steps. */
-    bool ParsePropertyPath(const FString& Path, TArray<FPathStep>& OutSteps, FString& OutErrorMessage)
-    {
-        OutSteps.Reset();
-
-        FString Remaining = Path.TrimStartAndEnd();
-        while (!Remaining.IsEmpty())
-        {
-            int32 Bracket = INDEX_NONE;
-            int32 Dot = INDEX_NONE;
-            Remaining.FindChar(TEXT('['), Bracket);
-            Remaining.FindChar(TEXT('.'), Dot);
-            const bool bHasSubscript = Bracket != INDEX_NONE && (Dot == INDEX_NONE || Bracket < Dot);
-
-            FPathStep Step;
-            Step.Name = (bHasSubscript ? Remaining.Left(Bracket)
-                                       : (Dot == INDEX_NONE ? Remaining : Remaining.Left(Dot))).TrimStartAndEnd();
-            if (Step.Name.IsEmpty())
-            {
-                OutErrorMessage = FString::Printf(TEXT("Property path '%s' has an empty segment"), *Path);
-                return false;
-            }
-
-            if (bHasSubscript)
-            {
-                const int32 Close = Remaining.Find(TEXT("]"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Bracket);
-                if (Close == INDEX_NONE)
-                {
-                    OutErrorMessage = FString::Printf(TEXT("Property path '%s' has an unclosed subscript"), *Path);
-                    return false;
-                }
-                Step.bHasSubscript = true;
-                Step.Subscript = Remaining.Mid(Bracket + 1, Close - Bracket - 1).TrimStartAndEnd();
-                if (Step.Subscript.IsEmpty())
-                {
-                    OutErrorMessage = FString::Printf(TEXT("Property path '%s' has an empty subscript"), *Path);
-                    return false;
-                }
-                Remaining = Remaining.Mid(Close + 1);
-                Remaining.RemoveFromStart(TEXT("."));
-            }
-            else if (Dot != INDEX_NONE)
-            {
-                Remaining = Remaining.Mid(Dot + 1);
-            }
-            else
-            {
-                Remaining.Empty();
-            }
-
-            OutSteps.Add(Step);
-        }
-
-        if (OutSteps.Num() == 0)
-        {
-            OutErrorMessage = FString::Printf(TEXT("Property path '%s' is empty"), *Path);
-            return false;
-        }
-        return true;
-    }
-
-    /** FNumericProperty does not expose signedness, so ask the concrete property class. */
-    bool IsSignedIntegerProperty(const FProperty* Property)
-    {
-        return Property->IsA<FIntProperty>() || Property->IsA<FInt64Property>()
-            || Property->IsA<FInt16Property>() || Property->IsA<FInt8Property>();
-    }
-
-    /** Text form of a map key, used both to match a subscript and to list the legal keys on a miss. */
-    FString MapKeyToText(FProperty* KeyProperty, const void* KeyAddress)
-    {
-        if (const FNumericProperty* Numeric = CastField<FNumericProperty>(KeyProperty))
-        {
-            if (Numeric->IsInteger())
-            {
-                return IsSignedIntegerProperty(KeyProperty)
-                    ? FString::Printf(TEXT("%lld"), Numeric->GetSignedIntPropertyValue(KeyAddress))
-                    : FString::Printf(TEXT("%llu"), Numeric->GetUnsignedIntPropertyValue(KeyAddress));
-            }
-        }
-        if (const FNameProperty* NameProperty = CastField<FNameProperty>(KeyProperty))
-        {
-            return NameProperty->GetPropertyValue(KeyAddress).ToString();
-        }
-        if (const FStrProperty* StringProperty = CastField<FStrProperty>(KeyProperty))
-        {
-            return StringProperty->GetPropertyValue(KeyAddress);
-        }
-        if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(KeyProperty))
-        {
-            const FNumericProperty* Underlying = EnumProperty->GetUnderlyingProperty();
-            if (Underlying && EnumProperty->GetEnum())
-            {
-                return EnumProperty->GetEnum()->GetNameStringByValue(Underlying->GetSignedIntPropertyValue(KeyAddress));
-            }
-        }
-        return FString();
-    }
-
-    bool MapKeyMatchesSubscript(FProperty* KeyProperty, const void* KeyAddress, const FString& Subscript)
-    {
-        const FString KeyText = MapKeyToText(KeyProperty, KeyAddress);
-        if (!KeyText.IsEmpty() && KeyText.Equals(Subscript, ESearchCase::IgnoreCase))
-        {
-            return true;
-        }
-        // "1" and "01" address the same entry, and a target enum key accepts its numeric value too.
-        if (const FNumericProperty* Numeric = CastField<FNumericProperty>(KeyProperty))
-        {
-            if (Numeric->IsInteger() && Subscript.IsNumeric())
-            {
-                return IsSignedIntegerProperty(KeyProperty)
-                    ? Numeric->GetSignedIntPropertyValue(KeyAddress) == FCString::Atoi64(*Subscript)
-                    : Numeric->GetUnsignedIntPropertyValue(KeyAddress) == FCString::Strtoui64(*Subscript, nullptr, 10);
-            }
-        }
-        if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(KeyProperty))
-        {
-            const FNumericProperty* Underlying = EnumProperty->GetUnderlyingProperty();
-            if (Underlying && Subscript.IsNumeric())
-            {
-                return Underlying->GetSignedIntPropertyValue(KeyAddress) == FCString::Atoi64(*Subscript);
-            }
-        }
-        return false;
-    }
-
-    /** Apply "[i]" (array index) or "[key]" (map key) to a container property. */
-    bool ResolveSubscript(FProperty* Property, void* Address, const FString& Subscript, FProperty*& OutProperty,
-                          void*& OutAddress, FString& OutErrorCode, FString& OutErrorMessage, FString& OutHint)
-    {
-        OutErrorCode = TEXT("unknown_field");
-
-        if (FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
-        {
-            if (!Subscript.IsNumeric())
-            {
-                OutErrorMessage = FString::Printf(TEXT("'%s' is an array; the subscript must be an index"),
-                    *Property->GetName());
-                return false;
-            }
-
-            const int32 Index = FCString::Atoi(*Subscript);
-            FScriptArrayHelper Helper(ArrayProperty, Address);
-            if (!Helper.IsValidIndex(Index))
-            {
-                // An out-of-range index is not a "field that does not exist": it has its own code, and the
-                // remedy (write the whole array) is knowable from here, so it is handed over rather than
-                // left for the caller to infer from the message.
-                OutErrorCode = TEXT("index_out_of_range");
-                OutErrorMessage = FString::Printf(TEXT("Index %d is out of range for '%s' (%d elements)"),
-                    Index, *Property->GetName(), Helper.Num());
-                OutHint = FString::Printf(
-                    TEXT("Write the whole array instead: property_name=\"%s\", property_value=[...] "
-                         "(the array currently has %d element(s))"),
-                    *Property->GetName(), Helper.Num());
-                return false;
-            }
-
-            OutProperty = ArrayProperty->Inner;
-            OutAddress = Helper.GetRawPtr(Index);
-            OutErrorCode.Empty();
-            return true;
-        }
-
-        // C-style fixed-size arrays (`FBlendParameter BlendParameters[3]`) are ONE property with ArrayDim
-        // slots - there is no FArrayProperty to unwrap, the slots sit at a fixed stride inside the
-        // property's own memory. Without this branch every such property answered "is not an array or a
-        // map" and the subscript did not apply, which is how UBlendSpace::BlendParameters stayed out of
-        // reach of the reflector.
-        if (Property->ArrayDim > 1)
-        {
-            if (!Subscript.IsNumeric())
-            {
-                OutErrorMessage = FString::Printf(TEXT("'%s' is a fixed-size array; the subscript must be an index"),
-                    *Property->GetName());
-                return false;
-            }
-
-            const int32 Index = FCString::Atoi(*Subscript);
-            if (Index < 0 || Index >= Property->ArrayDim)
-            {
-                OutErrorCode = TEXT("index_out_of_range");
-                OutErrorMessage = FString::Printf(TEXT("Index %d is out of range for '%s' (%d slots)"),
-                    Index, *Property->GetName(), Property->ArrayDim);
-                OutHint = FString::Printf(TEXT("'%s' is a fixed-size array; valid indices are 0..%d"),
-                    *Property->GetName(), Property->ArrayDim - 1);
-                return false;
-            }
-
-            OutProperty = Property;
-            OutAddress = static_cast<uint8*>(Address) + static_cast<int64>(Index) * Property->ElementSize;
-            OutErrorCode.Empty();
-            return true;
-        }
-
-        if (FMapProperty* MapProperty = CastField<FMapProperty>(Property))
-        {
-            FScriptMapHelper Helper(MapProperty, Address);
-            TArray<FString> Keys;
-            for (int32 Index = 0; Index < Helper.Num(); ++Index)
-            {
-                if (!Helper.IsValidIndex(Index))
-                {
-                    continue;
-                }
-                const void* KeyAddress = Helper.GetKeyPtr(Index);
-                Keys.Add(MapKeyToText(MapProperty->KeyProp, KeyAddress));
-                if (MapKeyMatchesSubscript(MapProperty->KeyProp, KeyAddress, Subscript))
-                {
-                    OutProperty = MapProperty->ValueProp;
-                    OutAddress = Helper.GetValuePtr(Index);
-                    OutErrorCode.Empty();
-                    return true;
-                }
-            }
-
-            OutErrorMessage = FString::Printf(TEXT("'%s' has no key '%s' (keys: %s)"),
-                *Property->GetName(), *Subscript, *FString::Join(Keys, TEXT(", ")));
-            return false;
-        }
-
-        OutErrorMessage = FString::Printf(TEXT("'%s' is not an array or a map; the subscript [%s] does not apply"),
-            *Property->GetName(), *Subscript);
-        return false;
-    }
-
-    /**
-     * Resolve a dotted/indexed property path to its leaf property and value address.
-     *
-     * A path is the only way to reach data that is not a property of the target object itself - the cloth
-     * mask at "LodData[0].PhysicalMeshData.WeightMaps[1].Values" being the case that forced it: python cannot
-     * see the clothing asset's LOD data at all, and no amount of object-path resolution reaches a leaf
-     * inside it. Intermediate segments may be structs, objects, arrays or maps.
-     */
-    bool ResolvePropertyPath(UObject* RootObject, const FString& Path, FProperty*& OutProperty,
-                             void*& OutAddress, FString& OutErrorCode, FString& OutErrorMessage,
-                             TArray<FString>& OutCandidates, FString* OutResolvedPrefix = nullptr,
-                             FString* OutHint = nullptr)
-    {
-        OutProperty = nullptr;
-        OutAddress = nullptr;
-        OutCandidates.Reset();
-        if (OutResolvedPrefix)
-        {
-            OutResolvedPrefix->Empty();
-        }
-        if (OutHint)
-        {
-            OutHint->Empty();
-        }
-
-        TArray<FPathStep> Steps;
-        if (!ParsePropertyPath(Path, Steps, OutErrorMessage))
-        {
-            OutErrorCode = TEXT("invalid_params");
-            return false;
-        }
-
-        // Walk from the object's own class down: Base is the instance the current segment lives in.
-        UStruct* Scope = RootObject->GetClass();
-        void* Base = RootObject;
-
-        for (int32 StepIndex = 0; StepIndex < Steps.Num(); ++StepIndex)
-        {
-            const FPathStep& Step = Steps[StepIndex];
-
-            TArray<FString> Candidates;
-            FProperty* Property = ResolveStructField(Scope, Step.Name, Candidates);
-            if (!Property)
-            {
-                OutErrorCode = TEXT("unknown_property");
-                OutErrorMessage = FString::Printf(TEXT("'%s' not found in %s along path '%s'"),
-                    *Step.Name, *Scope->GetName(), *Path);
-                OutCandidates = Candidates;  // The legal names at the step that failed.
-                return false;
-            }
-
-            void* Address = Property->ContainerPtrToValuePtr<void>(Base);
-
-            // Every segment that resolves keeps the path readable as a prefix, so a failure can say where
-            // the walk stopped instead of leaving the caller to parse the message.
-            FString Segment = Step.bHasSubscript
-                ? FString::Printf(TEXT("%s[%s]"), *Step.Name, *Step.Subscript)
-                : Step.Name;
-
-            if (Step.bHasSubscript)
-            {
-                FProperty* ElementProperty = nullptr;
-                void* ElementAddress = nullptr;
-                FString SubscriptCode;
-                FString SubscriptHint;
-                if (!ResolveSubscript(Property, Address, Step.Subscript, ElementProperty, ElementAddress,
-                        SubscriptCode, OutErrorMessage, SubscriptHint))
-                {
-                    OutErrorCode = SubscriptCode.IsEmpty() ? TEXT("unknown_field") : SubscriptCode;
-                    OutErrorMessage = FString::Printf(TEXT("%s (path '%s')"), *OutErrorMessage, *Path);
-                    if (OutHint)
-                    {
-                        *OutHint = SubscriptHint;
-                    }
-                    return false;
-                }
-                Property = ElementProperty;
-                Address = ElementAddress;
-            }
-
-            if (OutResolvedPrefix)
-            {
-                *OutResolvedPrefix = OutResolvedPrefix->IsEmpty() ? Segment : *OutResolvedPrefix + TEXT(".") + Segment;
-            }
-
-            if (StepIndex == Steps.Num() - 1)
-            {
-                OutProperty = Property;
-                OutAddress = Address;
-                return true;
-            }
-
-            // Descend into the value so the next segment resolves inside it.
-            if (FStructProperty* StructProperty = CastField<FStructProperty>(Property))
-            {
-                Scope = StructProperty->Struct;
-                Base = Address;
-                continue;
-            }
-            if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-            {
-                UObject* Inner = ObjectProperty->GetObjectPropertyValue(Address);
-                if (!Inner)
-                {
-                    OutErrorCode = TEXT("load_failed");
-                    OutErrorMessage = FString::Printf(TEXT("'%s' is null, so path '%s' cannot continue"),
-                        *Step.Name, *Path);
-                    return false;
-                }
-                Scope = Inner->GetClass();
-                Base = Inner;
-                continue;
-            }
-
-            OutErrorCode = TEXT("unknown_field");
-            OutErrorMessage = CastField<FArrayProperty>(Property) || CastField<FMapProperty>(Property)
-                ? FString::Printf(TEXT("'%s' is a container: path '%s' needs a subscript like [0] before the next segment"),
-                    *Step.Name, *Path)
-                : FString::Printf(TEXT("'%s' (%s) cannot be descended into (path '%s')"),
-                    *Step.Name, *Property->GetClass()->GetName(), *Path);
-            return false;
-        }
-
-        OutErrorCode = TEXT("invalid_params");
-        OutErrorMessage = FString::Printf(TEXT("Property path '%s' resolved to nothing"), *Path);
-        return false;
-    }
-
     /** Compact JSON text of a value, used only to tell "changed" from "written but clamped back". */
     FString JsonValueToComparableString(const TSharedPtr<FJsonValue>& Value)
     {
@@ -689,35 +275,33 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleReflectProbe(const T
         return Error;
     }
 
-    TArray<FString> PropertyCandidates;
-    FProperty* Property = nullptr;
-    void* PropertyAddress = nullptr;
-    FString PropertyErrorCode;
-    FString PropertyErrorMessage;
-    FString ResolvedPrefix;
-    FString ResolveHint;
-    if (!ResolvePropertyPath(TargetObject, PropertyName, Property, PropertyAddress, PropertyErrorCode,
-            PropertyErrorMessage, PropertyCandidates, &ResolvedPrefix, &ResolveHint))
+    // The path grammar itself lives in the reflector: probe and writer resolve names the same way, and so
+    // does every other command that accepts a dotted property name.
+    const FMCPPropertyPathResult Resolved = FMCPPropertyReflector::ResolvePath(TargetObject, PropertyName);
+    if (!Resolved.IsResolved())
     {
-        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(PropertyErrorCode, PropertyErrorMessage);
+        TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(Resolved.ErrorCode, Resolved.ErrorMessage);
         TArray<TSharedPtr<FJsonValue>> CandidateValues;
-        for (const FString& Candidate : PropertyCandidates)
+        for (const FString& Candidate : Resolved.Candidates)
         {
             CandidateValues.Add(MakeShared<FJsonValueString>(Candidate));
         }
         Error->SetArrayField(TEXT("candidates"), CandidateValues);
         // The probe answers with the same verdict the writer would reach, so it says where the path
         // stopped and what to do about it rather than only that it failed.
-        if (!ResolvedPrefix.IsEmpty())
+        if (!Resolved.ResolvedPrefix.IsEmpty())
         {
-            Error->SetStringField(TEXT("path_prefix"), ResolvedPrefix);
+            Error->SetStringField(TEXT("path_prefix"), Resolved.ResolvedPrefix);
         }
-        if (!ResolveHint.IsEmpty())
+        if (!Resolved.Hint.IsEmpty())
         {
-            Error->SetStringField(TEXT("hint"), ResolveHint);
+            Error->SetStringField(TEXT("hint"), Resolved.Hint);
         }
         return Error;
     }
+
+    FProperty* Property = Resolved.Property;
+    void* PropertyAddress = Resolved.Address;
 
     const FPropertyDescriptor Descriptor = FMCPPropertyReflector::Describe(Property);
 
@@ -892,42 +476,38 @@ TSharedPtr<FJsonObject> FUnrealMCPReflectionCommands::HandleSetObjectProperty(co
     {
         // A name may be a plain property or a path ("LodData[0].PhysicalMeshData.WeightMaps[1].Values");
         // both go through the same resolver so the accepted spelling cannot drift between them.
-        TArray<FString> PropertyCandidates;
-        FProperty* Property = nullptr;
-        void* PropertyAddr = nullptr;
-        FString ResolveErrorCode;
-        FString ResolveErrorMessage;
-        FString ResolvedPrefix;
-        FString ResolveHint;
         const bool bNestedPath = Pending.RequestedName.Contains(TEXT(".")) || Pending.RequestedName.Contains(TEXT("["));
-        if (!ResolvePropertyPath(TargetObject, Pending.RequestedName, Property, PropertyAddr, ResolveErrorCode,
-                ResolveErrorMessage, PropertyCandidates, &ResolvedPrefix, &ResolveHint))
+        const FMCPPropertyPathResult Resolved = FMCPPropertyReflector::ResolvePath(TargetObject, Pending.RequestedName);
+        if (!Resolved.IsResolved())
         {
-            const FString FailureCode = ResolveErrorCode.IsEmpty() ? TEXT("unknown_property") : ResolveErrorCode;
+            const FString FailureCode = Resolved.ErrorCode.IsEmpty() ? TEXT("unknown_property") : Resolved.ErrorCode;
             TSharedPtr<FJsonObject> Failure = MakeShared<FJsonObject>();
             Failure->SetStringField(TEXT("property_name"), Pending.RequestedName);
             Failure->SetStringField(TEXT("error_code"), FailureCode);
-            Failure->SetStringField(TEXT("error"), ResolveErrorMessage);
-            FUnrealMCPCommonUtils::AddStringArrayField(Failure, TEXT("candidates"), PropertyCandidates);
-            if (!ResolvedPrefix.IsEmpty())
+            Failure->SetStringField(TEXT("error"), Resolved.ErrorMessage);
+            FUnrealMCPCommonUtils::AddStringArrayField(Failure, TEXT("candidates"), Resolved.Candidates);
+            if (!Resolved.ResolvedPrefix.IsEmpty())
             {
-                Failure->SetStringField(TEXT("path_prefix"), ResolvedPrefix);
+                Failure->SetStringField(TEXT("path_prefix"), Resolved.ResolvedPrefix);
             }
-            if (!ResolveHint.IsEmpty())
+            if (!Resolved.Hint.IsEmpty())
             {
-                Failure->SetStringField(TEXT("hint"), ResolveHint);
+                Failure->SetStringField(TEXT("hint"), Resolved.Hint);
             }
             // The path never reached a leaf, so the target was not touched.
             Failure->SetBoolField(TEXT("unchanged"), true);
             if (FirstFailureCode.IsEmpty())
             {
                 FirstFailureCode = FailureCode;
-                FirstFailureMessage = ResolveErrorMessage;
-                FirstFailureHint = ResolveHint;
+                FirstFailureMessage = Resolved.ErrorMessage;
+                FirstFailureHint = Resolved.Hint;
             }
             FailedJson.Add(MakeShared<FJsonValueObject>(Failure));
             continue;
         }
+
+        FProperty* Property = Resolved.Property;
+        void* PropertyAddr = Resolved.Address;
 
         // Same gate set_asset_properties applies: reflection reaches engine-managed data, and a write to it
         // looks like it worked while nothing ever consumes the value. A nested path is exempt from the

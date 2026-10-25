@@ -383,14 +383,21 @@ def register_blueprint_tools(mcp: FastMCP):
     ) -> Dict[str, Any]:
         """
         Set a property on a Blueprint class default object.
-        
+
+        Marks the Blueprint modified and saves it (unless the source-level `persist` is turned off), so
+        the value survives the editor restarts this project's build scripts do. The write half of
+        get_blueprint_property: both take the C++ name or the python spelling, and the reply reports the
+        resolved name in `property` with the caller's spelling in `property_requested`.
+
         Args:
             blueprint_name: Name of the target Blueprint
-            property_name: Name of the property to set
-            property_value: Value to set the property to
-            
+            property_name: Property on the Blueprint class ("HudWidgetClass" or "hud_widget_class")
+            property_value: Value to set (same shapes get_blueprint_property reports)
+
         Returns:
-            Response indicating success or failure
+            Dict with property / property_requested and property_value_before / property_value_after
+            (both in the shapes the getter returns), or a structured error
+            (blueprint_not_found / unknown_property with `candidates`).
         """
         from unreal_mcp_server import get_unreal_connection
         
@@ -418,6 +425,53 @@ def register_blueprint_tools(mcp: FastMCP):
             
         except Exception as e:
             error_msg = f"Error setting blueprint property: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @mcp.tool()
+    def get_blueprint_property(
+        ctx: Context,
+        blueprint_name: str,
+        property_name: str
+    ) -> Dict[str, Any]:
+        """
+        Read one property off a Blueprint's class default object.
+
+        The read half of set_blueprint_property, so the value comes back in the SAME JSON shapes the
+        setter accepts (class / object / soft references as asset paths) and can be written straight
+        back. `property_name` takes the C++ name ("HudWidgetClass") or the python spelling
+        ("hud_widget_class"); an unresolvable name answers unknown_property with `candidates`.
+
+        Args:
+            blueprint_name: Name or path of the target Blueprint
+            property_name: Property on the Blueprint's class default object
+
+        Returns:
+            Dict with property / property_type / declared_by / value / value_text and, when the
+            property also exists on a native ancestor, native_class / native_default /
+            value_differs_from_native_default - so "my write landed" is distinguishable from "that is
+            the C++ default" without a second call.
+        """
+        from unreal_mcp_server import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                logger.error("Failed to connect to Unreal Engine")
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            params = {"blueprint_name": blueprint_name, "property_name": property_name}
+            logger.info(f"Getting blueprint property with params: {params}")
+            response = unreal.send_command("get_blueprint_property", params)
+
+            if not response:
+                logger.error("No response from Unreal Engine")
+                return {"success": False, "message": "No response from Unreal Engine"}
+
+            return response
+
+        except Exception as e:
+            error_msg = f"Error getting blueprint property: {e}"
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 

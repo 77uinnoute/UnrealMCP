@@ -1305,6 +1305,11 @@ TSharedPtr<FJsonObject> FUnrealMCPParticleCommands::HandleGetParticleModule(cons
 
 TSharedPtr<FJsonObject> FUnrealMCPParticleCommands::HandleCreateParticleSystem(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_particle_system")))
+    {
+        return Busy;
+    }
+
     const FString Name = GetStringParam(Params, TEXT("name"));
     const FString Folder = GetStringParam(Params, TEXT("folder"));
     const FString EmitterClass = GetStringParam(Params, TEXT("emitter_class"));

@@ -1928,7 +1928,7 @@ bool FUnrealMCPAnimationMontageOps::CreateMontageFromAnimation(const FString& An
         if (bLeftover)
         {
             Existing->MarkAsGarbage();
-            CollectGarbage(RF_NoFlags);
+            UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("montage leftover reclaim"));
         }
         else
         {
@@ -1989,7 +1989,7 @@ bool FUnrealMCPAnimationMontageOps::CreateEmptyMontage(const FString& Name, cons
         if (bLeftover)
         {
             Existing->MarkAsGarbage();
-            CollectGarbage(RF_NoFlags);
+            UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("montage leftover reclaim"));
         }
         else
         {
@@ -2046,7 +2046,7 @@ bool FUnrealMCPAnimationMontageOps::DuplicateMontage(const FString& SourcePath, 
         if (bLeftover)
         {
             Existing->MarkAsGarbage();
-            CollectGarbage(RF_NoFlags);
+            UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("montage leftover reclaim"));
         }
         else
         {

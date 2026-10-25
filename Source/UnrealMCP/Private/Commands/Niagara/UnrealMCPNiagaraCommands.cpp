@@ -691,6 +691,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::RunCommand(
 
 TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraSystem(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_niagara_system")))
+    {
+        return Busy;
+    }
+
     FUnrealMCPNiagaraResult Result;
     if (!FUnrealMCPNiagaraOps::CreateSystem(GetStringParam(Params, TEXT("name")),
                                             GetStringParam(Params, TEXT("folder")), Result))
@@ -710,6 +715,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraSystem(con
 
 TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleDuplicateNiagaraSystem(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("duplicate_niagara_system")))
+    {
+        return Busy;
+    }
+
     FUnrealMCPNiagaraResult Result;
     if (!FUnrealMCPNiagaraOps::DuplicateSystem(GetStringParam(Params, TEXT("source_path")),
                                                GetStringParam(Params, TEXT("destination_path")), Result))

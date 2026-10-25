@@ -578,6 +578,41 @@ def collect_doc_mentions(registered_param_names, known_names):
     return mentions
 
 
+def check_skill_frontmatter():
+    """(problems, checked): every skill's YAML frontmatter must parse.
+
+    This gate text-scans skill docs, so a frontmatter that is not valid YAML passes here and only
+    fails later, in the agent's skill loader ("Failed to parse YAML frontmatter", with no usable line
+    reference). Measured 2026-10-15 on unreal-video-capture: its quoted `description:` contained
+    straight double quotes around 「每一段不一样」, so the scalar ended 632 characters in.
+    Python already has the parser - use it.
+    """
+    problems = []
+    if not SKILLS_DIR.exists():
+        return problems, True
+    try:
+        import yaml
+    except ImportError:
+        return problems, False
+    for path in sorted(SKILLS_DIR.rglob("*.md")):
+        text = read_text(path)
+        if not text.startswith("---"):
+            continue  # no frontmatter (a plain doc): nothing to parse
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            problems.append("%s: frontmatter is not closed by a second ---" % rel(path, 1))
+            continue
+        try:
+            data = yaml.safe_load(parts[1])
+        except Exception as error:
+            problems.append("%s: frontmatter is not valid YAML: %s"
+                            % (rel(path, 2), str(error).replace("\n", " | ")[:200]))
+            continue
+        if not isinstance(data, dict) or not data.get("name"):
+            problems.append("%s: frontmatter parsed but carries no 'name'" % rel(path, 2))
+    return problems, True
+
+
 def report(title, items):
     if not items:
         return
@@ -585,6 +620,65 @@ def report(title, items):
     print(title)
     for item in items:
         print("  " + item)
+
+
+def check_asset_lifecycle_guards():
+    """Offline regression gate: lifecycle refusal must precede loads/factories/writes.
+
+    This checks source placement, not UE runtime behaviour. PIE/SIE/pending-request
+    and tool/loopback integration still require a built plugin and live editor.
+    """
+    base = SOURCE / "Private" / "Commands"
+    cases = {
+        "Asset/UnrealMCPAssetCommands.cpp": (
+            "HandleCreateAssetSafe", "HandleDuplicateAssetSafe", "HandleDeleteAssetSafe",
+            "HandleSafeDeleteAsset", "HandleMoveAsset", "HandleMoveDirectory"),
+        "Asset/UnrealMCPAssetEditCommands.cpp": ("RunImportRequest",),
+        "Blueprint/UnrealMCPBlueprintCommands.cpp": ("HandleCreateBlueprint",),
+        "UMG/UnrealMCPUMGCommands.cpp": ("HandleCreateUMGWidgetBlueprint",),
+        "Niagara/UnrealMCPNiagaraCommands.cpp": (
+            "HandleCreateNiagaraSystem", "HandleDuplicateNiagaraSystem"),
+        "Animation/UnrealMCPAnimationCommands.cpp": (
+            "HandleCreateAnimSequence", "HandleCreateMontageFromAnimation",
+            "HandleCreateEmptyMontage", "HandleDuplicateMontage"),
+        "Particle/UnrealMCPParticleCommands.cpp": ("HandleCreateParticleSystem",),
+        "PCG/UnrealMCPPCGCommands.cpp": ("HandleCreatePCGGraph",),
+    }
+    side_effects = re.compile(
+        r"FindAsset\(|DoesAssetExist\(|DoesAssetPackageExist\(|NewObject<|CreatePackage\("
+        r"|SaveAssetForObject\(|FDialogPolicy DialogPolicy|LoadModuleChecked<"
+        r"|FUnrealMCP(?:Animation|AnimationMontage|Niagara|Particle)Ops::")
+    checked = 0
+    for filename, functions in cases.items():
+        path = base / filename
+        text = C_COMMENT.sub("", read_text(path))
+        for function in functions:
+            match = re.search(r"(?:\:\:| )" + function + r"\([^;{}]*\)\s*\{", text)
+            if not match:
+                fail("asset lifecycle handler not found: %s in %s" % (function, rel(path)))
+                continue
+            start = match.end()
+            depth, end = 1, start
+            while end < len(text) and depth:
+                depth += (text[end] == "{") - (text[end] == "}")
+                end += 1
+            body = text[start:end - 1]
+            guard = body.find("RefuseAssetLifecycleInPlayMode(")
+            effect = side_effects.search(body)
+            if guard < 0 or (effect and effect.start() < guard) or "return Busy;" not in body[:guard + 350]:
+                fail("missing/late PIE lifecycle refusal: %s in %s" % (function, rel(path)))
+            checked += 1
+    common = read_text(base / "Common/UnrealMCPCommonUtils.cpp")
+    guard_start = common.index("FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(")
+    guard_body = common[guard_start:common.index("int32 FUnrealMCPCommonUtils::CountPlacedInstances", guard_start)]
+    for token in ("IsPlaySessionRunning()", "IsPlaySessionInProgress()", "IsPlaySessionRequestQueued()", "stop_pie"):
+        if token not in guard_body:
+            fail("asset lifecycle guard lost state coverage: " + token)
+    for filename in ("Asset/UnrealMCPAssetCommands.cpp", "Blueprint/UnrealMCPBlueprintCommands.cpp",
+                     "UMG/UnrealMCPUMGCommands.cpp"):
+        if "UEditorAssetLibrary::DoesAssetExist(" in C_COMMENT.sub("", read_text(base / filename)):
+            fail("play-gated existence probe returned in " + filename)
+    print("asset lifecycle guard placements checked: %d" % checked)
 
 
 def main():
@@ -612,6 +706,7 @@ def main():
             print("  %-40s %s" % (name, registered[name]))
         return 1 if errors else 0
 
+    check_asset_lifecycle_guards()
     sends = collect_python_sends()
     tools = collect_python_tools()
     docs = collect_doc_mentions(collect_param_names(),
@@ -696,6 +791,15 @@ def main():
             continue
         fail("skill doc names '%s' which is neither a python tool nor a registered command (%s)"
              % (name, ", ".join(sites)))
+
+    # --- ERROR: skill frontmatter must be valid YAML -------------------------------------------
+    # The agent parses it; a defect here is invisible in this file's own scans and breaks the skill
+    # at load time instead (which is how it was found).
+    frontmatter_problems, frontmatter_checked = check_skill_frontmatter()
+    for problem in frontmatter_problems:
+        fail("skill frontmatter: %s" % problem)
+    if not frontmatter_checked:
+        warn("skill frontmatter not parsed (pyyaml is not installed)")
 
     # --- ERROR: a second list of command names is back -----------------------------------------
     for name, site in sorted(legacy.items()):

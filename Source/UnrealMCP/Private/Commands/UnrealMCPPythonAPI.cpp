@@ -6,6 +6,91 @@
 #include "Json.h"
 #include "Misc/ScopeLock.h"
 
+namespace
+{
+    /** Parameter names a command declares (empty for an unknown command). */
+    void GetDeclaredParamNames(const FString& CommandType, TSet<FString>& OutNames)
+    {
+        if (const FMCPCommandEntry* Entry = FMCPCommandRegistry::Get().Find(CommandType))
+        {
+            for (const FMCPParamSpec& Spec : Entry->Params)
+            {
+                OutNames.Add(Spec.Name);
+            }
+        }
+    }
+
+    int32 CountDeclaredKeys(const TSharedPtr<FJsonObject>& Object, const TSet<FString>& Declared)
+    {
+        int32 Count = 0;
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Object->Values)
+        {
+            Count += Declared.Contains(Pair.Key) ? 1 : 0;
+        }
+        return Count;
+    }
+
+    /**
+     * Accepts every spelling a caller might use for the loopback's parameter body:
+     *
+     *   1. a bare params object                 {"name": "WBP_Hud", "path": "/Game/UI"}
+     *   2. the TCP-shaped envelope              {"type": "create_umg_widget_blueprint", "params": {...}}
+     *   3. the same envelope without a marker   {"params": {...}}
+     *
+     * Case 3 is ambiguous with a command that has a real argument called "params"
+     * (add_blueprint_function_node takes its pin-default map under exactly that name), so it is
+     * resolved against the command's own declaration: whichever object matches more declared
+     * parameter names wins. A caller that passes the argument properly scores higher on the outer
+     * body and is left alone; a caller that wrapped the body scores higher on the inner one. When the
+     * body is {"params": {...}} and nothing is declared, the single key decides.
+     *
+     * The echoed marker key (case 2) is dropped from the body when the command does not declare it,
+     * so an envelope never shows up as an undeclared parameter.
+     */
+    TSharedPtr<FJsonObject> NormalizeParamsBody(const TSharedPtr<FJsonObject>& Body, const FString& CommandType)
+    {
+        TSet<FString> Declared;
+        GetDeclaredParamNames(CommandType, Declared);
+
+        FString Marker;
+        const bool bMarkedEnvelope = Body->TryGetStringField(TEXT("type"), Marker)
+            || Body->TryGetStringField(TEXT("command"), Marker);
+
+        const TSharedPtr<FJsonObject>* Nested = nullptr;
+        const bool bHasNested = Body->TryGetObjectField(TEXT("params"), Nested) && Nested && Nested->IsValid();
+
+        if (bMarkedEnvelope && bHasNested)
+        {
+            return *Nested;
+        }
+
+        if (!bMarkedEnvelope && bHasNested)
+        {
+            const int32 OuterScore = CountDeclaredKeys(Body, Declared);
+            const int32 InnerScore = CountDeclaredKeys(*Nested, Declared);
+            if (InnerScore > OuterScore || (Body->Values.Num() == 1 && OuterScore == 0))
+            {
+                return *Nested;
+            }
+        }
+
+        if (bMarkedEnvelope && !Declared.Contains(TEXT("type")) && !Declared.Contains(TEXT("command")))
+        {
+            TSharedPtr<FJsonObject> Stripped = MakeShareable(new FJsonObject());
+            for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Body->Values)
+            {
+                if (Pair.Key != TEXT("type") && Pair.Key != TEXT("command"))
+                {
+                    Stripped->SetField(Pair.Key, Pair.Value);
+                }
+            }
+            return Stripped;
+        }
+
+        return Body;
+    }
+}
+
 FString UUnrealMCPPythonAPI::ExecuteMCPCommand(const FString& CommandType, const FString& ParamsJson)
 {
     TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject);
@@ -41,33 +126,13 @@ FString UUnrealMCPPythonAPI::ExecuteMCPCommand(const FString& CommandType, const
         }
         else
         {
-            // Accept either the full TCP-style body {"type"/"command":..., "params":{...}}
-            // (the "command" field is ignored, CommandType wins) or a bare
-            // params object {...}.
-            //
-            // The unwrap keys off the envelope marker ("type" / "command"), NOT off "params" alone:
-            // a command's own argument may legitimately be called "params" (add_blueprint_function_node
-            // takes its pin-default map under exactly that name), and unwrapping on "params" alone
-            // replaced the whole payload with that inner object - the handler then reported
-            // "Missing 'blueprint_name'" while the caller had passed it.
             TSharedPtr<FJsonObject> Parsed;
             TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ParamsJson);
             TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject());
             const bool bParsed = FJsonSerializer::Deserialize(Reader, Parsed) && Parsed.IsValid();
             if (bParsed)
             {
-                FString EnvelopeMarker;
-                const TSharedPtr<FJsonObject>* NestedParams = nullptr;
-                const bool bIsEnvelope = Parsed->TryGetStringField(TEXT("type"), EnvelopeMarker)
-                    || Parsed->TryGetStringField(TEXT("command"), EnvelopeMarker);
-                if (bIsEnvelope && Parsed->TryGetObjectField(TEXT("params"), NestedParams) && NestedParams)
-                {
-                    Params = *NestedParams;
-                }
-                else
-                {
-                    Params = Parsed;
-                }
+                Params = NormalizeParamsBody(Parsed, CommandType);
             }
 
             if (!bParsed)

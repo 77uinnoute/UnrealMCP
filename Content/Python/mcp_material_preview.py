@@ -110,11 +110,30 @@ def _sanitize(text, limit=32):
     return cleaned[:limit] or "expr"
 
 
+def _asset_is_loadable(asset_path):
+    """Existence check that also answers while PIE runs.
+
+    unreal.EditorAssetLibrary.does_asset_exist is not usable here: the whole
+    EditorScriptingUtilities family funnels through UEditorAssetSubsystem, whose every entry point
+    starts with `if (!CheckIfInEditorAndPIE() || !EnsureAssetsLoaded()) return <neutral>;` and that
+    guard fails whenever GEditor->PlayWorld is set. The refusal comes back as `false` / `None`,
+    indistinguishable from "the asset is gone" - which made this tool raise material_not_found for
+    materials that were right there.
+
+    unreal.load_asset is the python-level helper (PyCore FindOrLoadAssetImpl -> plain LoadObject)
+    and has no such guard.
+    """
+    try:
+        return unreal.load_asset(asset_path) is not None
+    except Exception:
+        return False
+
+
 def _delete_asset(asset_path):
     """Delete an asset without a save prompt (preview materials never hit the disk)."""
-    if not unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+    if not _asset_is_loadable(asset_path):
         return
-    asset = unreal.EditorAssetLibrary.load_asset(asset_path)
+    asset = unreal.load_asset(asset_path)
     if asset is not None:
         unreal.EditorAssetLibrary.delete_loaded_asset(asset)
 
@@ -174,7 +193,7 @@ def build(request):
     asset_path = str(request.get("asset_path") or "").strip()
     if not asset_path:
         raise PreviewError("missing_asset_path", "asset_path is required")
-    if not unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+    if not _asset_is_loadable(asset_path):
         raise PreviewError("material_not_found", "no asset at %s" % asset_path)
     expression_name = request.get("expression_name")
     expression_desc = request.get("expression_desc")
@@ -242,7 +261,7 @@ def render(job):
     state = job.get("state") or {}
     write_png = bool(job.get("write_png"))
     size = int(state.get("size") or DEFAULT_SIZE)
-    material = unreal.EditorAssetLibrary.load_asset(state.get("temp_asset_path") or "")
+    material = unreal.load_asset(state.get("temp_asset_path") or "")
     if material is None:
         raise PreviewError("preview_material_missing",
                            "preview material is gone: %s" % state.get("temp_asset_path"))
@@ -283,7 +302,7 @@ def cleanup(state):
         _delete_asset(temp_asset_path)
     return {"success": True,
             "temp_asset_path": temp_asset_path,
-            "deleted": bool(temp_asset_path) and not unreal.EditorAssetLibrary.does_asset_exist(temp_asset_path)}
+            "deleted": bool(temp_asset_path) and not _asset_is_loadable(temp_asset_path)}
 
 
 # --------------------------------------------------------------------------------------

@@ -2574,6 +2574,11 @@ TSharedPtr<FJsonObject> FUnrealMCPPCGCommands::HandleCleanupPCGComponent(const T
 
 TSharedPtr<FJsonObject> FUnrealMCPPCGCommands::HandleCreatePCGGraph(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_pcg_graph")))
+    {
+        return Busy;
+    }
+
     FString AssetPath;
     if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
     {

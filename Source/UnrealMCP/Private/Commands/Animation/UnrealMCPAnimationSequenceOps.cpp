@@ -1899,7 +1899,7 @@ bool FUnrealMCPAnimationOps::CreateSequence(const FString& Name, const FString& 
         if (bLeftover)
         {
             Existing->MarkAsGarbage();
-            CollectGarbage(RF_NoFlags);
+            UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("animation sequence leftover reclaim"));
         }
         else
         {

@@ -1,6 +1,8 @@
 ﻿#include "UnrealMCPBridge.h"
 #include "MCPServerRunnable.h"
 #include "Core/MCPCommandRegistry.h"
+#include "Core/MCPGCSafety.h"
+#include "Core/PythonCodeGuard.h"
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 #include "HAL/RunnableThread.h"
@@ -69,6 +71,9 @@
 #include "Commands/Clothing/UnrealMCPClothCommands.h"
 // Python execution support
 #include "IPythonScriptPlugin.h"
+#include "Interfaces/IPluginManager.h"
+#include "Misc/Base64.h"
+#include "Misc/FileHelper.h"
 // Material conversion support
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
@@ -334,6 +339,59 @@ void UUnrealMCPBridge::StopServer()
 // Python 执行辅助
 // ----------------------------------------------------------------------------
 
+// 回环 fail-fast 守卫的源码，从插件 Content/Python/tools/ 读一次并缓存。
+// 守卫本体写成真 .py 文件（可读、可单独测、自己写明两个逃生口），这里只负责把它内联进来；
+// 文件缺失就退化成"没有守卫"并告警，绝不因为守卫装不上而让 python 执行不了。
+static const FString& LoopbackGuardSource()
+{
+    static FString Cached;
+    static bool bLoaded = false;
+    if (!bLoaded)
+    {
+        bLoaded = true;
+
+        TArray<FString> Candidates;
+        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealMCP")))
+        {
+            Candidates.Add(Plugin->GetBaseDir() / TEXT("Content/Python/tools/unreal_mcp_loopback.py"));
+        }
+        Candidates.Add(FPaths::ProjectPluginsDir() / TEXT("UnrealMCP/Content/Python/tools/unreal_mcp_loopback.py"));
+        Candidates.Add(FPaths::EnginePluginsDir() / TEXT("UnrealMCP/Content/Python/tools/unreal_mcp_loopback.py"));
+
+        for (const FString& Candidate : Candidates)
+        {
+            if (FFileHelper::LoadFileToString(Cached, *Candidate) && !Cached.IsEmpty())
+            {
+                return Cached;
+            }
+        }
+        Cached.Reset();
+        UE_LOG(LogTemp, Warning, TEXT("UnrealMCPBridge: loopback guard source not found (%s); editor python will NOT stop at the first failed command"),
+            *FString::Join(Candidates, TEXT(", ")));
+    }
+    return Cached;
+}
+
+// 把守卫包成一条不含 ".py" 的前置语句（理由同 WrapPythonSource 的注释），装成
+// sys.modules["unreal_mcp_loopback"] 并立刻 install()。用独立模块字典 exec，所以不污染脚本的全局名。
+static FString LoopbackGuardPrelude()
+{
+    const FString& Source = LoopbackGuardSource();
+    if (Source.IsEmpty())
+    {
+        return FString();
+    }
+    const FTCHARToUTF8 SourceUtf8(*Source);
+    const FString SourceB64 = FBase64::Encode(reinterpret_cast<const uint8*>(SourceUtf8.Get()), (uint32)SourceUtf8.Length());
+    return FString::Printf(TEXT(
+        "import base64 as _mcp_b64, sys as _mcp_sys, types as _mcp_types; "
+        "_mcp_g = _mcp_types.ModuleType('unreal_mcp_loopback'); "
+        "_mcp_g.__dict__['__builtins__'] = __builtins__; "
+        "exec(compile(_mcp_b64.b64decode('%s').decode('utf-8'), '<unreal_mcp_loopback>', 'exec'), _mcp_g.__dict__); "
+        "_mcp_sys.modules['unreal_mcp_loopback'] = _mcp_g; "
+        "_mcp_g.install()"), *SourceB64);
+}
+
 // 引擎在 ExecuteFile 模式下会在代码文本里找第一个 ".py"，其后是空白/结尾就把前缀当文件路径
 // 去 RunFile（PythonScriptPlugin.cpp:677-763）——代码里写了 "xxx.py" 的脚本会被当成路径执行失败。
 // 源码与文件名都经 base64 包装成一行 exec(compile(...))：base64 字母表没有 '.'，整行不含 ".py"，
@@ -344,9 +402,12 @@ static FString WrapPythonSource(const FString& Source, const FString& VirtualFil
     const FTCHARToUTF8 NameUtf8(*VirtualFilename);
     const FString SourceB64 = FBase64::Encode(reinterpret_cast<const uint8*>(SourceUtf8.Get()), (uint32)SourceUtf8.Length());
     const FString NameB64 = FBase64::Encode(reinterpret_cast<const uint8*>(NameUtf8.Get()), (uint32)NameUtf8.Length());
-    return FString::Printf(
+    const FString Body = FString::Printf(
         TEXT("import base64 as _mcp_b64; exec(compile(_mcp_b64.b64decode('%s').decode('utf-8'), _mcp_b64.b64decode('%s').decode('utf-8'), 'exec'))"),
         *SourceB64, *NameB64);
+
+    const FString Prelude = LoopbackGuardPrelude();
+    return Prelude.IsEmpty() ? Body : Prelude + TEXT("; ") + Body;
 }
 
 // 在 GameThread 上同步执行一段 Python 代码，整理成 ResultJson。
@@ -354,6 +415,11 @@ static FString WrapPythonSource(const FString& Source, const FString& VirtualFil
 //   success / result / log / error
 static TSharedPtr<FJsonObject> ExecutePythonCode(const FString& PyCode, const FString& VirtualFilename)
 {
+    // Wall-clock timing for the bridge-side handler. Reported back as duration_ms / python_ms:
+    // without them the reply only says whether the call finished, never how long it took, and the
+    // client has no way to tell a 200 ms call from a 70 s one.
+    const double HandlerStartSeconds = FPlatformTime::Seconds();
+
     IPythonScriptPlugin* PythonPlugin = IPythonScriptPlugin::Get();
     if (!(PythonPlugin && PythonPlugin->IsPythonAvailable()))
     {
@@ -363,10 +429,61 @@ static TSharedPtr<FJsonObject> ExecutePythonCode(const FString& PyCode, const FS
         return ResultJson;
     }
 
+    // Nothing runs until the source passes the banned-API guard: a rejected script must not have
+    // half-executed, and the caller needs the offending lines rather than a traceback.
+    TArray<FPythonGuardMatch> GuardMatches;
+    if (!FPythonCodeGuard::Check(PyCode, GuardMatches))
+    {
+        TSharedPtr<FJsonObject> GuardJson = MakeShareable(new FJsonObject);
+        GuardJson->SetBoolField(TEXT("success"), false);
+        GuardJson->SetStringField(TEXT("error"), TEXT("banned_api"));
+        GuardJson->SetBoolField(TEXT("pie_running"), FPythonCodeGuard::IsPlaying());
+
+        TArray<TSharedPtr<FJsonValue>> MatchesJson;
+        int32 BlockingCount = 0;
+        for (const FPythonGuardMatch& Match : GuardMatches)
+        {
+            TSharedPtr<FJsonObject> MatchJson = MakeShareable(new FJsonObject);
+            MatchJson->SetNumberField(TEXT("line"), Match.Line);
+            MatchJson->SetStringField(TEXT("api"), Match.Api);
+            MatchJson->SetStringField(TEXT("reason"), Match.Reason);
+            MatchJson->SetStringField(TEXT("use_instead"), Match.UseInstead);
+            MatchJson->SetBoolField(TEXT("blocks"), Match.bBlocks);
+            MatchesJson.Add(MakeShareable(new FJsonValueObject(MatchJson)));
+
+            if (Match.bBlocks)
+            {
+                ++BlockingCount;
+            }
+        }
+        GuardJson->SetArrayField(TEXT("matches"), MatchesJson);
+
+        GuardJson->SetStringField(TEXT("message"), FString::Printf(
+            TEXT("%d blocking API call(s) found and NOTHING was executed. Each match names the line, why it "
+                 "is refused and what to use instead%s."),
+            BlockingCount,
+            MatchesJson.Num() > BlockingCount
+                ? TEXT("; entries with blocks=false are warnings that would have run")
+                : TEXT("")));
+        GuardJson->SetNumberField(TEXT("duration_ms"),
+            (FPlatformTime::Seconds() - HandlerStartSeconds) * 1000.0);
+        return GuardJson;
+    }
+
     FPythonCommandEx PyCommandEx;
     PyCommandEx.Command = WrapPythonSource(PyCode, VirtualFilename);
     PyCommandEx.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
-    const bool bExecSuccess = PythonPlugin->ExecPythonCommandEx(PyCommandEx);
+
+    // Commands the script reaches over the loopback run inside this scope, so the GC sites in the
+    // plugin can skip a forced collection instead of hitting MarkAsGarbage()'s check(!IsRooted())
+    // and killing the editor (see Core/MCPGCSafety.h).
+    bool bExecSuccess = false;
+    const double ExecStartSeconds = FPlatformTime::Seconds();
+    {
+        UnrealMCP::FMCPPythonExecutionScope PythonScope;
+        bExecSuccess = PythonPlugin->ExecPythonCommandEx(PyCommandEx);
+    }
+    const double PythonMs = (FPlatformTime::Seconds() - ExecStartSeconds) * 1000.0;
 
     TArray<TSharedPtr<FJsonValue>> LogArray;
     // Collect any Python error output so the actual traceback reaches
@@ -395,6 +512,11 @@ static TSharedPtr<FJsonObject> ExecutePythonCode(const FString& PyCode, const FS
     ResultJson->SetBoolField(TEXT("success"), bCommandSuccess);
     ResultJson->SetStringField(TEXT("result"), PyCommandEx.CommandResult);
     ResultJson->SetArrayField(TEXT("log"), LogArray);
+    // duration_ms = whole bridge-side handler (banned-API scan + python exec + log collection + JSON);
+    // python_ms   = the engine's python call alone. Both exclude the TCP round trip and the client
+    // tool wrapper, which the bridge cannot see. Same field name as live_coding_compile's duration_ms.
+    ResultJson->SetNumberField(TEXT("duration_ms"), (FPlatformTime::Seconds() - HandlerStartSeconds) * 1000.0);
+    ResultJson->SetNumberField(TEXT("python_ms"), PythonMs);
 
     // On failure, expose the traceback directly in the top-level 'error'
     // field so clients never have to dig through the log entries.
@@ -423,6 +545,24 @@ static TSharedPtr<FJsonObject> ExecutePythonCode(const FString& PyCode, const FS
             CombinedError = TEXT("Python command failed (see log output).");
         }
         ResultJson->SetStringField(TEXT("error"), CombinedError);
+    }
+
+    // Non-blocking findings from the banned-API scan. The source ran, but it stepped around a path the
+    // plugin keeps a safer one for - attached here so a caller cannot miss it, and kept separate from
+    // 'log' so it survives even when the python produced no output of its own.
+    if (GuardMatches.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> WarningJson;
+        for (const FPythonGuardMatch& Match : GuardMatches)
+        {
+            TSharedPtr<FJsonObject> Warning = MakeShareable(new FJsonObject);
+            Warning->SetNumberField(TEXT("line"), Match.Line);
+            Warning->SetStringField(TEXT("api"), Match.Api);
+            Warning->SetStringField(TEXT("reason"), Match.Reason);
+            Warning->SetStringField(TEXT("use_instead"), Match.UseInstead);
+            WarningJson.Add(MakeShareable(new FJsonValueObject(Warning)));
+        }
+        ResultJson->SetArrayField(TEXT("guard_warnings"), WarningJson);
     }
     return ResultJson;
 }

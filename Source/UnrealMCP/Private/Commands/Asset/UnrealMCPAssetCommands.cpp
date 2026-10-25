@@ -182,17 +182,20 @@ void FUnrealMCPAssetCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleAddBlendableToPostVolume(Params); });
 
     MCP_REGISTER_COMMAND(Registry, "create_asset_safe", "asset",
-        "Create an asset with no modal dialog: an existing package reports asset_exists instead of "
-        "popping the rename/replace dialog that freezes the whole bridge; recreate=true silently saves "
-        "and deletes the existing asset first and reports delete_pending when the registry has not "
-        "released it yet. Reachable from editor-side scripts too (execute_python_* loopback), which "
-        "python-only tools are not.",
+        "Create an asset with no modal dialog. This command NEVER overwrites: an existing package "
+        "reports asset_exists instead of popping the rename/replace dialog that freezes the whole "
+        "bridge. To replace something, delete it first with safe_delete_asset (it reports blockers and "
+        "refuses when it cannot finish) and call this again - or skip the round trip entirely, because "
+        "most replacement intents can be done in place: a material by wipe_material_graph, a material "
+        "instance by editing its parameters, a mesh or texture by import_assets(replace_existing=true). "
+        "In-place edits keep the asset identity, so live references and render proxies stay valid. "
+        "Reachable from editor-side scripts too (execute_python_* loopback), which python-only tools "
+        "are not.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("asset_name"), TEXT("string"), TEXT("New asset name, e.g. \"M_MyMaterial\"")),
             MCPParam(TEXT("package_path"), TEXT("string"), TEXT("Content directory, e.g. /Game/Materials")),
             MCPParam(TEXT("asset_class"), TEXT("string"), TEXT("unreal class, e.g. Material, ParticleSystem")),
             MCPParamOpt(TEXT("factory"), TEXT("string"), TEXT("Factory class; default \"<asset_class>FactoryNew\"")),
-            MCPParamOpt(TEXT("recreate"), TEXT("bool"), TEXT("Save+delete an existing asset first (default false)")),
             MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save the new asset's package (default true); pass false to batch creates and flush once yourself")),
         }), MCPFlags(false, false, false),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleCreateAssetSafe(Params); });
@@ -466,7 +469,7 @@ static void SilentDeleteObjectAndPackage(UObject* Object, TArray<FString>* OutLi
         Object->RemoveFromRoot();
     }
     Object->MarkAsGarbage();
-    CollectGarbage(RF_NoFlags);
+    UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("SilentDeleteObjectAndPackage"));
 
     if (!bSafeToRemoveFiles)
     {
@@ -941,13 +944,8 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
     // (AssetEditorToolkit.cpp:592) on the next tick - measured 2026-09-29, it killed the editor.
     // Refusing the whole call is the honest option; `force` does not bypass it (the danger is the
     // memory half, which force only makes more aggressive).
-    if (GEditor && (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor))
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("safe_delete_asset")))
     {
-        TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("pie_running"),
-            TEXT("A play session is running; asset deletion is refused because it cannot complete in play mode and would still remove the in-memory objects"));
-        Busy->SetStringField(TEXT("hint"), TEXT("Stop the session first (stop_pie), then delete"));
-        Busy->SetBoolField(TEXT("pie_running"), GEditor->PlayWorld != nullptr);
-        Busy->SetBoolField(TEXT("simulating_in_editor"), GEditor->bIsSimulatingInEditor);
         return Busy;
     }
 
@@ -1032,7 +1030,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
                 TSharedPtr<FJsonObject> Report = MakeShareable(new FJsonObject);
                 Report->SetBoolField(TEXT("success"), true);
                 Report->SetBoolField(TEXT("dry_run"), true);
-                Report->SetBoolField(TEXT("deleted"), false);
+                // A dry run reports, it does not delete: no `deleted` field (see EmitDryRunReport).
                 Report->SetBoolField(TEXT("was_redirector"), true);
                 Report->SetStringField(TEXT("package_name"), RedirectorPackageName);
                 Report->SetStringField(TEXT("destination"), DestinationPath);
@@ -1152,6 +1150,20 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
         ResultJson->SetBoolField(TEXT("referenced_by_undo"), Verdict.bReferencedByUndo);
     };
 
+    // A refusal is a FAILURE, not "success with nothing deleted": `success` has to mean the asset is
+    // gone, so callers cannot mistake a hold for a done. The evidence (blockers[] / referencers[] /
+    // workarounds[] / preflight fields, all added at the call sites) stays in the reply so the caller
+    // can still act on it.
+    auto Refuse = [&ResultJson](const FString& Reason, const FString& Detail)
+    {
+        ResultJson->SetBoolField(TEXT("success"), false);
+        ResultJson->SetBoolField(TEXT("deleted"), false);
+        ResultJson->SetStringField(TEXT("error_code"), Reason);
+        ResultJson->SetStringField(TEXT("error"), Detail);
+        ResultJson->SetStringField(TEXT("reason"), Reason);
+        ResultJson->SetStringField(TEXT("detail"), Detail);
+    };
+
     // dry_run: the read-only twin of the real call, and the one report that still answers with a
     // World Partition level open (nothing is deleted, so the guard does not apply). Reports exactly
     // which references a force call would clear (referencer + property path), what a real call would
@@ -1187,7 +1199,8 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
 
         ResultJson->SetBoolField(TEXT("success"), true);
         ResultJson->SetBoolField(TEXT("dry_run"), true);
-        ResultJson->SetBoolField(TEXT("deleted"), false);
+        // No `deleted` field at all: a dry run never promises to delete, and `success + deleted:false`
+        // reads like "it refused" (would_delete / would_fail_reason carry the prediction).
         ResultJson->SetBoolField(TEXT("would_fail"), !WouldFailReason.IsEmpty());
         if (!WouldFailReason.IsEmpty())
         {
@@ -1241,14 +1254,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
 
         if (!bForce)
         {
-            ResultJson->SetBoolField(TEXT("success"), true);
-            ResultJson->SetBoolField(TEXT("deleted"), false);
             // Measured cause, not a guessed code: this branch is taken exactly when the referencer
             // scan above returned packages, and those packages are the evidence.
-            ResultJson->SetStringField(TEXT("reason"), TEXT("blocked_by_referencers"));
-            ResultJson->SetArrayField(TEXT("referencers"), BlockersJson);
-            ResultJson->SetStringField(TEXT("detail"),
+            Refuse(TEXT("blocked_by_referencers"),
                 TEXT("referenced by the packages in blockers; pass force=true to break those references and delete anyway"));
+            ResultJson->SetArrayField(TEXT("referencers"), BlockersJson);
             AddDeleteWorkarounds(ResultJson);
             return FinalizeResult();
         }
@@ -1258,10 +1268,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
         // references were gone and the asset was still there (see CheckForceDeletePreflight).
         if (!Preflight.bProceed)
         {
-            ResultJson->SetBoolField(TEXT("success"), true);
-            ResultJson->SetBoolField(TEXT("deleted"), false);
-            ResultJson->SetStringField(TEXT("reason"), Preflight.Reason);
-            ResultJson->SetStringField(TEXT("detail"), Preflight.Detail);
+            Refuse(Preflight.Reason, Preflight.Detail);
             ResultJson->SetArrayField(TEXT("referencers"), BlockersJson);
             ResultJson->SetNumberField(TEXT("detached_count"), 0);
             AddPreflightFields(Preflight);
@@ -1320,12 +1327,9 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
             {
                 UndetachableJson.Add(MakeShareable(new FJsonValueString(Blocker)));
             }
-            ResultJson->SetBoolField(TEXT("success"), true);
-            ResultJson->SetBoolField(TEXT("deleted"), false);
-            ResultJson->SetStringField(TEXT("reason"), TEXT("referencers_not_detachable"));
-            ResultJson->SetArrayField(TEXT("referencers"), UndetachableJson);
-            ResultJson->SetStringField(TEXT("detail"),
+            Refuse(TEXT("referencers_not_detachable"),
                 TEXT("force could not reach these referencers (their packages are not loaded, or a loaded object still points at the target); nothing was deleted"));
+            ResultJson->SetArrayField(TEXT("referencers"), UndetachableJson);
             AddDeleteWorkarounds(ResultJson);
             return FinalizeResult();
         }
@@ -1458,14 +1462,13 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleSafeDeleteAsset(const TSh
 
     // Silently save the dirty package first (mirrors ue-safe delete_asset_safe):
     // a dirty asset that survives the delete would surface as a rename/replace
-    // dialog on the next same-name create.
+    // dialog on the next same-name create. Saved through the modal-free helper, since
+    // UEditorLoadingAndSavingUtils::SavePackages runs the engine's checkout-and-save path.
     if (UPackage* Package = AssetObject->GetOutermost())
     {
         if (Package->IsDirty())
         {
-            TArray<UPackage*> PackagesToSave;
-            PackagesToSave.Add(Package);
-            UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, /*bOnlyDirty=*/true);
+            FUnrealMCPCommonUtils::SaveAssetForObject(AssetObject);
         }
     }
 
@@ -2484,11 +2487,6 @@ namespace
         }
     }
 
-    bool IsPieActive()
-    {
-        return GEditor && GEditor->PlayWorld != nullptr;
-    }
-
     FString NormalizeContentDirectory(const FString& Directory)
     {
         FString Result = Directory;
@@ -2946,15 +2944,14 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleMoveAsset(const TSharedPt
     FMoveOptions Options;
     ReadMoveOptions(Params, Options);
 
+    // Refuse before installing dialog policy or loading any asset.
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("move_asset"), TEXT("in_pie")))
+    {
+        return Busy;
+    }
+
     // Armed before the first engine call: a box that appears has to already have an answer.
     FDialogPolicy DialogPolicy(Options.bAnswerDialogs);
-
-    // Every refusal happens before the first write: a rejected move must leave no half-renamed state.
-    if (IsPieActive())
-    {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("in_pie"),
-            TEXT("asset moves are refused while a Play In Editor session is running"));
-    }
 
     FString DestPackageName;
     FString DestObjectName;
@@ -3028,17 +3025,16 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleMoveDirectory(const TShar
     FMoveOptions Options;
     ReadMoveOptions(Params, Options);
 
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("move_directory"), TEXT("in_pie")))
+    {
+        return Busy;
+    }
+
     // Armed before the first engine call: a box that appears has to already have an answer.
     FDialogPolicy DialogPolicy(Options.bAnswerDialogs);
 
     const FString SourceDir = NormalizeContentDirectory(Directory);
     const FString DestDir = NormalizeContentDirectory(NewDirectory);
-
-    if (IsPieActive())
-    {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("in_pie"),
-            TEXT("directory moves are refused while a Play In Editor session is running"));
-    }
     if (!DestDir.StartsWith(TEXT("/")) || !FPackageName::IsValidLongPackageName(DestDir))
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_destination"),
@@ -3206,6 +3202,15 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleMoveDirectory(const TShar
     ResultJson->SetNumberField(TEXT("moved_count"), MovedJson.Num());
     ResultJson->SetArrayField(TEXT("moved"), MovedJson);
     ResultJson->SetArrayField(TEXT("failed"), FailedAssetJson);
+    // A real run that moved nothing is a failure (failed[] names each one); a dry run moves nothing by
+    // definition and is a successful query.
+    if (!Options.bDryRun && MovedJson.Num() == 0 && FailedAssetJson.Num() > 0)
+    {
+        ResultJson->SetBoolField(TEXT("success"), false);
+        ResultJson->SetStringField(TEXT("error_code"), TEXT("nothing_moved"));
+        ResultJson->SetStringField(TEXT("error"), FString::Printf(
+            TEXT("no asset was moved: all %d failed (see failed[])"), FailedAssetJson.Num()));
+    }
     ResultJson->SetArrayField(TEXT("referencers_found"), FoundJson);
     ResultJson->SetArrayField(TEXT("referencers_saved"), SavedJson);
     ResultJson->SetArrayField(TEXT("referencers_failed"), FailedReferencerJson);
@@ -3239,6 +3244,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleMoveDirectory(const TShar
 
 TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCreateAssetSafe(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_asset_safe")))
+    {
+        return Busy;
+    }
+
     FString AssetName;
     FString PackagePath;
     FString ClassName;
@@ -3252,8 +3262,20 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCreateAssetSafe(const TSh
 
     FString FactoryName;
     Params->TryGetStringField(TEXT("factory"), FactoryName);
-    bool bRecreate = false;
-    Params->TryGetBoolField(TEXT("recreate"), bRecreate);
+    // recreate was removed on 2026-10-12. "Silently save and delete the existing asset first" cannot be
+    // made safe for anything a live render proxy holds - measured: EXCEPTION_ACCESS_VIOLATION with a
+    // Renderer-only stack after recreating a material instance that a level component was drawing. The
+    // honest two-step (safe_delete_asset, then this command) reports blockers instead of forcing a
+    // delete, and most replacement intents do not need the identity to change at all.
+    if (Params->HasField(TEXT("recreate")))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("removed_parameter"),
+            TEXT("'recreate' was removed: create_asset_safe never overwrites. Either delete first with "
+                 "safe_delete_asset (which reports blockers and refuses when it cannot finish) and call this "
+                 "again, or edit in place: a material with wipe_material_graph, a material instance by "
+                 "setting its parameters, a mesh or texture with import_assets(replace_existing=true). "
+                 "In-place edits keep the asset identity, so live references stay valid."));
+    }
 
     FString CleanPath = PackagePath;
     while (CleanPath.EndsWith(TEXT("/")))
@@ -3294,48 +3316,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCreateAssetSafe(const TSh
     Data->SetBoolField(TEXT("saved"), false);
     Data->SetBoolField(TEXT("persist_requested"), bPersist);
 
-    if (UEditorAssetLibrary::DoesAssetExist(FullPath))
+    if (FUnrealMCPCommonUtils::DoesAssetPackageExist(FullPath))
     {
-        if (!bRecreate)
-        {
-            // Same contract the python tool had: report instead of letting the editor prompt.
-            Data->SetStringField(TEXT("reason"), TEXT("asset_exists"));
-            return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
-        }
-
-        if (UObject* Existing = FUnrealMCPCommonUtils::FindAsset(FullPath))
-        {
-            if (Existing->GetOutermost() && Existing->GetOutermost()->IsDirty())
-            {
-                // Silent save: a dirty asset would raise the editor's own "save changes?" dialog.
-                UEditorAssetLibrary::SaveLoadedAsset(Existing, /*bOnlyIfIsDirty=*/true);
-            }
-        }
-
-        TSharedPtr<FJsonObject> DeleteParams = MakeShared<FJsonObject>();
-        DeleteParams->SetStringField(TEXT("asset_path"), FullPath);
-        DeleteParams->SetBoolField(TEXT("force"), false);
-        TSharedPtr<FJsonObject> DeleteResult = HandleSafeDeleteAsset(DeleteParams);
-        bool bDeleted = false;
-        if (DeleteResult.IsValid())
-        {
-            DeleteResult->TryGetBoolField(TEXT("deleted"), bDeleted);
-        }
-        if (!bDeleted)
-        {
-            // The command's own verdict is the one to trust: it already verified both halves (package
-            // file gone, object gone from memory). Re-checking with DoesAssetExist here would read the
-            // asset registry, which lags behind a delete that just happened in this session and would
-            // report a phantom delete_pending. A refused delete keeps its own reason (e.g.
-            // blocked_by_referencers) so the caller sees why nothing was recreated.
-            FString DeleteReason;
-            const bool bHasReason = DeleteResult.IsValid()
-                && DeleteResult->TryGetStringField(TEXT("reason"), DeleteReason)
-                && !DeleteReason.IsEmpty();
-            Data->SetStringField(TEXT("reason"), bHasReason ? DeleteReason : TEXT("delete_pending"));
-            Data->SetObjectField(TEXT("delete_result"), DeleteResult);
-            return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
-        }
+        // Never overwrites: report instead of letting the editor prompt.
+        Data->SetStringField(TEXT("reason"), TEXT("asset_exists"));
+        return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
     }
 
     if (!FactoryClass)
@@ -3402,13 +3387,19 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCreateAssetSafe(const TSh
     Data->SetStringField(TEXT("asset_path"), NewAsset->GetPathName());
     if (bPersist)
     {
-        Data->SetBoolField(TEXT("saved"), UEditorAssetLibrary::SaveLoadedAsset(NewAsset, /*bOnlyIfIsDirty=*/ true));
+        Data->SetBoolField(TEXT("saved"), FUnrealMCPCommonUtils::SaveAssetForObject(NewAsset));
     }
     return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDeleteAssetSafe(const TSharedPtr<FJsonObject>& Params)
 {
+    // Must precede save_dirty: the delegated delete guard alone is too late.
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("delete_asset_safe")))
+    {
+        return Busy;
+    }
+
     FString AssetPath;
     if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
     {
@@ -3428,14 +3419,17 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDeleteAssetSafe(const TSh
         {
             if (Existing->GetOutermost() && Existing->GetOutermost()->IsDirty())
             {
-                // The save prompt is what freezes the bridge, so the save happens here instead.
-                bSaved = UEditorAssetLibrary::SaveLoadedAsset(Existing, /*bOnlyIfIsDirty=*/true);
+                // The save prompt is what freezes the bridge, so the save happens here instead - through
+                // the modal-free helper, because SaveLoadedAsset itself runs the engine's
+                // checkout-and-save path and would prompt anyway.
+                bSaved = FUnrealMCPCommonUtils::SaveAssetForObject(Existing);
             }
         }
     }
 
-    // The delete itself is the blocker-aware, redirector-aware path: a referenced asset comes back
-    // as deleted=false with the referencers listed, instead of a modal asking what to do.
+    // The delete itself is the blocker-aware, redirector-aware path: a referenced asset comes back as
+    // a FAILURE (success:false + blocked_by_referencers, referencers listed), instead of a modal asking
+    // what to do - and never as "success but nothing deleted".
     TSharedPtr<FJsonObject> DeleteParams = MakeShared<FJsonObject>();
     DeleteParams->SetStringField(TEXT("asset_path"), AssetPath);
     DeleteParams->SetBoolField(TEXT("force"), bForce);
@@ -3558,6 +3552,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDeleteAssetWithLevelSwitc
 
 TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDuplicateAssetSafe(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("duplicate_asset_safe")))
+    {
+        return Busy;
+    }
+
     FString SourcePath;
     if (!Params->TryGetStringField(TEXT("source_asset"), SourcePath))
     {
@@ -3624,7 +3623,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDuplicateAssetSafe(const 
 
         if (Existing->GetOutermost() && Existing->GetOutermost()->IsDirty())
         {
-            UEditorAssetLibrary::SaveLoadedAsset(Existing, /*bOnlyIfIsDirty=*/true);
+            FUnrealMCPCommonUtils::SaveAssetForObject(Existing);
         }
 
         TSharedPtr<FJsonObject> DeleteParams = MakeShared<FJsonObject>();
@@ -3655,6 +3654,13 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDuplicateAssetSafe(const 
         }
     }
 
+    else if (FUnrealMCPCommonUtils::DoesAssetPackageExist(FullPath))
+    {
+        // Occupied but unreadable is not missing: never hand that package to DuplicateAsset.
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("destination_load_failed"),
+            FString::Printf(TEXT("Destination package '%s' exists but could not be resolved; nothing was duplicated"), *FullPath));
+    }
+
     // The engine's own copy path (what the Content Browser uses), so a Blueprint-derived asset gets the
     // kind-specific fixups a raw StaticDuplicateObject skips - a RigVM rig copied that way compiles in
     // the session that made it and fails after a reload (its unit nodes lose their ScriptStruct).
@@ -3672,7 +3678,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleDuplicateAssetSafe(const 
     Data->SetStringField(TEXT("asset_path"), Copy->GetPathName());
     if (bPersist)
     {
-        Data->SetBoolField(TEXT("saved"), UEditorAssetLibrary::SaveLoadedAsset(Copy, /*bOnlyIfIsDirty=*/true));
+        Data->SetBoolField(TEXT("saved"), FUnrealMCPCommonUtils::SaveAssetForObject(Copy));
     }
     return FUnrealMCPCommonUtils::CreateSuccessResponse(Data);
 }

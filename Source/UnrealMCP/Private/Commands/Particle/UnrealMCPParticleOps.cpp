@@ -1,4 +1,5 @@
 #include "Commands/Particle/UnrealMCPParticleOps.h"
+#include "Core/MCPGCSafety.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 #include "Commands/Blueprint/UnrealMCPBlueprintGraphOps.h"
 #include "Compat/UnrealMCPVersionCompat.h"
@@ -1955,7 +1956,7 @@ bool FUnrealMCPParticleOps::CreateParticleSystem(const FString& Name, const FStr
         if (bLeftover)
         {
             Existing->MarkAsGarbage();
-            CollectGarbage(RF_NoFlags);
+            UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("particle system leftover reclaim"));
         }
         else
         {

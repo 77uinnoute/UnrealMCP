@@ -40,6 +40,15 @@ public:
     // "missing" or "not loadable in play mode").
     static bool IsPlaySessionRunning();
 
+    // Asset lifecycle writes must also refuse queued PIE/SIE starts, before PlayWorld exists.
+    // Null means editor-only work may proceed. Both tools and python loopback use this guard.
+    static TSharedPtr<FJsonObject> RefuseAssetLifecycleInPlayMode(
+        const FString& CommandName, const FString& ErrorCode = TEXT("pie_running"));
+
+    // Non-loading package occupancy probe: never uses EditorScripting's play-mode-gated APIs.
+    // An unreadable on-disk package still occupies its name and must not be overwritten.
+    static bool DoesAssetPackageExist(const FString& AssetPath);
+
     /**
      * How many instances of a Blueprint's generated class are placed in the world the user is looking
      * at, plus which world that was (OutWorldKind = "editor" or "pie").

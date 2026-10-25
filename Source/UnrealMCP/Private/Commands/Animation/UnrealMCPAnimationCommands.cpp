@@ -3279,6 +3279,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleExportAnimationToJson
 TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleCreateAnimSequence(const TSharedPtr<FJsonObject>& Params,
                                                                               bool bFromReferencePose)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_anim_sequence / create_anim_sequence_from_pose")))
+    {
+        return Busy;
+    }
+
     FString AssetPath;
     FUnrealMCPAnimError Error;
     if (!FUnrealMCPAnimationOps::CreateSequence(GetStringParam(Params, TEXT("name")),
@@ -4798,6 +4803,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleGetMontageRootMotionS
 
 TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleCreateMontageFromAnimation(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_montage_from_animation")))
+    {
+        return Busy;
+    }
+
     FString AssetPath;
     FUnrealMCPAnimError Error;
     if (!FUnrealMCPAnimationMontageOps::CreateMontageFromAnimation(GetStringParam(Params, TEXT("anim_path")),
@@ -4835,6 +4845,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleCreateMontageFromAnim
 
 TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleCreateEmptyMontage(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_empty_montage")))
+    {
+        return Busy;
+    }
+
     FString AssetPath;
     FUnrealMCPAnimError Error;
     if (!FUnrealMCPAnimationMontageOps::CreateEmptyMontage(GetStringParam(Params, TEXT("name")),
@@ -4871,6 +4886,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleCreateEmptyMontage(co
 
 TSharedPtr<FJsonObject> FUnrealMCPAnimationCommands::HandleDuplicateMontage(const TSharedPtr<FJsonObject>& Params)
 {
+    if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("duplicate_montage")))
+    {
+        return Busy;
+    }
+
     FString AssetPath;
     FUnrealMCPAnimError Error;
     if (!FUnrealMCPAnimationMontageOps::DuplicateMontage(GetStringParam(Params, TEXT("asset_path")),

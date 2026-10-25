@@ -30,7 +30,7 @@ metadata:
 | 列节点（拿 name/desc/object_path） | `list_material_expressions(asset_path)`，`index` 仅诊断用，`object_path` 可给 python 直接 resolve 表达式对象；每项带 **`referenced`**（是否从材质属性引脚可达），顶层带 `unreferenced_count` | 无（`Material.expressions` 是 protected） |
 | 读属性 / 读 pin 接线 | `get_material_expression_property(..., property="code"\|"inputs"\|...)`，`property="inputs"` 返回 `[{input_name, expression, output_index, connected}]` | 多数属性可读；pin 的 `Input` 是 protected，读不到 |
 | 删节点（精确） | `delete_material_expressions(asset_path, [{...}])` 按 name/desc，逐项独立处理；顶层 `success` 反映子项（全失败为 false），部分失败给 `partial` + `failed_count`，逐项结果在 `results[]`（**必读**） | — |
-| 整图 wipe | `wipe_material_graph(asset_path, max_iterations=32)` → `{iterations, deleted_total, remaining}`，`remaining` 必须为 0 | 循环 `delete_all_material_expressions` + GC（单遍只删一部分，见 §2） |
+| 整图 wipe | `wipe_material_graph(asset_path, max_iterations=32)` → `{iterations, deleted_total, remaining}`，`remaining` 必须为 0（**从工具面调，别从 python 回环调**，见 §2） | 循环 `delete_all_material_expressions`（不触发 GC；单遍只删一部分，见 §2） |
 | 建资产 | `create_asset_safe(name, path, class, factory, recreate)`（无重命名模态框） | `AssetToolsHelpers.get_asset_tools().create_asset(...)` |
 | 导入资产 | `import_assets(paths, destination_path, force_legacy=True, replace_existing=False)` → `{importer, imported_count, failed_count, results[], cvar_overrides[]}` | —（**禁止**手写 `AssetImportTask`，会崩编辑器，见 §二） |
 | 写任意资产属性 | `set_asset_properties(asset_path, props)` → `{applied[], failed[], applied_count, failed_count}`（友好名 + 枚举名容错，见 §二） | `asset.set_editor_property(...)`（属性名拼错/受保护会直接抛异常） |
@@ -74,7 +74,12 @@ for i in range(12):
         break
 ```
 
+**但清空整图优先从工具面调 `wipe_material_graph`，不要在 python 脚本里走回环调它**：它的删除循环里会 `CollectGarbage`，而在 python 执行中途做完整 GC 会撞 `UObjectBaseUtility::MarkAsGarbage()` 的 `check(!IsRooted())`（`UObjectBaseUtility.h:179`）⇒ 断言 + AV，**编辑器进程直接消失**（不是结构化错误）。现在两层防护都在：python 里 `execute_mcp_command("wipe_material_graph")` 被 `PythonCodeGuard` 的回环表**拒绝**（`safe_delete_asset` / `delete_actor` 同类命令记为警告），插件内所有 GC 点在 python 执行期间**跳过回收**并打日志。⇒ 需要"真的回收"时（删了再同名重建、清空整图后点数要归零）**从工具面调命令**；脚本里只做"不依赖回收"的步骤（逐条 `delete_material_expressions` 不 GC，也安全）。
+
 收尾断言：`get_num_material_expressions(mat) == 设计值`。本文的图层写法都能预先算出节点数（例：一个 Custom 节点承载 3 条鱼的整套逻辑 → 整图 49 节点），这是最直接的幂等校验。残留孤儿会占名字并虚高 `count`，`list_material_expressions` 的 `referenced: false` 与 `unreferenced_count` 可用来确认是否真的清干净。
+
+> **节点数对 ≠ 连线完整**（实测踩过）：把连接写成一个 `ok = [...]` 列表时，列表**按顺序求值**，中途抛异常（例：某个 python 枚举名不存在）⇒ **只有它之前的边执行了**，之后的边一条没连，而**节点数照样等于设计值**。更糟的是——若脚本的"资产已存在 ⇒ 更新"分支只回写 `code` 再重编（**不碰连线**），那半成品图**永远不会自愈**，重跑多少遍都缺那几条边（当时的实测：缺 WPO / Roughness / Specular 三条，跑 N 遍都在）。
+> ⇒ **判据要用边，不要只用节点数**：`get_material_graph` 的 `property_connections` + 每个表达式的 `inputs[].connected` 逐条比对；或干脆每次从零建（`wipe_material_graph`，**从工具面调**）。动图之前先把会用到的符号/参数校验掉（`hasattr(unreal, ...)` / 命令回包里的 `supported_properties[]`），别让异常发生在建图中途。
 
 ### 3. 建节点 → 设属性 → 连线的命名约定
 
@@ -260,6 +265,8 @@ bridge("create_material_expression", asset_path=MAT,
 | `get_material_parameters` / `set_material_parameters` | 同名 | `{asset_path[, values, recompile]}`；`set_material_parameters` 回包额外带 `param_scope`（`base_material_default` / `material_instance_override`）、`affects_live_render`、`live_components_using_material`、`live_render_worlds`、`live_render_note` —— **"这次改动到不到得了我在看的画面"从此是回读而不是猜**：写的是参数**默认值**时不需要 `recompile`（引擎在写入时重建 uniform 集合并推给绑定的组件，正在跑的 PIE 与编辑器共用同一个已加载材质对象）；`recompile` 只对**图改动**（节点/连线）有意义 |
 | `import_assets` | 同名 | `{paths: [...], destination_path, force_legacy?, replace_existing?}` |
 | `set_asset_properties` | 同名 | `{asset_path, props: {...}}` |
+
+**连材质属性优先走 `connect_material_pin`，别按"python 枚举里有没有"下判断**：`unreal.MaterialProperty` 只有 14 项，**缺 `WorldPositionOffset` / `PixelDepthOffset` / `SurfaceThickness` / `Displacement`**（反过来它多一个 `MP_FRONT_MATERIAL`，命令的映射表里没有）—— 两边不一致是**双向**的。命令按名字查自己的表（17 项），**精确匹配、大小写敏感**；写错会回 `Unknown material property: X` + **`supported_properties[]` 全表**，照抄即可。同一张表还被 `disconnect_material_property`（拔线）、`get_material_graph`（读回）与"可达性判定"（`wipe_material_graph` 的 `remaining`/`referenced`）使用 ⇒ **挂在 WPO 上的节点算可达**，不会被当孤儿误删。
 
 **批处理纪律**：`set_material_expression_property` / `set_custom_input_name` / `set_material_parameters` / `add_custom_input` / `remove_custom_input` 的 `recompile` 默认 **false** —— 批内全部保持 false。**连线类命令（`connect_material_expression` / `connect_material_pin` / `disconnect_material_property`）不再自行重编**，所以批量建图的做法是：先把整张图连完，再对每个材质调一次 `recompile_material(asset_path, save=true)` 收口（它同时做"材质级刷新"，缺了它资产对但视口不变）—— 每次重编都是一次完整 shader 编译，逐步重编是纯浪费。
 

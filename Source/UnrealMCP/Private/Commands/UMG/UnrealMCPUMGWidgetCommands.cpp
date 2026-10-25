@@ -1916,6 +1916,17 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetWidgetProperties(const T
 	Result->SetNumberField(TEXT("applied_count"), Applied.Num());
 	Result->SetArrayField(TEXT("failed"), Failed);
 	Result->SetNumberField(TEXT("failed_count"), Failed.Num());
+	// A batch where EVERY property failed changed nothing: that is a failure, not a success with
+	// failed[] on the side (a partial batch stays a success - failed[] names the ones that did not take).
+	const bool bAnyPropertyApplied = Applied.Num() > 0 || Failed.Num() == 0;
+	Result->SetBoolField(TEXT("success"), bAnyPropertyApplied);
+	if (!bAnyPropertyApplied)
+	{
+		Result->SetStringField(TEXT("error_code"), TEXT("nothing_applied"));
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("none of the %d propert%s was written (see failed[])"), Failed.Num(),
+			Failed.Num() == 1 ? TEXT("y") : TEXT("ies")));
+	}
 	Result->SetObjectField(TEXT("properties"), WidgetPropsToJson(Widget));
 	FinishWidgetEdit(WidgetBlueprint, Params, Result);
 	return Result;
@@ -2239,6 +2250,16 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetWidgetBrush(const TShare
 	Result->SetNumberField(TEXT("applied_count"), Applied.Num());
 	Result->SetArrayField(TEXT("failed"), Failed);
 	Result->SetNumberField(TEXT("failed_count"), Failed.Num());
+	// Same rule as set_widget_properties: every key failing means the brush was not written at all.
+	const bool bAnyBrushKeyApplied = Applied.Num() > 0 || Failed.Num() == 0;
+	Result->SetBoolField(TEXT("success"), bAnyBrushKeyApplied);
+	if (!bAnyBrushKeyApplied)
+	{
+		Result->SetStringField(TEXT("error_code"), TEXT("nothing_applied"));
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("none of the %d brush ke%s was written (see failed[])"), Failed.Num(),
+			Failed.Num() == 1 ? TEXT("y") : TEXT("ys")));
+	}
 	Result->SetObjectField(TEXT("brush"), BrushJson);
 	FinishWidgetEdit(WidgetBlueprint, Params, Result);
 	return Result;

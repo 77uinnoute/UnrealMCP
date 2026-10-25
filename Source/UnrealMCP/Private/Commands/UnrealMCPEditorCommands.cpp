@@ -38,6 +38,8 @@
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/Emitter.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
+#include "Reflection/MCPPropertyReflector.h"
 
 FUnrealMCPEditorCommands::FUnrealMCPEditorCommands()
 {
@@ -137,10 +139,19 @@ void FUnrealMCPEditorCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         }), MCPFlags(),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleGetActorProperties(Params); });
 
-    MCP_REGISTER_COMMAND(Registry, "set_actor_property", "editor", "Set one property on an actor.",
+    MCP_REGISTER_COMMAND(Registry, "set_actor_property", "editor",
+        "Set one property on an actor, on one of its components, or on a field inside a struct/object "
+        "property the actor holds. A dotted name is tried as a component selector first "
+        "('<component>.<property>', e.g. LightComponent.Intensity - object name or class name, U prefix and "
+        "'Component' suffix optional), then as a property path inside the actor itself (e.g. "
+        "Settings.bOverride_AutoExposureMethod on a PostProcessVolume, or LodData[0].PhysicalMeshData.Values) "
+        "- the same path grammar reflect_probe and set_object_property resolve, so a path can be probed before "
+        "it is written. On success the reply carries the read-back in property_value_after plus "
+        "resolved_property when a path was walked; when neither reading of the dot resolves, the reply carries "
+        "the actor's components, the failed path step with its legal names, and a hint.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Name of the actor to change")),
-            MCPParam(TEXT("property_name"), TEXT("string"), TEXT("Property name on the actor class")),
+            MCPParam(TEXT("property_name"), TEXT("string"), TEXT("Property on the actor class, '<component>.<property>', or a path like \"Settings.bOverride_AutoExposureMethod\"")),
             MCPParam(TEXT("property_value"), TEXT("string"), TEXT("Value to set (number / bool / string / array, as the property accepts)")),
         }), MCPFlags(false, false, false, false, true),
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleSetActorProperty(Params); });
@@ -286,6 +297,87 @@ namespace
 
         return nullptr;
     }
+
+    /**
+     * Reply for an actor-property write that landed: what was asked for, what it resolved to, and the
+     * read-back from the object the write landed on.
+     *
+     * The read-back is separate from the success flag on purpose: a `UPROPERTY(Setter = ...)` field is
+     * often only a mirror of the state the engine reads, so "the call succeeded" has to stay separable
+     * from "the value is what was asked for".
+     */
+    TSharedPtr<FJsonObject> MakeActorPropertyWriteResponse(AActor* Actor, const FString& ActorName,
+                                                           const FString& PropertyName, FProperty* Written,
+                                                           const void* WrittenValue, UObject* Component)
+    {
+        TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+        ResultObj->SetStringField(TEXT("actor"), ActorName);
+        ResultObj->SetStringField(TEXT("property"), PropertyName);
+        if (Component)
+        {
+            // Which component it landed on: the selector was matched, not echoed, so say what matched.
+            ResultObj->SetStringField(TEXT("component"), Component->GetName());
+        }
+        if (Written && PropertyName.Contains(TEXT(".")) && !Written->GetName().Equals(PropertyName, ESearchCase::CaseSensitive))
+        {
+            // A dotted name resolves to a leaf whose own name is only the last segment.
+            ResultObj->SetStringField(TEXT("resolved_property"), Written->GetName());
+        }
+        ResultObj->SetBoolField(TEXT("success"), true);
+        if (Written && WrittenValue)
+        {
+            if (TSharedPtr<FJsonValue> ValueAfter = FUnrealMCPCommonUtils::PropertyValueToJson(Written, WrittenValue))
+            {
+                ResultObj->SetField(TEXT("property_value_after"), ValueAfter);
+            }
+        }
+        ResultObj->SetObjectField(TEXT("actor_details"), FUnrealMCPCommonUtils::ActorToJsonObject(Actor, true));
+        return ResultObj;
+    }
+
+    /**
+     * Write a property path that resolved INSIDE the actor itself ("Settings.bOverride_AutoExposureMethod").
+     *
+     * The write goes through the reflector's address-based writer rather than SetObjectProperty: the leaf is
+     * not a property of the actor's class, so there is no property to look up on the actor - the resolved
+     * address is the whole answer. A refusal keeps the reflector's own code plus the leaf's accepted shapes,
+     * so a rejected value says what the leaf would have taken.
+     */
+    TSharedPtr<FJsonObject> WriteActorPropertyPath(AActor* Actor, const FString& ActorName, const FString& PropertyName,
+                                                   const FMCPPropertyPathResult& Resolved,
+                                                   const TSharedPtr<FJsonValue>& PropertyValue)
+    {
+        FUnrealMCPCommonUtils::MarkActorModified(Actor);
+
+        const TSharedPtr<FJsonValue> ValueBefore = FUnrealMCPCommonUtils::PropertyValueToJson(Resolved.Property, Resolved.Address);
+        const FWriteResult WriteResult = FMCPPropertyReflector::FromJson(Resolved.Property, Resolved.Address, PropertyName, PropertyValue);
+        if (!WriteResult.bSuccess)
+        {
+            const FString Code = WriteResult.ErrorCode.IsEmpty() ? FString(TEXT("write_failed")) : WriteResult.ErrorCode;
+            TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(Code, WriteResult.ErrorMessage);
+            Response->SetStringField(TEXT("property_path"), PropertyName);
+            Response->SetStringField(TEXT("resolved_property"), Resolved.Property->GetName());
+            FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("candidates"), WriteResult.Candidates);
+            FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("available_fields"), WriteResult.AvailableFields);
+            FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("supported_shapes"), WriteResult.SupportedShapes);
+            if (ValueBefore.IsValid())
+            {
+                Response->SetField(TEXT("property_value_before"), ValueBefore);
+            }
+            if (!WriteResult.Hint.IsEmpty())
+            {
+                Response->SetStringField(TEXT("hint"), WriteResult.Hint);
+            }
+            return Response;
+        }
+
+        // The details-panel seam: consumers that re-read the value in PostEditChangeProperty (post process
+        // volumes, cloth, physics) only pick it up once the owner has been told something changed.
+        FPropertyChangedEvent ChangeEvent(Resolved.Property);
+        Actor->PostEditChangeProperty(ChangeEvent);
+
+        return MakeActorPropertyWriteResponse(Actor, ActorName, PropertyName, Resolved.Property, Resolved.Address, nullptr);
+    }
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActor(const TSharedPtr<FJsonObject>& Params)
@@ -412,7 +504,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TShare
             const bool bCollected = bFlush && bNameStillTaken;
             if (bCollected)
             {
-                CollectGarbage(RF_NoFlags);
+                UnrealMCP::CollectGarbageUnlessPythonIsRunning(TEXT("delete_actor flush"));
                 bNameStillTaken = IsNameStillTaken();
             }
 
@@ -573,32 +665,70 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorProperty(const T
     
     TSharedPtr<FJsonValue> PropertyValue = Params->Values.FindRef(TEXT("property_value"));
 
-    // `Component.Property`: the properties callers reach for first (light intensity, camera FOV, a static
-    // mesh, component visibility) live on the COMPONENT, and set_component_property is no substitute - it
-    // writes a Blueprint's SCS template and has no answer for an actor already standing in the level
-    // (measured 2026-10-09: `intensity` -> "Property not found: intensity", and the only route that worked
-    // was python: get_component_by_class(DirectionalLightComponent).set_intensity()).
+    // A dotted name has two meanings, and they are tried in the order that keeps the documented one first:
+    //   1. '<component>.<property>' - the component selector. The properties callers reach for first (light
+    //      intensity, camera FOV, a static mesh, component visibility) live on the COMPONENT, and
+    //      set_component_property is no substitute - it writes a Blueprint's SCS template and has no answer
+    //      for an actor already standing in the level (measured 2026-10-09: `intensity` -> "Property not
+    //      found: intensity", and the only route that worked was python:
+    //      get_component_by_class(DirectionalLightComponent).set_intensity()).
+    //   2. a path INSIDE the actor - "Settings.bOverride_AutoExposureMethod" names a field of the
+    //      FPostProcessSettings struct property `Settings`. No component selector can reach that, and no
+    //      amount of property-name guessing on the actor class can either: the dot is the only way to write
+    //      it. The grammar is the reflector's, i.e. the same one set_object_property and reflect_probe
+    //      resolve, so the accepted spelling cannot drift between the actor commands and the reflection ones.
     UObject* WriteTarget = TargetActor;
     FString LookupName = PropertyName;
     FString ComponentSelector;
     FString DottedName;
-    if (PropertyName.Split(TEXT("."), &ComponentSelector, &DottedName) && !ComponentSelector.IsEmpty() && !DottedName.IsEmpty())
+    const bool bDotted = PropertyName.Split(TEXT("."), &ComponentSelector, &DottedName)
+        && !ComponentSelector.IsEmpty() && !DottedName.IsEmpty();
+
+    UActorComponent* SelectedComponent = bDotted
+        ? FUnrealMCPCommonUtils::FindActorComponentBySelector(TargetActor, ComponentSelector)
+        : nullptr;
+    if (SelectedComponent)
     {
-        UActorComponent* Component = FUnrealMCPCommonUtils::FindActorComponentBySelector(TargetActor, ComponentSelector);
-        if (!Component)
+        WriteTarget = SelectedComponent;
+        LookupName = DottedName;
+    }
+    else if (bDotted)
+    {
+        const FMCPPropertyPathResult Resolved = FMCPPropertyReflector::ResolvePath(TargetActor, PropertyName);
+        if (Resolved.IsResolved())
         {
-            TArray<FString> Components;
-            FUnrealMCPCommonUtils::DescribeActorComponents(TargetActor, Components);
-            TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("component_not_found"),
-                FString::Printf(TEXT("'%s' is not a component of '%s'"), *ComponentSelector, *ActorName));
-            FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("components"), Components);
-            Response->SetStringField(TEXT("hint"),
-                TEXT("the part before the dot is a component: its object name or its class name (U prefix and "
-                     "'Component' suffix optional)"));
+            return WriteActorPropertyPath(TargetActor, ActorName, PropertyName, Resolved, PropertyValue);
+        }
+
+        // The first segment resolved as a field of the actor, so the walk DID get inside it and stopped on a
+        // later segment: that is a path problem, and the component answer would send the caller the wrong way.
+        // Report the step that failed, with its legal names.
+        if (!Resolved.ResolvedPrefix.IsEmpty())
+        {
+            TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(Resolved.ErrorCode, Resolved.ErrorMessage);
+            Response->SetStringField(TEXT("path_prefix"), Resolved.ResolvedPrefix);
+            FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("candidates"), Resolved.Candidates);
+            if (!Resolved.Hint.IsEmpty())
+            {
+                Response->SetStringField(TEXT("hint"), Resolved.Hint);
+            }
             return Response;
         }
-        WriteTarget = Component;
-        LookupName = DottedName;
+
+        // Neither route: the prefix is not a component and not a field of the actor either. Answer with BOTH
+        // attempts, so a caller is not left thinking a component was the only possibility.
+        TArray<FString> Components;
+        FUnrealMCPCommonUtils::DescribeActorComponents(TargetActor, Components);
+        TSharedPtr<FJsonObject> Response = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("component_not_found"),
+            FString::Printf(TEXT("'%s' is neither a component of '%s' nor a field of it"), *ComponentSelector, *ActorName));
+        FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("components"), Components);
+        Response->SetStringField(TEXT("path_error"), Resolved.ErrorMessage);
+        FUnrealMCPCommonUtils::AddStringArrayField(Response, TEXT("path_candidates"), Resolved.Candidates);
+        Response->SetStringField(TEXT("hint"),
+            TEXT("the part before the dot is a component - its object name or its class name (U prefix and "
+                 "'Component' suffix optional) - or the name of a property on the actor that holds a struct "
+                 "or an object; in that case the rest of the path is a field inside it"));
+        return Response;
     }
 
     // Set the property using our utility function
@@ -608,32 +738,10 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSetActorProperty(const T
     if (FUnrealMCPCommonUtils::SetObjectProperty(WriteTarget, LookupName, PropertyValue, ErrorMessage,
                                                  nullptr, &ErrorCode))
     {
-        // Property set successfully
-        TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-        ResultObj->SetStringField(TEXT("actor"), ActorName);
-        ResultObj->SetStringField(TEXT("property"), PropertyName);
-        if (WriteTarget != TargetActor)
-        {
-            // Which component it landed on: the selector was matched, not echoed, so say what matched.
-            ResultObj->SetStringField(TEXT("component"), WriteTarget->GetName());
-        }
-        ResultObj->SetBoolField(TEXT("success"), true);
-
-        // Read back from the object the write landed on: a `UPROPERTY(Setter = ...)` field is often only a
-        // mirror of the state the engine reads, so "the call succeeded" has to stay separable from "the
-        // value is what was asked for" (see the Setter note on InvokePropertySetter).
-        if (FProperty* Written = FUnrealMCPCommonUtils::FindPropertyByNameNormalized(WriteTarget->GetClass(), LookupName))
-        {
-            if (TSharedPtr<FJsonValue> ValueAfter = FUnrealMCPCommonUtils::PropertyValueToJson(
-                    Written, Written->ContainerPtrToValuePtr<void>(WriteTarget)))
-            {
-                ResultObj->SetField(TEXT("property_value_after"), ValueAfter);
-            }
-        }
-
-        // Also include the full actor details
-        ResultObj->SetObjectField(TEXT("actor_details"), FUnrealMCPCommonUtils::ActorToJsonObject(TargetActor, true));
-        return ResultObj;
+        FProperty* Written = FUnrealMCPCommonUtils::FindPropertyByNameNormalized(WriteTarget->GetClass(), LookupName);
+        return MakeActorPropertyWriteResponse(TargetActor, ActorName, PropertyName, Written,
+            Written ? Written->ContainerPtrToValuePtr<void>(WriteTarget) : nullptr,
+            WriteTarget != TargetActor ? WriteTarget : nullptr);
     }
 
     // Failure: answer with a ROUTE, not just the reason. Attached below: this actor's components, and - for
@@ -981,12 +1089,28 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
 
     auto SavePng = [&FilePath, &Source, &CameraJson](int32 Width, int32 Height, const TArray<FColor>& Pixels) -> TSharedPtr<FJsonObject>
     {
+        // Force opaque alpha. A viewport backbuffer carries no meaningful alpha - ReadPixels hands it back
+        // as 0 - and every PNG reader treats A=0 as fully transparent, composing the image over black. The
+        // result is that a perfectly lit capture "looks black" and gets triaged as "the scene is empty",
+        // which cost two diagnosis rounds on 2026-10-12 before anyone sampled the RGB. These captures are
+        // opaque images, so the file should say so instead of leaving the viewer to decide.
+        //
+        // Note this is NOT a gamma conversion: ReadPixels on the display-referred backbuffer already
+        // returns sRGB-encoded bytes (measured: the sand palette entry #EFAC66 comes back as ~250/178/128,
+        // i.e. display-referred, not the linear 0.863/0.413/0.133). Do not "fix" a linear->sRGB story here.
+        TArray<FColor> OpaquePixels;
+        OpaquePixels.Reserve(Pixels.Num());
+        for (const FColor& Pixel : Pixels)
+        {
+            OpaquePixels.Emplace(Pixel.R, Pixel.G, Pixel.B, 255);
+        }
+
         // PNGCompressImageArray, NOT the deprecated CompressImageArray: the latter forwards to
         // ThumbnailCompressImageArray, which writes a JPEG - so every capture was a JPEG byte stream in a
         // .png file (measured 2026-10-09: the file started FF D8 FF E0 ... JFIF, and a caller checking the
         // PNG magic declared the capture broken). See Docs/MCP_Tool_Defects_2026-10-09.md D3.
         TArray64<uint8> CompressedBitmap;
-        FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels), CompressedBitmap);
+        FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(OpaquePixels), CompressedBitmap);
         if (!FFileHelper::SaveArrayToFile(CompressedBitmap, *FilePath))
         {
             return nullptr;

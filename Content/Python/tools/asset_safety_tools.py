@@ -68,17 +68,19 @@ def register_asset_safety_tools(mcp: FastMCP):
 
         Returns:
             Dict with deleted, was_redirector, blockers, detached ([] unless force),
-            would_clear/would_delete/would_fail (dry_run) and, when deleted is false, a
-            `reason` naming the measured cause (blocked_by_referencers /
-            referencers_not_detachable / would_fail_package_file_read_only /
+            would_clear/would_delete/would_fail (dry_run). `deleted` is true only when BOTH the
+            package file is gone and the object is gone from memory (the response reports
+            `registry_entry_remaining` so the three-way state is checkable).
+            A REFUSAL IS A FAILURE: when the delete cannot happen the reply is
+            success=false with `error_code` naming the measured cause
+            (blocked_by_referencers / referencers_not_detachable / world_partition_open /
+            world_partition_referenced / would_fail_package_file_read_only /
             would_fail_asset_editor_open / would_fail_unreachable_referencers /
-            living_objects_in_package / memory_pinned / package_file_locked) plus
-            `referencers` and `workarounds[]` (the routes that do work: close the
-            editor, overwrite the files on disk, copy under another name). `deleted`
-            is true only when BOTH the package file is gone and the object is gone
-            from memory (and the response reports `registry_entry_remaining` so the
-            three-way state is checkable) - a blueprint that could not be removed is
-            reported as deleted=false with the reason, never as a silent success.
+            living_objects_in_package / memory_pinned / package_file_locked), plus
+            `referencers` and `workarounds[]` (the routes that do work: close the editor,
+            overwrite the files on disk, copy under another name). It is never reported as a
+            success that deleted nothing. A `dry_run` is a successful QUERY: it answers
+            success=true with would_delete / would_fail_reason and carries no `deleted` field.
             When the target itself is a redirector the command runs the engine's
             referencer fixup instead (the single-asset form of the Content Browser's
             "Fix Up Redirectors") and reports redirection_fixed.

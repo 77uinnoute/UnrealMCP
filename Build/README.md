@@ -44,7 +44,7 @@ python Build\check_command_consistency.py --baseline  # 打印"旧链命令名 v
 
 判定口径：
 
-- **ERROR（退出码 1）**：python 发送了未注册的命令；**已注册、未标 `hidden`、且没有任何 python 工具发送的命令**（死命令，或漏了工具包装）；两个 `@mcp.tool` 重名；技能文档点名了既不是工具也不是命令的名字；工具没有暴露它转发命令的必填参数；**源码里重新出现 `CommandType == TEXT("...")` 形式的命令名比较**。
+- **ERROR（退出码 1）**：python 发送了未注册的命令；**已注册、未标 `hidden`、且没有任何 python 工具发送的命令**（死命令，或漏了工具包装）；两个 `@mcp.tool` 重名；技能文档点名了既不是工具也不是命令的名字；**技能/规则的 YAML frontmatter 解析失败**（agent 的 skill loader 会解析它，本门禁原先只做文本扫描 ⇒ 缺陷直到加载时才炸，实测 `unreal-video-capture`）；工具没有暴露它转发命令的必填参数；**源码里重新出现 `CommandType == TEXT("...")` 形式的命令名比较**。
 - **WARNING（不影响退出码）**：工具发送了命令没有内联声明的键（参数规格可能由 helper 构造，提取器看不见）；没有任何技能文档提到的工具。
 - 白名单：`Build/command_consistency_allowlist.txt`，每行必须写原因；无原因的行本身报 ERROR。
 
@@ -56,6 +56,10 @@ python Build\check_command_consistency.py --baseline  # 打印"旧链命令名 v
 - 发送点按 `send_command` / `_send` / `_bridge` / `_bridge_result` / `send_mcp_command` 的**首个实参**识别；实参可以是字面量，也可以是模块级 `NAME = "literal"` 常量（`mcp_material_preview.py` 的 `PREVIEW_COMMAND` 就是这种）。
 - 新增命令时，python 包装里请保持**字面量** `send_command("命令名", …)`：命令名变成局部变量会让门禁看不见这个发送点。
 - 工具文档提及：反引号 token 若**已是一个已知工具/命令**名，允许带尾部调用签名（`` `add_widget(…)` `` 计为提及 `add_widget`）；未知标识符带签名则整条忽略（那是引擎/python API 引用，如 `get_bone_pose(...)`）。技能 frontmatter `description` 的触发清单（`/` 分隔段）同样计入提及。
+  ⇒ **引用引擎 / python API 时要么写成可调用形状，要么带属主点号**：`unreal.LevelEditorSubsystem.load_level(…)`、`unreal.MovieSceneTrackExtensions.get_sections(…)`。
+  反面写法是"反引号包一个裸的小写动词名、后面不跟 `(`"（`load_level`、`get_sections`、`get_possessables`…）：那会被当成**点名了一个不存在的工具**而报 ERROR。
+  `unreal-video-capture` 的 8 条 MRQ/引擎 API 引用就是这么踩的（2026-10-15 已按上面两种形状改写，门禁转 OK）。
+  个别确实无法改写的可以进白名单，但必须写清原因（例如 `compile_performed` 是某个命令的**响应字段**名）。
 
 
 ## 计数口径

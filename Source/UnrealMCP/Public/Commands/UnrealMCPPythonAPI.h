@@ -22,6 +22,13 @@
  *       "connect_material_expression",
  *       json.dumps({"params": {...}}))
  *   # resp is a JSON string with the same shape as the TCP response.
+ *
+ * All three spellings of the parameter body are accepted:
+ *   {"name": "x"}                                        # bare params object
+ *   {"type": "create_umg_widget_blueprint", "params": {...}}
+ *   {"params": {...}}                                    # envelope without a marker
+ * The third form is ambiguous with a command that has a real argument named "params", so it is
+ * resolved against that command's declared parameter names (see NormalizeParamsBody).
  */
 UCLASS(BlueprintType)
 class UNREALMCP_API UUnrealMCPPythonAPI : public UObject

@@ -27,11 +27,12 @@ FUnrealMCPUMGCommands::FUnrealMCPUMGCommands()
 
 void FUnrealMCPUMGCommands::RegisterCommands(FMCPCommandRegistry& Registry)
 {
-    MCP_REGISTER_COMMAND(Registry, "create_umg_widget_blueprint", "umg", "Create a Widget Blueprint with a root Canvas Panel, in the requested content folder. parent_class picks what it derives from: a user widget class name (default UserWidget) or the path of an existing widget blueprint to derive from.",
+    MCP_REGISTER_COMMAND(Registry, "create_umg_widget_blueprint", "umg", "Create a Widget Blueprint in the requested content folder. parent_class picks what it derives from: a user widget class name (default UserWidget) or the path of an existing widget blueprint to derive from. root_widget_class picks the widget the tree is rooted at (default CanvasPanel, which is what the editor creates); a root that is not a canvas has an intrinsic size, so a widget nested in a box is measured by it instead of collapsing to 0x0.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Asset name, or a full asset path like /Game/UI/WBP_HUD")),
             MCPParamOpt(TEXT("path"), TEXT("string"), TEXT("Content folder for the new asset, e.g. /Game/UI (default /Game/Widgets). Ignored when 'name' is already a full path.")),
             MCPParamOpt(TEXT("parent_class"), TEXT("string"), TEXT("Parent class: a user widget class name (UserWidget / CommonUserWidget / ...) or a widget blueprint asset path to derive from (default UserWidget)")),
+            MCPParamOpt(TEXT("root_widget_class"), TEXT("string"), TEXT("Widget class to use as the tree root: any concrete widget class (SizeBox / Border / VerticalBox / Overlay / ScrollBox / ...), or \"none\" for an empty tree (the first add_widget then becomes the root). Default CanvasPanel, i.e. unchanged.")),
             MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save after the command; default true. Pass false to batch writes and flush once yourself.")),
         }), MCPFlags(false, /*bMutatesGraph=*/true),
         [this](const TSharedPtr<FJsonObject>& Params) { return EnsurePersistReceipt(Params, HandleCreateUMGWidgetBlueprint(Params)); });
@@ -350,6 +351,11 @@ void FUnrealMCPUMGCommands::RegisterCommands(FMCPCommandRegistry& Registry)
 
 TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(const TSharedPtr<FJsonObject>& Params)
 {
+	if (TSharedPtr<FJsonObject> Busy = FUnrealMCPCommonUtils::RefuseAssetLifecycleInPlayMode(TEXT("create_umg_widget_blueprint")))
+	{
+		return Busy;
+	}
+
 	// Get required parameters
 	FString BlueprintName;
 	if (!Params->TryGetStringField(TEXT("name"), BlueprintName))
@@ -386,7 +392,7 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 	const FString FullPath = PackagePath + TEXT("/") + AssetName;
 
 	// Check if asset already exists
-	if (UEditorAssetLibrary::DoesAssetExist(FullPath))
+	if (FUnrealMCPCommonUtils::DoesAssetPackageExist(FullPath))
 	{
 		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("asset_exists"), FString::Printf(TEXT("Widget Blueprint '%s' already exists"), *BlueprintName));
 	}
@@ -449,11 +455,53 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("create_failed"), TEXT("Failed to create Widget Blueprint"));
 	}
 
-	// Add a default Canvas Panel if one doesn't exist
+	// Add a default root unless the caller asked for something else.
+	//
+	// CanvasPanel (the default, and what the editor itself creates via
+	// UUMGEditorProjectSettings::DefaultRootWidget) is a layout-less container: it positions children by
+	// anchors and reports no intrinsic size, so a widget rooted at one is measured as 0x0 by a parent
+	// box. A root of SizeBox / Border / Box does have one, which is the whole point of the parameter;
+	// "none" leaves the tree empty so the first add_widget becomes the root.
 	if (!WidgetBlueprint->WidgetTree->RootWidget)
 	{
-		UCanvasPanel* RootCanvas = WidgetBlueprint->WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass());
-		WidgetBlueprint->WidgetTree->RootWidget = RootCanvas;
+		FString RequestedRoot;
+		const bool bRootRequested = Params->TryGetStringField(TEXT("root_widget_class"), RequestedRoot)
+			&& !RequestedRoot.TrimStartAndEnd().IsEmpty();
+
+		const FString RootLabel = RequestedRoot.TrimStartAndEnd().ToLower();
+		const bool bNoRoot = bRootRequested
+			&& (RootLabel == TEXT("none") || RootLabel == TEXT("empty") || RootLabel == TEXT("null"));
+
+		if (!bNoRoot)
+		{
+			UClass* RootWidgetClass = UCanvasPanel::StaticClass();
+			if (bRootRequested)
+			{
+				TArray<FString> RootCandidates;
+				UClass* Resolved = ResolveWidgetClassByName(RequestedRoot, UWidget::StaticClass(), RootCandidates);
+				if (!Resolved)
+				{
+					return MakeListError(TEXT("invalid_root_widget_class"), FString::Printf(
+						TEXT("'%s' is not a widget class (a widget class name, or the path of a widget blueprint)"),
+						*RequestedRoot), TEXT("root_widget_classes"), RootCandidates);
+				}
+				if (Resolved->HasAnyClassFlags(CLASS_Abstract))
+				{
+					return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("abstract_root_widget_class"),
+						FString::Printf(TEXT("'%s' is abstract: a root must be a concrete widget (SizeBox / Border / VerticalBox / ...)"),
+							*Resolved->GetName()));
+				}
+				RootWidgetClass = Resolved;
+			}
+
+			UWidget* Root = WidgetBlueprint->WidgetTree->ConstructWidget<UWidget>(RootWidgetClass);
+			if (!Root)
+			{
+				return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("create_failed"),
+					FString::Printf(TEXT("could not construct a '%s' as the root widget"), *RootWidgetClass->GetName()));
+			}
+			WidgetBlueprint->WidgetTree->RootWidget = Root;
+		}
 	}
 
 	// Mark the package dirty and notify asset registry
@@ -468,6 +516,17 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 	ResultObj->SetStringField(TEXT("name"), BlueprintName);
 	ResultObj->SetStringField(TEXT("path"), FullPath);
 	ResultObj->SetStringField(TEXT("parent_class"), ParentClassLabel);
+	// What the tree ended up rooted at, so the caller can see which root it got (or that it got none).
+	if (const UWidget* RootWidget = WidgetBlueprint->WidgetTree ? WidgetBlueprint->WidgetTree->RootWidget.Get() : nullptr)
+	{
+		ResultObj->SetBoolField(TEXT("has_root"), true);
+		ResultObj->SetStringField(TEXT("root_widget_name"), RootWidget->GetName());
+		ResultObj->SetStringField(TEXT("root_widget_class"), RootWidget->GetClass()->GetName());
+	}
+	else
+	{
+		ResultObj->SetBoolField(TEXT("has_root"), false);
+	}
 	FinishWidgetWrite(WidgetBlueprint, Params, ResultObj);
 	return ResultObj;
 }

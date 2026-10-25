@@ -833,6 +833,16 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetComponentCollision
     ResultObj->SetArrayField(TEXT("failed"), Failed);
     ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
     ResultObj->SetNumberField(TEXT("failed_count"), Failed.Num());
+    // Every entry failing means nothing was written: report a failure rather than a success carrying
+    // a failed[] nobody checks.
+    if (Applied.Num() == 0 && Failed.Num() > 0)
+    {
+        ResultObj->SetBoolField(TEXT("success"), false);
+        ResultObj->SetStringField(TEXT("error_code"), TEXT("nothing_applied"));
+        ResultObj->SetStringField(TEXT("error"), FString::Printf(
+            TEXT("none of the %d entr%s was written (see failed[])"), Failed.Num(),
+            Failed.Num() == 1 ? TEXT("y") : TEXT("ies")));
+    }
     ResultObj->SetObjectField(TEXT("collision"), CollisionObj);
     AppendCompileResult(Blueprint, ResultObj);
     // Same consequence as set_component_property: the write landed on the SCS template, and the instances

@@ -840,6 +840,15 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetBlueprintVariableF
     ResultObj->SetArrayField(TEXT("failed"), Failed);
     ResultObj->SetNumberField(TEXT("applied_count"), Applied.Num());
     ResultObj->SetNumberField(TEXT("failed_count"), Failed.Num());
+    // Every flag failing means nothing changed: a failure, not a success with failed[] on the side.
+    if (Applied.Num() == 0 && Failed.Num() > 0)
+    {
+        ResultObj->SetBoolField(TEXT("success"), false);
+        ResultObj->SetStringField(TEXT("error_code"), TEXT("nothing_applied"));
+        ResultObj->SetStringField(TEXT("error"), FString::Printf(
+            TEXT("none of the %d fla%s was written (see failed[])"), Failed.Num(),
+            Failed.Num() == 1 ? TEXT("g") : TEXT("gs")));
+    }
     if (Variable)
     {
         ResultObj->SetObjectField(TEXT("flags"), MakeVariableFlagsJson(*Variable));
