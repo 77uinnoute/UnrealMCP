@@ -1750,7 +1750,7 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCloseAssetEditors(const 
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+    UObject* Asset = FUnrealMCPCommonUtils::LoadAssetTyped<UObject>(AssetPath);
     if (!Asset)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));

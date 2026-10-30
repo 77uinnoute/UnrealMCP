@@ -31,6 +31,8 @@ import logging
 from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -48,16 +50,9 @@ PARTICLE_CHECKS = ["sprite_material", "mesh_material", "light_sprite", "emitter_
 def register_particle_tools(mcp: FastMCP):
     """Register particle system tools with the MCP server."""
 
-    def _send(command: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Forward one command to the bridge; returns None when there is no connection."""
-        from unreal_mcp_server import get_unreal_connection
-
-        unreal = get_unreal_connection()
-        if not unreal:
-            return None
-
-        response = unreal.send_command(command, params)
-        return response
+    def _send(command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Forward one command to the bridge; raises when it did not succeed."""
+        return _bridge(command, params)
 
     @mcp.tool()
     def list_particle_emitters(ctx: Context, asset_path: str,
@@ -83,15 +78,10 @@ def register_particle_tools(mcp: FastMCP):
 
         Reads never create or modify an asset and never enter the undo stack.
         """
-        try:
-            params = {"asset_path": asset_path, "include_modules": include_modules}
-            if fields:
-                params["fields"] = fields
-            response = _send("list_particle_emitters", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error listing particle emitters: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "include_modules": include_modules}
+        if fields:
+            params["fields"] = fields
+        return _send("list_particle_emitters", params)
 
     @mcp.tool()
     def list_particle_modules(ctx: Context, asset_path: str, emitter_index: int,
@@ -108,15 +98,10 @@ def register_particle_tools(mcp: FastMCP):
         Returns:
             Same shape as list_particle_emitters but with a single emitter and a single LOD.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index, "lod_index": lod_index}
-            if fields:
-                params["fields"] = fields
-            response = _send("list_particle_modules", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error listing particle modules: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index, "lod_index": lod_index}
+        if fields:
+            params["fields"] = fields
+        return _send("list_particle_modules", params)
 
     @mcp.tool()
     def get_particle_module(ctx: Context, asset_path: str, emitter_index: int,
@@ -141,23 +126,18 @@ def register_particle_tools(mcp: FastMCP):
             properties, distributions: kind / distribution_class / constants / min_max /
             keys / sampled_value).
         """
-        try:
-            params = {
-                "asset_path": asset_path,
-                "emitter_index": emitter_index,
-                "module_index": module_index,
-                "lod_index": lod_index,
-            }
-            if module_class:
-                params["module_class"] = module_class
-            if slot:
-                params["slot"] = slot
+        params = {
+            "asset_path": asset_path,
+            "emitter_index": emitter_index,
+            "module_index": module_index,
+            "lod_index": lod_index,
+        }
+        if module_class:
+            params["module_class"] = module_class
+        if slot:
+            params["slot"] = slot
 
-            response = _send("get_particle_module", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error getting particle module: {e}")
-            return {"success": False, "message": str(e)}
+        return _send("get_particle_module", params)
 
     @mcp.tool()
     def create_particle_system(ctx: Context, name: str, folder: str = "/Game/Particles",
@@ -179,15 +159,10 @@ def register_particle_tools(mcp: FastMCP):
             Dict with asset_path, emitter_count, emitters and the new emitter_index.
             Errors: asset_exists (delete it or pick another name) / invalid_params.
         """
-        try:
-            params = {"name": name, "folder": folder, "emitter_class": emitter_class, "lod_count": lod_count}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("create_particle_system", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error creating particle system: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"name": name, "folder": folder, "emitter_class": emitter_class, "lod_count": lod_count}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("create_particle_system", params)
 
     @mcp.tool()
     def add_particle_emitter(ctx: Context, asset_path: str, emitter_class: str = "Sprite",
@@ -212,16 +187,11 @@ def register_particle_tools(mcp: FastMCP):
             Dict with emitter_index of the new emitter, emitter_count and emitters, plus
             adjusted_emitters when other emitters had to be resized.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_class": emitter_class,
-                      "insert_index": insert_index, "lod_count": lod_count}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("add_particle_emitter", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error adding particle emitter: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_class": emitter_class,
+                  "insert_index": insert_index, "lod_count": lod_count}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("add_particle_emitter", params)
 
     @mcp.tool()
     def remove_particle_emitter(ctx: Context, asset_path: str, emitter_index: int,
@@ -237,15 +207,10 @@ def register_particle_tools(mcp: FastMCP):
             Dict with the removed emitter_index, the remaining emitter_count and emitters.
             Errors: emitter_index_out_of_range (candidates list the valid indices).
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("remove_particle_emitter", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error removing particle emitter: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("remove_particle_emitter", params)
 
     @mcp.tool()
     def add_particle_module(ctx: Context, asset_path: str, emitter_index: int, module_class: str = None,
@@ -291,23 +256,18 @@ def register_particle_tools(mcp: FastMCP):
             module_class_not_found (with class candidates) / unsupported_module_slot /
             lod_index_out_of_range / invalid_params (mixed shapes) / invalid_detail.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "lod_index": lod_index, "insert_index": insert_index, "slot": slot,
-                      "hide_sprite": hide_sprite, "detail": detail}
-            if module_class:
-                params["module_class"] = module_class
-            if module_classes:
-                params["module_classes"] = module_classes
-            if copy_modules_from_emitter >= 0:
-                params["copy_modules_from_emitter"] = copy_modules_from_emitter
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("add_particle_module", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error adding particle module: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "lod_index": lod_index, "insert_index": insert_index, "slot": slot,
+                  "hide_sprite": hide_sprite, "detail": detail}
+        if module_class:
+            params["module_class"] = module_class
+        if module_classes:
+            params["module_classes"] = module_classes
+        if copy_modules_from_emitter >= 0:
+            params["copy_modules_from_emitter"] = copy_modules_from_emitter
+        if auto_close:
+            params["auto_close"] = True
+        return _send("add_particle_module", params)
 
     @mcp.tool()
     def remove_particle_module(ctx: Context, asset_path: str, emitter_index: int,
@@ -333,18 +293,13 @@ def register_particle_tools(mcp: FastMCP):
             generator module clears that slot and reports it in cleared_slots. The class
             lookup also finds modules that live in a slot instead of the module list.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "module_index": module_index, "lod_index": lod_index}
-            if module_class:
-                params["module_class"] = module_class
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("remove_particle_module", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error removing particle module: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "module_index": module_index, "lod_index": lod_index}
+        if module_class:
+            params["module_class"] = module_class
+        if auto_close:
+            params["auto_close"] = True
+        return _send("remove_particle_module", params)
 
     @mcp.tool()
     def set_particle_module_property(ctx: Context, asset_path: str, emitter_index: int,
@@ -386,20 +341,15 @@ def register_particle_tools(mcp: FastMCP):
             available_fields) / type_mismatch / unsupported_module_property (distributions
             have their own tool) / module_not_found / ambiguous_module / invalid_detail.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "property_name": property_name, "property_value": property_value,
-                      "module_index": module_index, "lod_index": lod_index,
-                      "detail": detail, "return_state": return_state}
-            if module_class:
-                params["module_class"] = module_class
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_module_property", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error setting particle module property: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "property_name": property_name, "property_value": property_value,
+                  "module_index": module_index, "lod_index": lod_index,
+                  "detail": detail, "return_state": return_state}
+        if module_class:
+            params["module_class"] = module_class
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_module_property", params)
 
     @mcp.tool()
     def set_particle_distribution(ctx: Context, asset_path: str, emitter_index: int,
@@ -437,23 +387,18 @@ def register_particle_tools(mcp: FastMCP):
             not_a_distribution_property (candidates list the distribution properties) /
             invalid_value (key/value shape).
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "property_name": property_name, "kind": kind,
-                      "module_index": module_index, "lod_index": lod_index, "detail": detail}
-            if values is not None:
-                params["values"] = values
-            if keys is not None:
-                params["keys"] = keys
-            if module_class:
-                params["module_class"] = module_class
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_distribution", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error setting particle distribution: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "property_name": property_name, "kind": kind,
+                  "module_index": module_index, "lod_index": lod_index, "detail": detail}
+        if values is not None:
+            params["values"] = values
+        if keys is not None:
+            params["keys"] = keys
+        if module_class:
+            params["module_class"] = module_class
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_distribution", params)
 
     @mcp.tool()
     def set_particle_lod_count(ctx: Context, asset_path: str, emitter_index: int,
@@ -477,15 +422,10 @@ def register_particle_tools(mcp: FastMCP):
             Dict with lod_index (the last level), emitter_count and emitters, plus
             adjusted_emitters listing the other emitters that were resized.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index, "lod_count": lod_count}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_lod_count", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error setting particle LOD count: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index, "lod_count": lod_count}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_lod_count", params)
 
     @mcp.tool()
     def copy_particle_lod(ctx: Context, asset_path: str, emitter_index: int,
@@ -507,16 +447,11 @@ def register_particle_tools(mcp: FastMCP):
             Dict with lod_index of the copy, emitter_count and emitters, plus adjusted_emitters
             listing the other emitters that received a level too.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "source_lod_index": source_lod_index, "insert_index": insert_index}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("copy_particle_lod", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error copying particle LOD: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "source_lod_index": source_lod_index, "insert_index": insert_index}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("copy_particle_lod", params)
 
     @mcp.tool()
     def set_particle_lod_distance(ctx: Context, asset_path: str, emitter_index: int,
@@ -535,16 +470,11 @@ def register_particle_tools(mcp: FastMCP):
             Dict with property_value_before / property_value_after, lod_index,
             emitter_count and emitters.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "lod_index": lod_index, "distance": distance}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_lod_distance", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error setting particle LOD distance: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "lod_index": lod_index, "distance": distance}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_lod_distance", params)
 
     @mcp.tool()
     def set_particle_bursts(ctx: Context, asset_path: str, emitter_index: int,
@@ -575,16 +505,11 @@ def register_particle_tools(mcp: FastMCP):
             was: failed_index plus available_fields (the accepted burst fields) and
             unchanged: true.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "bursts": bursts, "lod_index": lod_index, "detail": detail}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_bursts", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error setting particle bursts: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "bursts": bursts, "lod_index": lod_index, "detail": detail}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_bursts", params)
 
     @mcp.tool()
     def move_particle_module(ctx: Context, asset_path: str, emitter_index: int, to_index: int,
@@ -614,19 +539,14 @@ def register_particle_tools(mcp: FastMCP):
             generator modules keep the engine's position) / invalid_params (to_index out of range,
             with candidates).
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "to_index": to_index, "module_index": module_index,
-                      "lod_index": lod_index, "detail": detail}
-            if module_class:
-                params["module_class"] = module_class
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("move_particle_module", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error moving particle module: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "to_index": to_index, "module_index": module_index,
+                  "lod_index": lod_index, "detail": detail}
+        if module_class:
+            params["module_class"] = module_class
+        if auto_close:
+            params["auto_close"] = True
+        return _send("move_particle_module", params)
 
     @mcp.tool()
     def set_particle_emitter_name(ctx: Context, asset_path: str, emitter_index: int, name: str,
@@ -648,16 +568,11 @@ def register_particle_tools(mcp: FastMCP):
         Returns:
             Dict with emitter_index, name_before, name_after, emitter_count and emitters.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index, "name": name,
-                      "detail": detail}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_emitter_name", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error renaming particle emitter: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index, "name": name,
+                  "detail": detail}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_emitter_name", params)
 
     @mcp.tool()
     def set_particle_lod_enabled(ctx: Context, asset_path: str, emitter_index: int, lod_index: int,
@@ -680,16 +595,11 @@ def register_particle_tools(mcp: FastMCP):
             Dict with emitter_index, lod_index, lod_enabled, emitter_count and emitters.
             Errors: lod_index_out_of_range (with candidates) / invalid_params (LOD 0 disabled).
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index,
-                      "lod_index": lod_index, "enabled": enabled, "detail": detail}
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("set_particle_lod_enabled", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error setting particle LOD enabled: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index,
+                  "lod_index": lod_index, "enabled": enabled, "detail": detail}
+        if auto_close:
+            params["auto_close"] = True
+        return _send("set_particle_lod_enabled", params)
 
     @mcp.tool()
     def duplicate_particle_emitter(ctx: Context, asset_path: str, emitter_index: int, name: str = None,
@@ -713,17 +623,12 @@ def register_particle_tools(mcp: FastMCP):
             LOD), emitter_count and emitters. The whole system keeps one LOD count; emitters that
             had to be adjusted are listed in adjusted_emitters.
         """
-        try:
-            params = {"asset_path": asset_path, "emitter_index": emitter_index, "detail": detail}
-            if name:
-                params["name"] = name
-            if auto_close:
-                params["auto_close"] = True
-            response = _send("duplicate_particle_emitter", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error duplicating particle emitter: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path, "emitter_index": emitter_index, "detail": detail}
+        if name:
+            params["name"] = name
+        if auto_close:
+            params["auto_close"] = True
+        return _send("duplicate_particle_emitter", params)
 
     @mcp.tool()
     def validate_particle_system(ctx: Context, asset_path: str, emitter_index: int = -1,
@@ -749,16 +654,11 @@ def register_particle_tools(mcp: FastMCP):
             checks: [{id, severity ("error" / "warning" / "info"), target, message, fix_hint}].
             Nothing is modified and the call is safe to repeat.
         """
-        try:
-            params = {"asset_path": asset_path}
-            if emitter_index >= 0:
-                params["emitter_index"] = emitter_index
-            if checks:
-                params["checks"] = checks
-            response = _send("validate_particle_system", params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error validating particle system: {e}")
-            return {"success": False, "message": str(e)}
+        params = {"asset_path": asset_path}
+        if emitter_index >= 0:
+            params["emitter_index"] = emitter_index
+        if checks:
+            params["checks"] = checks
+        return _send("validate_particle_system", params)
 
     logger.info("Particle tools registered successfully")

@@ -285,6 +285,42 @@ public:
     // Generic asset utilities
     // Find any loaded asset by path, package name, or short name (supports Blueprint, Material, MaterialFunction, MaterialInstance, etc.)
     static UObject* FindAsset(const FString& AssetName);
+    /**
+     * Load one asset from a CALLER-SUPPLIED path.
+     *
+     * Use this instead of `LoadObject<T>(nullptr, *AssetPath)` for anything that came out of the JSON
+     * parameters. LoadObject hands the string straight to FPackageName, and a value that is not a long
+     * package path ("MCP_Probe_Missing", a typo'd asset name, an empty-ish placeholder) TRIPS
+     * `checkf` in PackageName.cpp:967 `LongPackageNameToFilename failed to convert ... Path does not
+     * map to any roots` - a fatal error, not an exception: no try/catch, no python `except`, the editor
+     * is gone (measured 2026-10-30, from a read-only get_material_* call).
+     *
+     * FindAsset resolves the same callers' inputs (object path / package path / short name) while
+     * never calling the loader on a path it has not validated, so a bad name is a null result -
+     * the command can answer asset_not_found instead of dying.
+     */
+    template <typename T>
+    static T* LoadAssetTyped(const FString& AssetPath)
+    {
+        return Cast<T>(FindAsset(AssetPath));
+    }
+
+    /**
+     * Normalize and vet a CALLER-SUPPLIED content folder before it reaches CreatePackage / the asset tools.
+     *
+     * Returns true with OutFolder trimmed ("/Game/A/" -> "/Game/A"). Returns false with OutError when the
+     * folder is not a long package path the engine can mount - `CreatePackage("/MyStuff/X")` is a
+     * PackageName.cpp:967 FATAL, not an error return, so a typo in a folder parameter would otherwise
+     * delete the editor. Callers answer `invalid_package_path` with the returned reason.
+     */
+    static bool NormalizeContentFolder(const FString& InFolder, FString& OutFolder, FString& OutError);
+
+    /**
+     * Same check written as the reply: returns a ready `invalid_package_path` error, or null when the
+     * folder is usable. `OutFolder` receives the normalized form either way.
+     */
+    static TSharedPtr<FJsonObject> ValidateContentFolderOrError(const FString& InFolder, const TCHAR* FieldName,
+                                                               FString& OutFolder);
     // Resolve a class reference written any of the ways callers write them:
     //   1. an object path ("/Script/Engine.Character", "/Game/BP/BP_X.BP_X_C") - FindObject then LoadClass
     //   2. the class name as it really is ("Character", "AnimNotify", "AnimNotifyState", "AnimInstance")

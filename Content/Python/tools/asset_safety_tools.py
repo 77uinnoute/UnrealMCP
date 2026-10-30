@@ -20,6 +20,8 @@ import logging
 from typing import Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -85,28 +87,9 @@ def register_asset_safety_tools(mcp: FastMCP):
             referencer fixup instead (the single-asset form of the Content Browser's
             "Fix Up Redirectors") and reports redirection_fixed.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "force": force, "dry_run": dry_run}
-            logger.info(f"Safely deleting asset: {asset_path} (force={force}, dry_run={dry_run})")
-            response = unreal.send_command("safe_delete_asset", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error safely deleting asset: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "force": force, "dry_run": dry_run}
+        logger.info(f"Safely deleting asset: {asset_path} (force={force}, dry_run={dry_run})")
+        return _bridge("safe_delete_asset", params)
 
     @mcp.tool()
     def delete_asset_with_level_switch(ctx: Context, asset_path: str, target_level: Optional[str] = None,
@@ -135,30 +118,11 @@ def register_asset_safety_tools(mcp: FastMCP):
             (level_dirty / level_save_failed / target_level_not_found /
             target_level_is_world_partition / no_editor_world).
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "save_dirty": save_dirty, "force": force}
-            if target_level is not None:
-                params["target_level"] = target_level
-            logger.info(f"Deleting asset across a level switch: {asset_path}")
-            response = unreal.send_command("delete_asset_with_level_switch", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error deleting asset across a level switch: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "save_dirty": save_dirty, "force": force}
+        if target_level is not None:
+            params["target_level"] = target_level
+        logger.info(f"Deleting asset across a level switch: {asset_path}")
+        return _bridge("delete_asset_with_level_switch", params)
 
     @mcp.tool()
     def list_asset_blockers(ctx: Context, asset_path: str) -> Dict[str, Any]:
@@ -174,28 +138,8 @@ def register_asset_safety_tools(mcp: FastMCP):
         Returns:
             Dict with blockers (package names) and redirectors (object paths)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path}
-            logger.info(f"Listing asset blockers: {asset_path}")
-            response = unreal.send_command("list_asset_blockers", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error listing asset blockers: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Listing asset blockers: {asset_path}")
+        return _bridge("list_asset_blockers", {"asset_path": asset_path})
 
     @mcp.tool()
     def list_broken_references(ctx: Context, scope: str, kinds: list = None,
@@ -234,32 +178,13 @@ def register_asset_safety_tools(mcp: FastMCP):
             severity / detail), broken_count, scanned, assets_in_scope, truncated,
             loaded_only, kinds. Errors: invalid_params (scope unknown, unknown kind).
         """
-        from unreal_mcp_server import get_unreal_connection
+        params: Dict[str, Any] = {"scope": scope, "load_missing": load_missing,
+                                  "max_results": max_results}
+        if kinds:
+            params["kinds"] = kinds
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"scope": scope, "load_missing": load_missing,
-                                      "max_results": max_results}
-            if kinds:
-                params["kinds"] = kinds
-
-            logger.info(f"Listing broken references in: {scope}")
-            response = unreal.send_command("list_broken_references", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error listing broken references: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Listing broken references in: {scope}")
+        return _bridge("list_broken_references", params)
 
     @mcp.tool()
     def asset_status(ctx: Context, path: str) -> Dict[str, Any]:
@@ -284,28 +209,8 @@ def register_asset_safety_tools(mcp: FastMCP):
             on_disk=true / registry=false / in_memory=false; a merely unloaded asset
             still reads on_disk=true / registry=true.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"path": path}
-            logger.info(f"Asset status: {path}")
-            response = unreal.send_command("asset_status", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error reading asset status: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Asset status: {path}")
+        return _bridge("asset_status", {"path": path})
 
     @mcp.tool()
     def list_disk_only_assets(ctx: Context, dir: str) -> Dict[str, Any]:
@@ -325,28 +230,8 @@ def register_asset_safety_tools(mcp: FastMCP):
         Returns:
             Dict with disk_only (package paths), count and scanned_files.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"dir": dir}
-            logger.info(f"Listing disk-only assets under: {dir}")
-            response = unreal.send_command("list_disk_only_assets", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error listing disk-only assets: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Listing disk-only assets under: {dir}")
+        return _bridge("list_disk_only_assets", {"dir": dir})
 
     @mcp.tool()
     def move_asset(ctx: Context, asset_path: str, new_path: str, update_referencers: bool = True,
@@ -410,37 +295,18 @@ def register_asset_safety_tools(mcp: FastMCP):
             carry an error code: destination_exists / source_missing / invalid_destination /
             source_load_failed / in_pie / rename_failed.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "asset_path": asset_path,
-                "new_path": new_path,
-                "update_referencers": update_referencers,
-                "refresh_registry": refresh_registry,
-                "dry_run": dry_run,
-                "answer_dialogs": answer_dialogs,
-            }
-            if search_paths:
-                params["search_paths"] = search_paths
-            logger.info(f"Moving asset: {asset_path} -> {new_path} (dry_run={dry_run})")
-            response = unreal.send_command("move_asset", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error moving asset: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "asset_path": asset_path,
+            "new_path": new_path,
+            "update_referencers": update_referencers,
+            "refresh_registry": refresh_registry,
+            "dry_run": dry_run,
+            "answer_dialogs": answer_dialogs,
+        }
+        if search_paths:
+            params["search_paths"] = search_paths
+        logger.info(f"Moving asset: {asset_path} -> {new_path} (dry_run={dry_run})")
+        return _bridge("move_asset", params)
 
     @mcp.tool()
     def move_directory(ctx: Context, dir: str, new_dir: str, update_referencers: bool = True,
@@ -486,37 +352,18 @@ def register_asset_safety_tools(mcp: FastMCP):
             the full per-asset result. Refusals: destination_exists / source_missing /
             invalid_destination / in_pie.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "dir": dir,
-                "new_dir": new_dir,
-                "update_referencers": update_referencers,
-                "refresh_registry": refresh_registry,
-                "dry_run": dry_run,
-                "answer_dialogs": answer_dialogs,
-            }
-            if search_paths:
-                params["search_paths"] = search_paths
-            logger.info(f"Moving directory: {dir} -> {new_dir} (dry_run={dry_run})")
-            response = unreal.send_command("move_directory", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error moving directory: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "dir": dir,
+            "new_dir": new_dir,
+            "update_referencers": update_referencers,
+            "refresh_registry": refresh_registry,
+            "dry_run": dry_run,
+            "answer_dialogs": answer_dialogs,
+        }
+        if search_paths:
+            params["search_paths"] = search_paths
+        logger.info(f"Moving directory: {dir} -> {new_dir} (dry_run={dry_run})")
+        return _bridge("move_directory", params)
 
     @mcp.tool()
     def clear_blendables(ctx: Context, volume_name: str) -> Dict[str, Any]:
@@ -531,28 +378,8 @@ def register_asset_safety_tools(mcp: FastMCP):
         Returns:
             Dict with cleared (number of removed entries)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"volume_name": volume_name}
-            logger.info(f"Clearing blendables on volume: {volume_name}")
-            response = unreal.send_command("clear_blendables", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error clearing blendables: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Clearing blendables on volume: {volume_name}")
+        return _bridge("clear_blendables", {"volume_name": volume_name})
 
     @mcp.tool()
     def remove_blendable(ctx: Context, volume_name: str, material_path: str) -> Dict[str, Any]:
@@ -567,28 +394,8 @@ def register_asset_safety_tools(mcp: FastMCP):
         Returns:
             Dict with removed (number of removed entries)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"volume_name": volume_name, "material_path": material_path}
-            logger.info(f"Removing blendable {material_path} from volume: {volume_name}")
-            response = unreal.send_command("remove_blendable", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error removing blendable: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Removing blendable {material_path} from volume: {volume_name}")
+        return _bridge("remove_blendable", {"volume_name": volume_name, "material_path": material_path})
 
     @mcp.tool()
     def list_blendables(ctx: Context, volume_name: str) -> Dict[str, Any]:
@@ -602,25 +409,5 @@ def register_asset_safety_tools(mcp: FastMCP):
         Returns:
             Dict with blendables (list of {object, weight})
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"volume_name": volume_name}
-            logger.info(f"Listing blendables on volume: {volume_name}")
-            response = unreal.send_command("list_blendables", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error listing blendables: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Listing blendables on volume: {volume_name}")
+        return _bridge("list_blendables", {"volume_name": volume_name})

@@ -1613,7 +1613,7 @@ bool FUnrealMCPNiagaraOps::AddEmitter(const FString& AssetPath, const FString& E
         SourceEmitter = Cast<UNiagaraEmitter>(FUnrealMCPCommonUtils::FindAsset(SourceEmitterPath));
         if (!SourceEmitter)
         {
-            SourceEmitter = LoadObject<UNiagaraEmitter>(nullptr, *SourceEmitterPath);
+            SourceEmitter = FUnrealMCPCommonUtils::LoadAssetTyped<UNiagaraEmitter>(SourceEmitterPath);
         }
         if (!SourceEmitter)
         {
@@ -1923,7 +1923,7 @@ bool FUnrealMCPNiagaraOps::AddRenderer(const FString& AssetPath, const FString& 
         UMaterialInterface* Material = Cast<UMaterialInterface>(FUnrealMCPCommonUtils::FindAsset(MaterialPath));
         if (!Material)
         {
-            Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
+            Material = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterialInterface>(MaterialPath);
         }
         if (!Material)
         {
@@ -2111,7 +2111,7 @@ bool FUnrealMCPNiagaraOps::SetRendererMaterial(const FString& AssetPath, const F
         Material = Cast<UMaterialInterface>(FUnrealMCPCommonUtils::FindAsset(MaterialPath));
         if (!Material)
         {
-            Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
+            Material = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterialInterface>(MaterialPath);
         }
         if (!Material)
         {
@@ -3199,7 +3199,7 @@ bool FUnrealMCPNiagaraOps::AddModule(const FString& AssetPath, const FString& Em
     UNiagaraScript* ModuleScript = Cast<UNiagaraScript>(FUnrealMCPCommonUtils::FindAsset(ModuleAssetPath));
     if (!ModuleScript)
     {
-        ModuleScript = LoadObject<UNiagaraScript>(nullptr, *ModuleAssetPath);
+        ModuleScript = FUnrealMCPCommonUtils::LoadAssetTyped<UNiagaraScript>(ModuleAssetPath);
     }
     if (!ModuleScript)
     {

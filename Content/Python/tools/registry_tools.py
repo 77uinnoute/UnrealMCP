@@ -12,6 +12,8 @@ from typing import Any, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -55,25 +57,45 @@ def register_registry_tools(mcp: FastMCP):
             [{name, type, required, default?, allowed_values?, description?}], flags
             {loopback_forbidden, mutates_graph, hidden}}].
         """
-        from unreal_mcp_server import get_unreal_connection
+        params: Dict[str, Any] = {}
+        if category:
+            params["category"] = category
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        return _bridge("list_mcp_commands", params)
 
-            params: Dict[str, Any] = {}
-            if category:
-                params["category"] = category
+    @mcp.tool()
+    def get_command_journal(
+        ctx: Context,
+        limit: Optional[int] = 64,
+        category: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Recent dispatch history from the editor: what ran, how long it took, and how it ended.
 
-            response = unreal.send_command("list_mcp_commands", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
+        Read-only. Two uses:
 
-            return response
+        - After something went wrong: `error_code` per entry tells a rejection (missing_params /
+          bad_param_type) from a command that failed on its own; `in_flight` is the last command that
+          started and never finished — if the channel is silent too, that is the command that wedged
+          the GameThread.
+        - Before designing a script: `by_command` gives calls / total / max / avg milliseconds per
+          command over the current ring, which is where "this needs splitting into batches" or "this
+          needs a longer timeout" comes from.
 
-        except Exception as e:
-            logger.error(f"Error listing MCP commands: {e}")
-            return {"success": False, "message": str(e)}
+        Args:
+            limit: How many recent entries to return (default 64, capped by the ring capacity).
+            category: Only this command category (e.g. "blueprint", "material"). Omit for all.
+
+        Returns:
+            entries[] (newest first: seq / command / category / started / finished / duration_ms /
+            error_code / params_size / params_hash), entry_count, ring_capacity, ring_count,
+            in_flight (or null), by_command[] (command / calls / total_ms / max_ms / avg_ms, sorted by
+            max_ms desc) and journal_path (the append-only JSONL mirror that survives a killed editor).
+        """
+        params: Dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        if category:
+            params["category"] = category
+
+        return _bridge("get_command_journal", params)

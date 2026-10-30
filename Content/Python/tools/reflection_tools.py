@@ -19,6 +19,8 @@ from typing import Any, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -71,40 +73,22 @@ def register_reflection_tools(mcp: FastMCP):
             - hint: the alternative tool or spelling to use when it cannot be written
             - current_value: the value as it stands now
         """
-        from unreal_mcp_server import get_unreal_connection
-
         if not property:
             # Reject locally: no point spending a bridge round-trip on a call that cannot succeed.
-            return {"success": False, "error_code": "invalid_params", "error": "Missing 'property' parameter"}
+            raise MCPToolError("reflect_probe", "invalid_params", "Missing 'property' parameter")
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        params: Dict[str, Any] = {"target": target, "property": property}
+        if node_id:
+            params["node_id"] = node_id
+        if graph_name:
+            params["graph_name"] = graph_name
+        if component_name:
+            params["component_name"] = component_name
+        if expression_name:
+            params["expression_name"] = expression_name
 
-            params: Dict[str, Any] = {"target": target, "property": property}
-            if node_id:
-                params["node_id"] = node_id
-            if graph_name:
-                params["graph_name"] = graph_name
-            if component_name:
-                params["component_name"] = component_name
-            if expression_name:
-                params["expression_name"] = expression_name
-
-            logger.info(f"Probing property '{property}' on target: {target}")
-            response = unreal.send_command("reflect_probe", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Error probing property: {e}")
-            return {"success": False, "message": str(e)}
+        logger.info(f"Probing property '{property}' on target: {target}")
+        return _bridge("reflect_probe", params)
 
     @mcp.tool()
     def set_object_property(
@@ -173,54 +157,33 @@ def register_reflection_tools(mcp: FastMCP):
             load_failed (a null object or container segment mid-path), path_not_found, write_failed. Items
             are written independently: one bad name does not stop the rest and nothing is rolled back.
         """
-        from unreal_mcp_server import get_unreal_connection
-
         if not property_name and not properties:
-            logger.error("set_object_property called without a property to write")
-            return {"success": False, "error_code": "invalid_params",
-                    "error": "Pass 'property_name' + 'property_value', or a non-empty 'properties' object"}
+            raise MCPToolError("set_object_property", "invalid_params",
+                               "Pass 'property_name' + 'property_value', or a non-empty 'properties' object")
         if not target and not object_path:
-            logger.error("set_object_property called without an object to write")
-            return {"success": False, "error_code": "invalid_params",
-                    "error": "Pass 'target' (the object to write). Its old name 'object_path' still works."}
+            raise MCPToolError("set_object_property", "invalid_params",
+                               "Pass 'target' (the object to write). Its old name 'object_path' still works.")
         if properties is not None and not isinstance(properties, dict):
-            logger.error("set_object_property called with a non-object 'properties'")
-            return {"success": False, "error_code": "invalid_params",
-                    "error": "'properties' must be an object of property name -> value"}
+            raise MCPToolError("set_object_property", "invalid_params",
+                               "'properties' must be an object of property name -> value")
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        # Forward the selector(s) exactly as given: the command owns the rename window and rejects
+        # "both given with different values" - the tool must not silently pick one.
+        params: Dict[str, Any] = {"persist": bool(persist)}
+        if target:
+            params["target"] = target
+        if object_path:
+            params["object_path"] = object_path
+        if property_name:
+            params["property_name"] = property_name
+            if property_value is not None:
+                params["property_value"] = property_value
+        if properties:
+            params["properties"] = properties
 
-            # Forward the selector(s) exactly as given: the command owns the rename window and rejects
-            # "both given with different values" - the tool must not silently pick one.
-            params: Dict[str, Any] = {"persist": bool(persist)}
-            if target:
-                params["target"] = target
-            if object_path:
-                params["object_path"] = object_path
-            if property_name:
-                params["property_name"] = property_name
-                if property_value is not None:
-                    params["property_value"] = property_value
-            if properties:
-                params["properties"] = properties
-
-            count = len(properties) if properties else 1
-            logger.info(f"Writing {count} propert(y/ies) on: {target or object_path}")
-            response = unreal.send_command("set_object_property", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Error writing object property: {e}")
-            return {"success": False, "message": str(e)}
+        count = len(properties) if properties else 1
+        logger.info(f"Writing {count} propert(y/ies) on: {target or object_path}")
+        return _bridge("set_object_property", params)
 
     @mcp.tool()
     def apply_cloth_masks(
@@ -259,27 +222,9 @@ def register_reflection_tools(mcp: FastMCP):
             The section split is the proof the cloth can move now: skinned_only_count is every vertex whose
             cloth contribution is ignored (0xFFFF static alpha).
         """
-        from unreal_mcp_server import get_unreal_connection
-
         if not object_path:
-            return {"success": False, "error_code": "invalid_params", "error": "Missing 'object_path' parameter"}
+            raise MCPToolError("apply_cloth_masks", "invalid_params", "Missing 'object_path' parameter")
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"object_path": object_path, "persist": bool(persist)}
-            logger.info(f"Applying cloth parameter masks on: {object_path}")
-            response = unreal.send_command("apply_cloth_masks", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Error applying cloth masks: {e}")
-            return {"success": False, "message": str(e)}
+        params: Dict[str, Any] = {"object_path": object_path, "persist": bool(persist)}
+        logger.info(f"Applying cloth parameter masks on: {object_path}")
+        return _bridge("apply_cloth_masks", params)

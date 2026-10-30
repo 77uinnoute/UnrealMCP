@@ -8,6 +8,8 @@ import logging
 from typing import Dict, List, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -59,37 +61,17 @@ def register_umg_tools(mcp: FastMCP):
             Dict with the new asset's name, content path, parent_class and (when the tree has one)
             the root widget's name and class.
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "name": widget_name,
-                "path": path,
-            }
-            if parent_class is not None:
-                params["parent_class"] = parent_class
-            if root_widget_class is not None:
-                params["root_widget_class"] = root_widget_class
-            
-            logger.info(f"Creating UMG Widget Blueprint with params: {params}")
-            response = unreal.send_command("create_umg_widget_blueprint", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Create UMG Widget Blueprint response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error creating UMG Widget Blueprint: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "name": widget_name,
+            "path": path,
+        }
+        if parent_class is not None:
+            params["parent_class"] = parent_class
+        if root_widget_class is not None:
+            params["root_widget_class"] = root_widget_class
+
+        logger.info(f"Creating UMG Widget Blueprint with params: {params}")
+        return _bridge("create_umg_widget_blueprint", params)
 
     @mcp.tool()
     def add_text_block_to_widget(
@@ -122,51 +104,32 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict containing success status and text block properties
         """
-        from unreal_mcp_server import get_unreal_connection
+        deprecated = []
+        if text_block_name is not None:
+            deprecated.append("text_block_name")
+            target_blueprint = blueprint_name or widget_name
+            target_widget = text_block_name
+        else:
+            target_blueprint = blueprint_name
+            target_widget = widget_name
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget)) if not v]
+        if missing:
+            return {"status": "error", "error_code": "missing_parameter",
+                    "error": "Missing parameter(s): " + ", ".join(missing) + _UMG_PARAM_MIGRATION}
 
-            deprecated = []
-            if text_block_name is not None:
-                deprecated.append("text_block_name")
-                target_blueprint = blueprint_name or widget_name
-                target_widget = text_block_name
-            else:
-                target_blueprint = blueprint_name
-                target_widget = widget_name
+        params = {
+            "blueprint_name": target_blueprint,
+            "widget_name": target_widget,
+            "text": text,
+            "position": position
+        }
+        if parent_widget:
+            params["parent_widget"] = parent_widget
 
-            missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget)) if not v]
-            if missing:
-                return {"status": "error", "error_code": "missing_parameter",
-                        "error": "Missing parameter(s): " + ", ".join(missing) + _UMG_PARAM_MIGRATION}
-
-            params = {
-                "blueprint_name": target_blueprint,
-                "widget_name": target_widget,
-                "text": text,
-                "position": position
-            }
-            if parent_widget:
-                params["parent_widget"] = parent_widget
-
-            logger.info(f"Adding Text Block to widget with params: {params}")
-            response = unreal.send_command("add_text_block_to_widget", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Add Text Block response: {response}")
-            return _mark_deprecated(response, deprecated)
-            
-        except Exception as e:
-            error_msg = f"Error adding Text Block to widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Adding Text Block to widget with params: {params}")
+        return _bridge("add_text_block_to_widget", params)
+        return _mark_deprecated(response, deprecated)
 
     @mcp.tool()
     def add_button_to_widget(
@@ -199,51 +162,32 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict containing success status and button properties
         """
-        from unreal_mcp_server import get_unreal_connection
+        deprecated = []
+        if button_name is not None:
+            deprecated.append("button_name")
+            target_blueprint = blueprint_name or widget_name
+            target_widget = button_name
+        else:
+            target_blueprint = blueprint_name
+            target_widget = widget_name
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget)) if not v]
+        if missing:
+            return {"status": "error", "error_code": "missing_parameter",
+                    "error": "Missing parameter(s): " + ", ".join(missing) + _UMG_PARAM_MIGRATION}
 
-            deprecated = []
-            if button_name is not None:
-                deprecated.append("button_name")
-                target_blueprint = blueprint_name or widget_name
-                target_widget = button_name
-            else:
-                target_blueprint = blueprint_name
-                target_widget = widget_name
+        params = {
+            "blueprint_name": target_blueprint,
+            "widget_name": target_widget,
+            "text": text,
+            "position": position
+        }
+        if parent_widget:
+            params["parent_widget"] = parent_widget
 
-            missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget)) if not v]
-            if missing:
-                return {"status": "error", "error_code": "missing_parameter",
-                        "error": "Missing parameter(s): " + ", ".join(missing) + _UMG_PARAM_MIGRATION}
-
-            params = {
-                "blueprint_name": target_blueprint,
-                "widget_name": target_widget,
-                "text": text,
-                "position": position
-            }
-            if parent_widget:
-                params["parent_widget"] = parent_widget
-            
-            logger.info(f"Adding Button to widget with params: {params}")
-            response = unreal.send_command("add_button_to_widget", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Add Button response: {response}")
-            return _mark_deprecated(response, deprecated)
-            
-        except Exception as e:
-            error_msg = f"Error adding Button to widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Adding Button to widget with params: {params}")
+        return _bridge("add_button_to_widget", params)
+        return _mark_deprecated(response, deprecated)
 
     @mcp.tool()
     def bind_widget_event(
@@ -276,54 +220,35 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict containing success status and the created event node's name
         """
-        from unreal_mcp_server import get_unreal_connection
+        deprecated = []
+        if widget_component_name is not None:
+            # Old form: widget_name named the blueprint, widget_component_name the widget.
+            deprecated.append("widget_component_name")
+            target_blueprint = blueprint_name or widget_name
+            target_widget = widget_component_name
+        else:
+            target_blueprint = blueprint_name
+            target_widget = widget_name
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget),
+                                  ("event_name", event_name)) if not v]
+        if missing:
+            return {"status": "error", "error_code": "missing_parameter",
+                    "error": "Missing parameter(s): " + ", ".join(missing)}
 
-            deprecated = []
-            if widget_component_name is not None:
-                # Old form: widget_name named the blueprint, widget_component_name the widget.
-                deprecated.append("widget_component_name")
-                target_blueprint = blueprint_name or widget_name
-                target_widget = widget_component_name
-            else:
-                target_blueprint = blueprint_name
-                target_widget = widget_name
+        params = {
+            "blueprint_name": target_blueprint,
+            "widget_name": target_widget,
+            "event_name": event_name,
+        }
 
-            missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget),
-                                      ("event_name", event_name)) if not v]
-            if missing:
-                return {"status": "error", "error_code": "missing_parameter",
-                        "error": "Missing parameter(s): " + ", ".join(missing)}
-
-            params = {
-                "blueprint_name": target_blueprint,
-                "widget_name": target_widget,
-                "event_name": event_name,
-            }
-
-            logger.info(f"Binding widget event with params: {params}")
-            response = unreal.send_command("bind_widget_event", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            if deprecated and isinstance(response, dict):
-                response["deprecated_params"] = deprecated
-                response["migration"] = ("bind_widget_event now takes blueprint_name (the Widget Blueprint) + "
-                                         "widget_name (the widget inside it); widget_component_name goes away next version")
-            logger.info(f"Bind widget event response: {response}")
-            return response
-
-        except Exception as e:
-            error_msg = f"Error binding widget event: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Binding widget event with params: {params}")
+        return _bridge("bind_widget_event", params)
+        if deprecated and isinstance(response, dict):
+            response["deprecated_params"] = deprecated
+            response["migration"] = ("bind_widget_event now takes blueprint_name (the Widget Blueprint) + "
+                                     "widget_name (the widget inside it); widget_component_name goes away next version")
+        logger.info(f"Bind widget event response: {response}")
 
     @mcp.tool()
     def add_widget_to_viewport(
@@ -347,33 +272,13 @@ def register_umg_tools(mcp: FastMCP):
             Dict with created_widget_name, z_order, pie_world, owning_player and in_viewport;
             a structured error (pie_not_running / pie_not_ready / widget_blueprint_not_found) otherwise.
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "blueprint_name": widget_name,
-                "z_order": z_order
-            }
-            
-            logger.info(f"Adding widget to viewport with params: {params}")
-            response = unreal.send_command("add_widget_to_viewport", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Add widget to viewport response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error adding widget to viewport: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "blueprint_name": widget_name,
+            "z_order": z_order
+        }
+
+        logger.info(f"Adding widget to viewport with params: {params}")
+        return _bridge("add_widget_to_viewport", params)
 
     @mcp.tool()
     def get_pie_widget_tree(
@@ -413,22 +318,12 @@ def register_umg_tools(mcp: FastMCP):
         widget (e.g. unreal.load_object(None, instance_path) and then call_method("SomeBpFunction",
         ...) - blueprint functions ARE callable this way, PyWrapperObject.h:1135).
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            params = {"blueprint_name": blueprint_name, "instance_index": instance_index}
-            if root_widget:
-                params["root_widget"] = root_widget
-            if max_depth is not None:
-                params["max_depth"] = max_depth
-            return unreal.send_command("get_pie_widget_tree", params)
-        except Exception as e:
-            error_msg = f"Error reading PIE widget tree: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"blueprint_name": blueprint_name, "instance_index": instance_index}
+        if root_widget:
+            params["root_widget"] = root_widget
+        if max_depth is not None:
+            params["max_depth"] = max_depth
+        return _bridge("get_pie_widget_tree", params)
 
     @mcp.tool()
     def set_widget_property_binding(
@@ -458,33 +353,14 @@ def register_umg_tools(mcp: FastMCP):
             Dict with binding_name / widget_name / property_name / function_name / variable_type /
             binding_count / runtime_binding_count / effective
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "blueprint_name": blueprint_name,
-                "widget_name": widget_name,
-                "property_name": property_name,
-                "binding_name": binding_name,
-            }
-            logger.info(f"Setting widget property binding with params: {params}")
-            response = unreal.send_command("set_widget_property_binding", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting widget property binding: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "blueprint_name": blueprint_name,
+            "widget_name": widget_name,
+            "property_name": property_name,
+            "binding_name": binding_name,
+        }
+        logger.info(f"Setting widget property binding with params: {params}")
+        return _bridge("set_widget_property_binding", params)
 
     @mcp.tool()
     def unbind_widget_property(
@@ -513,34 +389,15 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with function_removed / variable_removed / binding_count / runtime_binding_count
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "blueprint_name": blueprint_name,
-                "widget_name": widget_name,
-                "property_name": property_name,
-                "remove_function": remove_function,
-                "remove_variable": remove_variable,
-            }
-            logger.info(f"Unbinding widget property with params: {params}")
-            response = unreal.send_command("unbind_widget_property", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error unbinding widget property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "blueprint_name": blueprint_name,
+            "widget_name": widget_name,
+            "property_name": property_name,
+            "remove_function": remove_function,
+            "remove_variable": remove_variable,
+        }
+        logger.info(f"Unbinding widget property with params: {params}")
+        return _bridge("unbind_widget_property", params)
 
     @mcp.tool()
     def prune_widget_bindings(
@@ -564,28 +421,9 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with dry_run / items[] (kind, name, detail) / item_count / removed[] / counts
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "dry_run": dry_run}
-            logger.info(f"Pruning widget bindings with params: {params}")
-            response = unreal.send_command("prune_widget_bindings", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error pruning widget bindings: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"blueprint_name": blueprint_name, "dry_run": dry_run}
+        logger.info(f"Pruning widget bindings with params: {params}")
+        return _bridge("prune_widget_bindings", params)
 
     @mcp.tool()
     def set_text_block_binding(
@@ -624,53 +462,34 @@ def register_umg_tools(mcp: FastMCP):
             Dict with binding_name, widget_name, property_name, function_name, binding_count,
             runtime_binding_count, deprecated_command
         """
-        from unreal_mcp_server import get_unreal_connection
+        deprecated = []
+        target_blueprint = blueprint_name
+        target_widget = widget_name
+        target_binding = binding_name
+        if text_block_name is not None:
+            deprecated.append("text_block_name")
+            target_blueprint = blueprint_name or widget_name
+            target_widget = text_block_name
+        if binding_property is not None:
+            deprecated.append("binding_property")
+            target_binding = binding_property
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget),
+                                  ("binding_name", target_binding)) if not v]
+        if missing:
+            return {"status": "error", "error_code": "missing_parameter",
+                    "error": "Missing parameter(s): " + ", ".join(missing) + _UMG_PARAM_MIGRATION}
 
-            deprecated = []
-            target_blueprint = blueprint_name
-            target_widget = widget_name
-            target_binding = binding_name
-            if text_block_name is not None:
-                deprecated.append("text_block_name")
-                target_blueprint = blueprint_name or widget_name
-                target_widget = text_block_name
-            if binding_property is not None:
-                deprecated.append("binding_property")
-                target_binding = binding_property
+        params = {
+            "blueprint_name": target_blueprint,
+            "widget_name": target_widget,
+            "binding_name": target_binding,
+            "property_name": property_name,
+        }
 
-            missing = [n for n, v in (("blueprint_name", target_blueprint), ("widget_name", target_widget),
-                                      ("binding_name", target_binding)) if not v]
-            if missing:
-                return {"status": "error", "error_code": "missing_parameter",
-                        "error": "Missing parameter(s): " + ", ".join(missing) + _UMG_PARAM_MIGRATION}
-
-            params = {
-                "blueprint_name": target_blueprint,
-                "widget_name": target_widget,
-                "binding_name": target_binding,
-                "property_name": property_name,
-            }
-            
-            logger.info(f"Setting text block binding with params: {params}")
-            response = unreal.send_command("set_text_block_binding", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Set text block binding response: {response}")
-            return _mark_deprecated(response, deprecated)
-            
-        except Exception as e:
-            error_msg = f"Error setting text block binding: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting text block binding with params: {params}")
+        return _bridge("set_text_block_binding", params)
+        return _mark_deprecated(response, deprecated)
 
     @mcp.tool()
     def set_widget_slot(
@@ -708,31 +527,12 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with the slot read back from the widget plus applied / compiled.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "widget_name": widget_name}
+        if slot is not None:
+            params["slot"] = slot
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "widget_name": widget_name}
-            if slot is not None:
-                params["slot"] = slot
-
-            logger.info(f"Setting widget slot with params: {params}")
-            response = unreal.send_command("set_widget_slot", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting widget slot: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting widget slot with params: {params}")
+        return _bridge("set_widget_slot", params)
 
     @mcp.tool()
     def add_widget(
@@ -769,27 +569,17 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with widget_name / widget_class / parent_widget / slot / warnings / compiled
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            params = {
-                "blueprint_name": blueprint_name,
-                "widget_class": widget_class,
-                "widget_name": widget_name,
-                "as_variable": as_variable,
-            }
-            if parent_widget:
-                params["parent_widget"] = parent_widget
-            if slot:
-                params["slot"] = slot
-            return unreal.send_command("add_widget", params)
-        except Exception as e:
-            error_msg = f"Error adding widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "blueprint_name": blueprint_name,
+            "widget_class": widget_class,
+            "widget_name": widget_name,
+            "as_variable": as_variable,
+        }
+        if parent_widget:
+            params["parent_widget"] = parent_widget
+        if slot:
+            params["slot"] = slot
+        return _bridge("add_widget", params)
 
     @mcp.tool()
     def set_widget_properties(
@@ -818,18 +608,8 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with applied[] (key / property / value_before / value_after) and failed[]
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "props": props}
-            return unreal.send_command("set_widget_properties", params)
-        except Exception as e:
-            error_msg = f"Error setting widget properties: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "props": props}
+        return _bridge("set_widget_properties", params)
 
     @mcp.tool()
     def remove_widget(ctx: Context, blueprint_name: str, widget_name: str) -> Dict[str, Any]:
@@ -844,17 +624,7 @@ def register_umg_tools(mcp: FastMCP):
             blueprint_name: Name of the target Widget Blueprint
             widget_name: Widget to remove
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            return unreal.send_command("remove_widget", {"blueprint_name": blueprint_name, "widget_name": widget_name})
-        except Exception as e:
-            error_msg = f"Error removing widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("remove_widget", {"blueprint_name": blueprint_name, "widget_name": widget_name})
 
     @mcp.tool()
     def reparent_widget(
@@ -875,18 +645,8 @@ def register_umg_tools(mcp: FastMCP):
             widget_name: Widget to move
             new_parent: Panel widget it should be added to
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "new_parent": new_parent}
-            return unreal.send_command("reparent_widget", params)
-        except Exception as e:
-            error_msg = f"Error reparenting widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "new_parent": new_parent}
+        return _bridge("reparent_widget", params)
 
     @mcp.tool()
     def reorder_widget(
@@ -903,18 +663,8 @@ def register_umg_tools(mcp: FastMCP):
             widget_name: Widget to move inside its parent panel
             index: Target child index (0 = first / drawn first)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "index": index}
-            return unreal.send_command("reorder_widget", params)
-        except Exception as e:
-            error_msg = f"Error reordering widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "index": index}
+        return _bridge("reorder_widget", params)
 
     @mcp.tool()
     def rename_widget(
@@ -931,18 +681,8 @@ def register_umg_tools(mcp: FastMCP):
             widget_name: Current widget name
             new_name: New name (must be free inside the widget tree)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "new_name": new_name}
-            return unreal.send_command("rename_widget", params)
-        except Exception as e:
-            error_msg = f"Error renaming widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"blueprint_name": blueprint_name, "widget_name": widget_name, "new_name": new_name}
+        return _bridge("rename_widget", params)
 
     @mcp.tool()
     def set_root_widget(ctx: Context, blueprint_name: str, widget_name: str) -> Dict[str, Any]:
@@ -953,17 +693,7 @@ def register_umg_tools(mcp: FastMCP):
             blueprint_name: Name of the target Widget Blueprint
             widget_name: Widget to become the root (must be a panel when the tree already has a root)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            return unreal.send_command("set_root_widget", {"blueprint_name": blueprint_name, "widget_name": widget_name})
-        except Exception as e:
-            error_msg = f"Error setting root widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_root_widget", {"blueprint_name": blueprint_name, "widget_name": widget_name})
 
     @mcp.tool()
     def get_widget_tree(ctx: Context, blueprint_name: str) -> Dict[str, Any]:
@@ -980,29 +710,10 @@ def register_umg_tools(mcp: FastMCP):
             events (widget/event/graph), has_root, compiled, status (compiler status name, e.g.
             "BS_UpToDate") and status_code (the matching number).
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name}
-
-            logger.info(f"Reading widget tree with params: {params}")
-            response = unreal.send_command("get_widget_tree", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error reading widget tree: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Reading widget tree with params: {params}")
+        return _bridge("get_widget_tree", params)
 
     @mcp.tool()
     def get_umg_compile_errors(
@@ -1027,31 +738,12 @@ def register_umg_tools(mcp: FastMCP):
             log_this_compile[], log_historical[], boundary_source, since_boundary,
             binding_summary{editor_count, runtime_count}, binding_reconciled and bindings_dropped[].
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name}
+        if since is not None:
+            params["since"] = since
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name}
-            if since is not None:
-                params["since"] = since
-
-            logger.info(f"Reading UMG compile errors with params: {params}")
-            response = unreal.send_command("get_umg_compile_errors", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error reading UMG compile errors: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Reading UMG compile errors with params: {params}")
+        return _bridge("get_umg_compile_errors", params)
 
     @mcp.tool()
     def compile_umg_widget(
@@ -1072,29 +764,10 @@ def register_umg_tools(mcp: FastMCP):
             Dict with compiled, status, num_errors, num_warnings, messages[], saved and
             persist_requested.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "force_full": force_full}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "force_full": force_full}
-
-            logger.info(f"Compiling UMG widget with params: {params}")
-            response = unreal.send_command("compile_umg_widget", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error compiling UMG widget: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Compiling UMG widget with params: {params}")
+        return _bridge("compile_umg_widget", params)
 
     @mcp.tool()
     def open_umg_designer(
@@ -1114,31 +787,12 @@ def register_umg_tools(mcp: FastMCP):
             Dict with opened, editor_open, editor_name, has_preview, focused / focus_reason and
             the current animation names.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name}
+        if focus_widget is not None:
+            params["focus_widget"] = focus_widget
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name}
-            if focus_widget is not None:
-                params["focus_widget"] = focus_widget
-
-            logger.info(f"Opening UMG designer with params: {params}")
-            response = unreal.send_command("open_umg_designer", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error opening UMG designer: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Opening UMG designer with params: {params}")
+        return _bridge("open_umg_designer", params)
 
     @mcp.tool()
     def set_umg_design_size(
@@ -1161,33 +815,14 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with applied, design_size_before, design_size (read back) and size_mode_changed.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name}
+        if width is not None:
+            params["width"] = width
+        if height is not None:
+            params["height"] = height
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name}
-            if width is not None:
-                params["width"] = width
-            if height is not None:
-                params["height"] = height
-
-            logger.info(f"Setting UMG design size with params: {params}")
-            response = unreal.send_command("set_umg_design_size", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting UMG design size: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting UMG design size with params: {params}")
+        return _bridge("set_umg_design_size", params)
 
     @mcp.tool()
     def set_umg_designer_overlay(
@@ -1221,35 +856,16 @@ def register_umg_tools(mcp: FastMCP):
             Dict with applied, settings_before, settings (read back), saved_config and the config
             section the value lives in.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params: Dict[str, Any] = {"save": save}
+        if show_outlines is not None:
+            params["show_outlines"] = show_outlines
+        if grid_snap_enabled is not None:
+            params["grid_snap_enabled"] = grid_snap_enabled
+        if grid_snap_size is not None:
+            params["grid_snap_size"] = grid_snap_size
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"save": save}
-            if show_outlines is not None:
-                params["show_outlines"] = show_outlines
-            if grid_snap_enabled is not None:
-                params["grid_snap_enabled"] = grid_snap_enabled
-            if grid_snap_size is not None:
-                params["grid_snap_size"] = grid_snap_size
-
-            logger.info(f"Setting UMG designer overlay with params: {params}")
-            response = unreal.send_command("set_umg_designer_overlay", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting UMG designer overlay: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting UMG designer overlay with params: {params}")
+        return _bridge("set_umg_designer_overlay", params)
 
     @mcp.tool()
     def set_widget_brush(
@@ -1292,41 +908,22 @@ def register_umg_tools(mcp: FastMCP):
             Dict with applied[] (key / value_before / value_after), failed[], brush{before, summary,
             color_before, color_after} and the usual compiled / saved receipt.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params: Dict[str, Any] = {"blueprint_name": blueprint_name, "widget_name": widget_name}
+        if resource is not None:
+            params["resource"] = resource
+        if draw_as is not None:
+            params["draw_as"] = draw_as
+        if margin is not None:
+            params["margin"] = margin
+        if image_size is not None:
+            params["image_size"] = image_size
+        if tint is not None:
+            params["tint"] = tint
+        if color is not None:
+            params["color"] = color
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"blueprint_name": blueprint_name, "widget_name": widget_name}
-            if resource is not None:
-                params["resource"] = resource
-            if draw_as is not None:
-                params["draw_as"] = draw_as
-            if margin is not None:
-                params["margin"] = margin
-            if image_size is not None:
-                params["image_size"] = image_size
-            if tint is not None:
-                params["tint"] = tint
-            if color is not None:
-                params["color"] = color
-
-            logger.info(f"Setting widget brush with params: {params}")
-            response = unreal.send_command("set_widget_brush", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting widget brush: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting widget brush with params: {params}")
+        return _bridge("set_widget_brush", params)
 
     @mcp.tool()
     def create_widget_animation(
@@ -1344,29 +941,10 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with animation_name, animations, animation_count, compiled and animation_effective.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "animation_name": animation_name}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "animation_name": animation_name}
-
-            logger.info(f"Creating widget animation with params: {params}")
-            response = unreal.send_command("create_widget_animation", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error creating widget animation: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Creating widget animation with params: {params}")
+        return _bridge("create_widget_animation", params)
 
     @mcp.tool()
     def add_widget_animation_track(
@@ -1393,34 +971,15 @@ def register_umg_tools(mcp: FastMCP):
             Dict with the track (track_class, section_class, possessable_guid), track_count and the
             usual compiled / animation_effective tail.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {
+            "blueprint_name": blueprint_name,
+            "animation_name": animation_name,
+            "widget_name": widget_name,
+            "property": property,
+        }
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "blueprint_name": blueprint_name,
-                "animation_name": animation_name,
-                "widget_name": widget_name,
-                "property": property,
-            }
-
-            logger.info(f"Adding widget animation track with params: {params}")
-            response = unreal.send_command("add_widget_animation_track", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error adding widget animation track: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Adding widget animation track with params: {params}")
+        return _bridge("add_widget_animation_track", params)
 
     @mcp.tool()
     def set_widget_animation_keyframes(
@@ -1454,35 +1013,16 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with keys_written, keys_replaced, keys (read back), playback_range_extended.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {
+            "blueprint_name": blueprint_name,
+            "animation_name": animation_name,
+            "widget_name": widget_name,
+            "property": property,
+            "keys": keys,
+        }
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "blueprint_name": blueprint_name,
-                "animation_name": animation_name,
-                "widget_name": widget_name,
-                "property": property,
-                "keys": keys,
-            }
-
-            logger.info(f"Writing widget animation keyframes with params: {params}")
-            response = unreal.send_command("set_widget_animation_keyframes", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error writing widget animation keyframes: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Writing widget animation keyframes with params: {params}")
+        return _bridge("set_widget_animation_keyframes", params)
 
     @mcp.tool()
     def list_widget_animations(ctx: Context, blueprint_name: str) -> Dict[str, Any]:
@@ -1499,29 +1039,10 @@ def register_umg_tools(mcp: FastMCP):
             Dict with animations[] (animation_name, start_time, end_time, tracks[], in_generated_class),
             animation_count, generated_animation_count and supported_properties.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name}
-
-            logger.info(f"Listing widget animations with params: {params}")
-            response = unreal.send_command("list_widget_animations", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error listing widget animations: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Listing widget animations with params: {params}")
+        return _bridge("list_widget_animations", params)
 
     @mcp.tool()
     def play_widget_animation_preview(
@@ -1552,36 +1073,17 @@ def register_umg_tools(mcp: FastMCP):
             Dict with playing, preview_animation_name, playback_context and the applied parameters;
             editor_not_open / preview_not_ready / animation_not_in_preview when it cannot play.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {
+            "blueprint_name": blueprint_name,
+            "animation_name": animation_name,
+            "start_at_time": start_at_time,
+            "loops": loops,
+            "speed": speed,
+            "play_mode": play_mode,
+        }
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "blueprint_name": blueprint_name,
-                "animation_name": animation_name,
-                "start_at_time": start_at_time,
-                "loops": loops,
-                "speed": speed,
-                "play_mode": play_mode,
-            }
-
-            logger.info(f"Playing widget animation preview with params: {params}")
-            response = unreal.send_command("play_widget_animation_preview", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error playing widget animation preview: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Playing widget animation preview with params: {params}")
+        return _bridge("play_widget_animation_preview", params)
 
     @mcp.tool()
     def stop_widget_animation_preview(
@@ -1597,31 +1099,12 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with stopped, mode ("one" / "all") and playback_context.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name}
+        if animation_name is not None:
+            params["animation_name"] = animation_name
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name}
-            if animation_name is not None:
-                params["animation_name"] = animation_name
-
-            logger.info(f"Stopping widget animation preview with params: {params}")
-            response = unreal.send_command("stop_widget_animation_preview", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error stopping widget animation preview: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Stopping widget animation preview with params: {params}")
+        return _bridge("stop_widget_animation_preview", params)
 
     @mcp.tool()
     def remove_widget_animation(
@@ -1641,29 +1124,10 @@ def register_umg_tools(mcp: FastMCP):
             Dict with removed, animations (what is left), animation_count and the compile tail;
             animation_not_found / blocked_by_references / animation_still_present otherwise.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "animation_name": animation_name}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "animation_name": animation_name}
-
-            logger.info(f"Removing widget animation with params: {params}")
-            response = unreal.send_command("remove_widget_animation", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error removing widget animation: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Removing widget animation with params: {params}")
+        return _bridge("remove_widget_animation", params)
 
     @mcp.tool()
     def rename_widget_animation(
@@ -1680,30 +1144,11 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with previous_name, animation_name, renamed and the compile tail.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "animation_name": animation_name,
+                  "new_name": new_name}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "animation_name": animation_name,
-                      "new_name": new_name}
-
-            logger.info(f"Renaming widget animation with params: {params}")
-            response = unreal.send_command("rename_widget_animation", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error renaming widget animation: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Renaming widget animation with params: {params}")
+        return _bridge("rename_widget_animation", params)
 
     @mcp.tool()
     def set_widget_animation_playback_range(
@@ -1731,35 +1176,16 @@ def register_umg_tools(mcp: FastMCP):
             Dict with playback_start_before / playback_end_before, playback_start / playback_end /
             playback_length (read back), key_count, keys_beyond_range.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "animation_name": animation_name}
+        if length is not None:
+            params["length"] = length
+        if end_time is not None:
+            params["end_time"] = end_time
+        if start_time is not None:
+            params["start_time"] = start_time
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "animation_name": animation_name}
-            if length is not None:
-                params["length"] = length
-            if end_time is not None:
-                params["end_time"] = end_time
-            if start_time is not None:
-                params["start_time"] = start_time
-
-            logger.info(f"Setting widget animation playback range with params: {params}")
-            response = unreal.send_command("set_widget_animation_playback_range", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting widget animation playback range: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting widget animation playback range with params: {params}")
+        return _bridge("set_widget_animation_playback_range", params)
 
     @mcp.tool()
     def set_widget_variable(
@@ -1780,29 +1206,10 @@ def register_umg_tools(mcp: FastMCP):
         Returns:
             Dict with was_variable, is_variable, generated_property_present, changed, compiled.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "widget_name": widget_name,
+                  "as_variable": as_variable}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "widget_name": widget_name,
-                      "as_variable": as_variable}
-
-            logger.info(f"Setting widget variable flag with params: {params}")
-            response = unreal.send_command("set_widget_variable", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting widget variable flag: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting widget variable flag with params: {params}")
+        return _bridge("set_widget_variable", params)
 
     logger.info("UMG tools registered successfully") 

@@ -15,17 +15,15 @@ import logging
 from typing import Dict, Any, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _connection
+
 logger = logging.getLogger("UnrealMCP")
 
 
 def _run_editor_python(code: str) -> Dict[str, Any]:
     """在编辑器中执行 python 并返回原始响应。"""
-    from unreal_mcp_server import get_unreal_connection
-
-    conn = get_unreal_connection()
-    if not conn:
-        return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-    return conn.send_command("execute_python_command", {"command": code})
+    connection = _connection()
+    return connection.send_command("execute_python_command", {"command": code})
 
 
 def _stdout_text(response: Dict[str, Any]) -> str:
@@ -77,14 +75,20 @@ def _bridge(cmd: str, params: Dict[str, Any]) -> Dict[str, Any]:
     execute_python_command; the implementations now live in C++ so that editor-side
     scripts (execute_python_*) can reach the same code by calling the command over the
     loopback, and so that a modal dialog can never be raised from the python path.
-    """
-    from unreal_mcp_server import get_unreal_connection
 
-    conn = get_unreal_connection()
-    if not conn:
-        return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-    response = conn.send_command(cmd, params)
-    return response if isinstance(response, dict) else {"status": "error", "error": "no response from Unreal"}
+    Transport failures (no editor, no reply) RAISE via the shared helper - they are not
+    refusals. Command-level outcomes are passed through as the command wrote them: these
+    `*_safe` tools document a structured refusal (asset_exists / blocked_by_referencers /
+    ...) carrying fields the caller branches on (`hint`, `delete_result.workarounds[]`),
+    so the wrappers below keep translating those instead of turning them into exceptions.
+    """
+    connection = _connection()
+    reply = connection.send_command(cmd, params)
+    if not isinstance(reply, dict) or not reply:
+        raise MCPToolError(cmd, "no_response",
+                           "the bridge closed the connection without a reply (editor crashed, or the "
+                           "command is still running after its timeout)")
+    return reply
 
 
 def _payload(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -342,17 +346,13 @@ def register_ue_safe_api_tools(mcp: FastMCP):
         Returns:
             Dict with status success or a structured error (not_material / expression_not_found / ambiguous_expression / expression_not_in_material / output_not_found with available_outputs / input_not_found with available_inputs)
         """
-        from unreal_mcp_server import get_unreal_connection
-
         # 归一路径：末段无 '.' 时补 '.basename'（load_object 需要 <pkg>.<obj>:<sub> 形式）
         path = asset_path.rstrip('/')
         last = path.rsplit('/', 1)[-1]
         if '.' not in last:
             path = path + '.' + last
 
-        conn = get_unreal_connection()
-        if not conn:
-            return {"status": "error", "error": "Failed to connect to Unreal Engine"}
+        conn = _connection()
 
         listing = conn.send_command("list_material_expressions", {"asset_path": path})
         if not listing or listing.get("status") != "success":

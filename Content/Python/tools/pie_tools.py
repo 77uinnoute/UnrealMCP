@@ -18,6 +18,8 @@ import logging
 from typing import Dict, Any, List
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -37,25 +39,8 @@ def register_pie_tools(mcp: FastMCP):
             Dict with `requested` (true when this call asked for the session),
             `was_already_running` and `pie_running` (its value right now).
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info("start_pie requested")
-            response = unreal.send_command("start_pie", {})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error starting PIE: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info("start_pie requested")
+        return _bridge("start_pie")
 
     @mcp.tool()
     def stop_pie(ctx: Context) -> Dict[str, Any]:
@@ -68,25 +53,8 @@ def register_pie_tools(mcp: FastMCP):
         Returns:
             Dict with `was_running` and `pie_running` (its value right now).
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info("stop_pie requested")
-            response = unreal.send_command("stop_pie", {})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error stopping PIE: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info("stop_pie requested")
+        return _bridge("stop_pie")
 
     @mcp.tool()
     def get_actor_pose(ctx: Context, actor_label: str, bones: List[str]) -> Dict[str, Any]:
@@ -108,33 +76,13 @@ def register_pie_tools(mcp: FastMCP):
             Dict with found[], missing[], poses{bone: [x, y, z]}, frame, world_time_seconds.
             Outside PIE it fails with error=not_in_pie.
         """
-        from unreal_mcp_server import get_unreal_connection
+        if not actor_label:
+            raise MCPToolError("get_actor_pose", "invalid_params", "actor_label is required")
+        if not bones:
+            raise MCPToolError("get_actor_pose", "invalid_params", "bones must list at least one bone name")
 
-        try:
-            if not actor_label:
-                return {"success": False, "error": "invalid_params",
-                        "message": "actor_label is required"}
-            if not bones:
-                return {"success": False, "error": "invalid_params",
-                        "message": "bones must list at least one bone name"}
-
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"get_actor_pose: {actor_label} {bones}")
-            response = unreal.send_command(
-                "get_actor_pose", {"actor_label": actor_label, "bones": list(bones)})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error reading actor pose: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"get_actor_pose: {actor_label} {bones}")
+        return _bridge("get_actor_pose", {"actor_label": actor_label, "bones": list(bones)})
 
     @mcp.tool()
     def inject_key(ctx: Context, key: str, event: str = "tap") -> Dict[str, Any]:
@@ -166,26 +114,8 @@ def register_pie_tools(mcp: FastMCP):
             player_input_class, frame, world_time_seconds. Outside a play session:
             error=not_in_pie; a name that is not an FKey: error=unknown_key.
         """
-        from unreal_mcp_server import get_unreal_connection
+        if not key:
+            raise MCPToolError("inject_key", "invalid_params", 'key is required (the FKey name, e.g. "W")')
 
-        try:
-            if not key:
-                return {"success": False, "error": "invalid_params",
-                        "message": "key is required (the FKey name, e.g. \"W\")"}
-
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"inject_key: {key} ({event})")
-            response = unreal.send_command("inject_key", {"key": key, "event": event})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error injecting key: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"inject_key: {key} ({event})")
+        return _bridge("inject_key", {"key": key, "event": event})

@@ -14,6 +14,8 @@ import logging
 from typing import Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -39,29 +41,11 @@ def register_python_api_tools(mcp: FastMCP):
             Dict with class_name, module, functions [{function, signature, doc}] and count.
             An unknown class returns success=false + error=unknown_class + candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
+        if not class_name:
+            raise MCPToolError("python_api_index", "missing_class_name", "class_name is required")
 
-        try:
-            if not class_name:
-                return {"success": False, "error": "missing_class_name",
-                        "message": "class_name is required"}
-
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"python_api_index: {class_name}")
-            response = unreal.send_command("python_api_index", {"class_name": class_name})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error reading python API index: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"python_api_index: {class_name}")
+        return _bridge("python_api_index", {"class_name": class_name})
 
     @mcp.tool()
     def python_api_doc(ctx: Context, class_name: str, function: Optional[str] = None,
@@ -82,31 +66,12 @@ def register_python_api_tools(mcp: FastMCP):
             Dict with class_name, function, module, signature, doc. A missing/illegal parameter
             comes back with an example call to copy.
         """
-        from unreal_mcp_server import get_unreal_connection
-
         member = function or function_name
-        try:
-            if not class_name or not member:
-                return {"success": False, "error": "missing_parameter",
-                        "message": "class_name and function are both required "
-                                   "('function_name' is accepted as an alias of 'function')",
-                        "example": 'python_api_doc(class_name="IKRetargeterController", '
-                                   'function="reset_retarget_pose")'}
+        if not class_name or not member:
+            raise MCPToolError("python_api_doc", "missing_parameter",
+                               "class_name and function are both required ('function_name' is accepted "
+                               "as an alias of 'function'); example: python_api_doc("
+                               "class_name=\"IKRetargeterController\", function=\"reset_retarget_pose\")")
 
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"python_api_doc: {class_name}.{member}")
-            response = unreal.send_command(
-                "python_api_doc", {"class_name": class_name, "function": member})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error reading python API doc: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"python_api_doc: {class_name}.{member}")
+        return _bridge("python_api_doc", {"class_name": class_name, "function": member})

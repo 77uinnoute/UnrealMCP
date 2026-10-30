@@ -56,22 +56,17 @@ import logging
 from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _bridge
+
 logger = logging.getLogger("UnrealMCP")
 
 
 def register_niagara_tools(mcp: FastMCP):
     """Register the Niagara tools with the MCP server."""
 
-    def _send(command: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Forward one command to the bridge; returns a no_connection result when there is none."""
-        from unreal_mcp_server import get_unreal_connection
-
-        unreal = get_unreal_connection()
-        if not unreal:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward %s to the editor" % command}
-
-        return unreal.send_command(command, params)
+    def _send(command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Forward one command to the bridge; raises when it did not succeed."""
+        return _bridge(command, params)
 
     # ------------------------------------------------------------------
     # Assets
@@ -552,7 +547,8 @@ def register_niagara_tools(mcp: FastMCP):
             not_a_grid_collection (the parameter is not a Grid2DCollection).
         """
         if not param_name:
-            return {"success": False, "error_code": "invalid_params", "error": "Missing 'param_name' parameter"}
+            raise MCPToolError("list_niagara_grid_attributes", "invalid_params",
+                               "Missing 'param_name' parameter")
 
         return _send("list_niagara_grid_attributes",
                      {"asset_path": asset_path, "param_name": param_name})

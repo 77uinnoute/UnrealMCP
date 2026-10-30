@@ -43,30 +43,17 @@ import logging
 from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 logger = logging.getLogger("UnrealMCP")
 
 
 def register_animation_tools(mcp: FastMCP):
     """Register animation sequence tools with the MCP server."""
 
-    def _send(command: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Forward one command to the bridge; returns None when there is no connection."""
-        from unreal_mcp_server import get_unreal_connection
-
-        unreal = get_unreal_connection()
-        if not unreal:
-            return None
-
-        return unreal.send_command(command, params)
-
     def send_command(command: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Send one bridge command; always answers with a dict, never None and never raising."""
-        try:
-            response = _send(command, params)
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            logger.error(f"Error calling {command}: {e}")
-            return {"success": False, "message": str(e)}
+        """Forward one command to the bridge; raises when it did not succeed."""
+        return _bridge(command, params)
 
     def _notify_locator(notify_index: int = -1, notify_name: str = "", guid: str = "",
                         time: float = None) -> Dict[str, Any]:

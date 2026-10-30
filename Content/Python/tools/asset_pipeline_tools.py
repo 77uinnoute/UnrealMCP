@@ -23,6 +23,8 @@ import logging
 from typing import Dict, Any, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -33,40 +35,21 @@ def _forward_import(command: str, paths, params: dict) -> Dict[str, Any]:
     The response shape belongs to the bridge command, so nothing is rewritten here; the tool layer
     only rejects an empty path list (that check must not cost a bridge round trip).
     """
-    from unreal_mcp_server import get_unreal_connection
-
     if not paths or not isinstance(paths, list):
-        logger.error(f"{command} called without a source path list")
-        return {"success": False, "error_code": "missing_paths",
-                "message": "paths must be a non-empty array of absolute file paths"}
+        raise MCPToolError(command, "missing_paths", "paths must be a non-empty array of absolute file paths")
     if not all(isinstance(path, str) and path for path in paths):
-        return {"success": False, "error_code": "missing_paths",
-                "message": "paths must contain non-empty strings only"}
+        raise MCPToolError(command, "missing_paths", "paths must contain non-empty strings only")
 
-    try:
-        unreal = get_unreal_connection()
-        if not unreal:
-            logger.error("Failed to connect to Unreal Engine")
-            return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-        logger.info(f"{command}: importing {len(paths)} file(s) into {params.get('destination_path')}")
-        # 派发表保持**字面量** send_command：一致性自检（Build/check_command_consistency.py）
-        # 是按字面量识别"哪个 python 工具发送哪条命令"的，把命令名变成变量会让它把命令误报成死命令。
-        senders = {
-            "import_assets": lambda payload: unreal.send_command("import_assets", payload),
-            "import_texture": lambda payload: unreal.send_command("import_texture", payload),
-            "import_skeletal_mesh": lambda payload: unreal.send_command("import_skeletal_mesh", payload),
-            "import_animation": lambda payload: unreal.send_command("import_animation", payload),
-        }
-        response = senders[command](params)
-        if not response:
-            logger.error("No response from Unreal Engine")
-            return {"success": False, "message": "No response from Unreal Engine"}
-        return response
-    except Exception as e:  # noqa: BLE001 - the tool contract is a structured dict, never a raise
-        error_msg = f"{command} failed: {e}"
-        logger.error(error_msg)
-        return {"success": False, "message": error_msg}
+    logger.info(f"{command}: importing {len(paths)} file(s) into {params.get('destination_path')}")
+    # 派发表保持**字面量**命令名：一致性自检（Build/check_command_consistency.py）
+    # 是按字面量识别"哪个 python 工具发送哪条命令"的，把命令名变成变量会让它把命令误报成死命令。
+    senders = {
+        "import_assets": lambda payload: _bridge("import_assets", payload),
+        "import_texture": lambda payload: _bridge("import_texture", payload),
+        "import_skeletal_mesh": lambda payload: _bridge("import_skeletal_mesh", payload),
+        "import_animation": lambda payload: _bridge("import_animation", payload),
+    }
+    return senders[command](params)
 
 
 def register_asset_pipeline_tools(mcp: FastMCP):
@@ -386,29 +369,13 @@ def register_asset_pipeline_tools(mcp: FastMCP):
             load_failed, unsupported_property_type,
             property_not_writable (exists but engine-managed).
         """
-        from unreal_mcp_server import get_unreal_connection
-
         if not props or not isinstance(props, dict):
-            logger.error("set_asset_properties called without a props object")
-            return {"success": False, "message": "props must be a non-empty object of property name -> value"}
+            raise MCPToolError("set_asset_properties", "invalid_params",
+                               "props must be a non-empty object of property name -> value")
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "props": props}
-            logger.info(f"Setting {len(props)} propert(y/ies) on {asset_path}")
-            response = unreal.send_command("set_asset_properties", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-        except Exception as e:
-            error_msg = f"Error setting asset properties: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "props": props}
+        logger.info(f"Setting {len(props)} propert(y/ies) on {asset_path}")
+        return _bridge("set_asset_properties", params)
 
     @mcp.tool()
     def inspect_skeletal_mesh(
@@ -451,61 +418,28 @@ def register_asset_pipeline_tools(mcp: FastMCP):
             slots_without_texture[], materials_count.
             Asset missing or not a SkeletalMesh -> structured error, no edits made.
         """
-        from unreal_mcp_server import get_unreal_connection
-
         if not asset_path or not isinstance(asset_path, str):
-            logger.error("inspect_skeletal_mesh called without an asset path")
-            return {"success": False, "message": "asset_path must be a non-empty string"}
+            raise MCPToolError("inspect_skeletal_mesh", "invalid_params", "asset_path must be a non-empty string")
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"Inspecting skeletal mesh {asset_path}")
-            response = unreal.send_command("inspect_skeletal_mesh", {"asset_path": asset_path})
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-        except Exception as e:
-            error_msg = f"Error inspecting skeletal mesh: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Inspecting skeletal mesh {asset_path}")
+        return _bridge("inspect_skeletal_mesh", {"asset_path": asset_path})
 
     def _physics_send(command: str, params: dict) -> Dict[str, Any]:
         """Forward to one of the physics-asset commands. The dispatch stays literal on purpose:
         Build/check_command_consistency.py identifies "which tool sends which command" from literals,
         so building the name in a variable makes it report the command as dead."""
-        from unreal_mcp_server import get_unreal_connection
-
         if not params.get("asset_path"):
-            return {"success": False, "error_code": "invalid_params", "message": "Missing 'asset_path' parameter"}
+            raise MCPToolError(command, "invalid_params", "Missing 'asset_path' parameter")
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            senders = {
-                "add_physics_asset_body": lambda payload: unreal.send_command("add_physics_asset_body", payload),
-                "add_physics_asset_constraint": lambda payload: unreal.send_command("add_physics_asset_constraint", payload),
-                "set_physics_asset_collision": lambda payload: unreal.send_command("set_physics_asset_collision", payload),
-                "remove_physics_asset_body": lambda payload: unreal.send_command("remove_physics_asset_body", payload),
-                "remove_physics_asset_constraint": lambda payload: unreal.send_command("remove_physics_asset_constraint", payload),
-                "list_physics_asset_bodies": lambda payload: unreal.send_command("list_physics_asset_bodies", payload),
-            }
-            response = senders[command](params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-        except Exception as e:  # noqa: BLE001 - the tool contract is a structured dict, never a raise
-            error_msg = f"{command} failed: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        senders = {
+            "add_physics_asset_body": lambda payload: _bridge("add_physics_asset_body", payload),
+            "add_physics_asset_constraint": lambda payload: _bridge("add_physics_asset_constraint", payload),
+            "set_physics_asset_collision": lambda payload: _bridge("set_physics_asset_collision", payload),
+            "remove_physics_asset_body": lambda payload: _bridge("remove_physics_asset_body", payload),
+            "remove_physics_asset_constraint": lambda payload: _bridge("remove_physics_asset_constraint", payload),
+            "list_physics_asset_bodies": lambda payload: _bridge("list_physics_asset_bodies", payload),
+        }
+        return senders[command](params)
 
     @mcp.tool()
     def list_physics_asset_bodies(ctx: Context, asset_path: str) -> Dict[str, Any]:

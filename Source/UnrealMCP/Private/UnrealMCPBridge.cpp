@@ -180,6 +180,7 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
         TEXT("Run python in the editor (synchronous; the call must finish within the timeout)."),
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("command"), TEXT("string"), TEXT("Python source to execute")),
+            MCPParamOpt(TEXT("timeout_ms"), TEXT("int"), TEXT("Bridge-side GameThread wait in ms (default 120000); the tool layer sets it from its timeout")),
         }),
         PythonCommandFlags,
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleExecutePythonCommand(Params); }});
@@ -191,6 +192,7 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
         TEXT("Run a local .py file in the editor (synchronous; the call must finish within the timeout)."),
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("file_path"), TEXT("string"), TEXT("Absolute path to a .py file on this machine")),
+            MCPParamOpt(TEXT("timeout_ms"), TEXT("int"), TEXT("Bridge-side GameThread wait in ms (default 120000); the tool layer sets it from its timeout")),
         }),
         PythonFileFlags,
         [this](const TSharedPtr<FJsonObject>& Params) { return HandleExecutePythonFile(Params); }});

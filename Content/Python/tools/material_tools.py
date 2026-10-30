@@ -11,6 +11,8 @@ import logging
 from typing import Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -62,28 +64,9 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict containing the list of materials with custom expression nodes
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"folder": folder}
-            logger.info(f"Scanning materials in folder: {folder}")
-            response = unreal.send_command("scan_material_custom_nodes", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error scanning material custom nodes: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"folder": folder}
+        logger.info(f"Scanning materials in folder: {folder}")
+        return _bridge("scan_material_custom_nodes", params)
 
     @mcp.tool()
     def validate_custom_hlsl(ctx: Context, code: str, output_type: Optional[str] = None) -> Dict[str, Any]:
@@ -111,27 +94,10 @@ def register_material_tools(mcp: FastMCP):
             Dict with ok, error_count, warning_count and per-item errors/warnings
             (line, rule, message, suggestion, snippet)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"code": code}
-            if output_type is not None:
-                params["output_type"] = output_type
-            response = unreal.send_command("validate_custom_hlsl", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error validating custom HLSL: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params: Dict[str, Any] = {"code": code}
+        if output_type is not None:
+            params["output_type"] = output_type
+        return _bridge("validate_custom_hlsl", params)
 
     @mcp.tool()
     def validate_custom_expression(
@@ -161,27 +127,10 @@ def register_material_tools(mcp: FastMCP):
             Dict with pin_count, code_reference_count, errors and warnings
             (each item has kind and detail)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"asset_path": asset_path, "expression_name": expression_name}
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            response = unreal.send_command("validate_custom_expression", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error validating custom expression: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params: Dict[str, Any] = {"asset_path": asset_path, "expression_name": expression_name}
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        return _bridge("validate_custom_expression", params)
 
     @mcp.tool()
     def set_custom_input_name(
@@ -215,34 +164,17 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict with old_name, new_name, available_inputs (names after the rename)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {
-                "asset_path": asset_path,
-                "expression_name": expression_name,
-                "old_name": old_name,
-                "new_name": new_name,
-                "recompile": recompile,
-            }
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            logger.info(f"Renaming Custom input pin {old_name} -> {new_name} on {asset_path}[{expression_name}]")
-            response = unreal.send_command("set_custom_input_name", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error renaming custom input pin: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params: Dict[str, Any] = {
+            "asset_path": asset_path,
+            "expression_name": expression_name,
+            "old_name": old_name,
+            "new_name": new_name,
+            "recompile": recompile,
+        }
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        logger.info(f"Renaming Custom input pin {old_name} -> {new_name} on {asset_path}[{expression_name}]")
+        return _bridge("set_custom_input_name", params)
 
     @mcp.tool()
     def add_custom_input(
@@ -280,35 +212,18 @@ def register_material_tools(mcp: FastMCP):
             "Custom material ... missing input N (name)" - see get_material_compile_errors
             and its error_details.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {
-                "asset_path": asset_path,
-                "expression_name": expression_name,
-                "input_name": input_name,
-                "recompile": recompile,
-            }
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            if index is not None:
-                params["index"] = index
-            logger.info(f"Adding Custom input pin {input_name} on {asset_path}[{expression_name}]")
-            response = unreal.send_command("add_custom_input", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error adding custom input pin: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params: Dict[str, Any] = {
+            "asset_path": asset_path,
+            "expression_name": expression_name,
+            "input_name": input_name,
+            "recompile": recompile,
+        }
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        if index is not None:
+            params["index"] = index
+        logger.info(f"Adding Custom input pin {input_name} on {asset_path}[{expression_name}]")
+        return _bridge("add_custom_input", params)
 
     @mcp.tool()
     def remove_custom_input(
@@ -340,33 +255,16 @@ def register_material_tools(mcp: FastMCP):
             Dict with expression_name, removed_name, removed_index, was_connected,
             disconnected_from, input_count and the read-back `inputs`.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {
-                "asset_path": asset_path,
-                "expression_name": expression_name,
-                "input_name": input_name,
-                "recompile": recompile,
-            }
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            logger.info(f"Removing Custom input pin {input_name} on {asset_path}[{expression_name}]")
-            response = unreal.send_command("remove_custom_input", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error removing custom input pin: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params: Dict[str, Any] = {
+            "asset_path": asset_path,
+            "expression_name": expression_name,
+            "input_name": input_name,
+            "recompile": recompile,
+        }
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        logger.info(f"Removing Custom input pin {input_name} on {asset_path}[{expression_name}]")
+        return _bridge("remove_custom_input", params)
 
     @mcp.tool()
     def connect_material_pin(
@@ -402,40 +300,21 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict indicating success or failure
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {
+            "asset_path": asset_path,
+            "property": property,
+        }
+        if expression_name is not None:
+            params["expression_name"] = expression_name
+        if expression_type is not None:
+            params["expression_type"] = expression_type
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        if source_output_name is not None:
+            params["source_output_name"] = source_output_name
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "asset_path": asset_path,
-                "property": property,
-            }
-            if expression_name is not None:
-                params["expression_name"] = expression_name
-            if expression_type is not None:
-                params["expression_type"] = expression_type
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            if source_output_name is not None:
-                params["source_output_name"] = source_output_name
-
-            logger.info(f"Connecting material pin: {property} in {asset_path}")
-            response = unreal.send_command("connect_material_pin", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error connecting material pin: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Connecting material pin: {property} in {asset_path}")
+        return _bridge("connect_material_pin", params)
 
     @mcp.tool()
     def convert_static_switch_to_dynamic(ctx: Context, asset_name: str) -> Dict[str, Any]:
@@ -449,28 +328,9 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict indicating how many switches were converted
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_name": asset_name}
-            logger.info(f"Converting static switches in: {asset_name}")
-            response = unreal.send_command("convert_static_switch_to_dynamic", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error converting static switch: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_name": asset_name}
+        logger.info(f"Converting static switches in: {asset_name}")
+        return _bridge("convert_static_switch_to_dynamic", params)
 
     @mcp.tool()
     def recompile_material(
@@ -505,29 +365,12 @@ def register_material_tools(mcp: FastMCP):
             Dict with refreshed, recompiled, saved. Shader compilation is asynchronous, so read
             get_material_compile_errors once more after a moment.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"Recompiling material: {asset_path} (refresh={refresh}, save={save})")
-            response = unreal.send_command("recompile_material", {
-                "asset_path": asset_path,
-                "refresh": refresh,
-                "save": save,
-            })
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-
-        except Exception as e:
-            error_msg = f"Error recompiling material: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Recompiling material: {asset_path} (refresh={refresh}, save={save})")
+        return _bridge("recompile_material", {
+            "asset_path": asset_path,
+            "refresh": refresh,
+            "save": save,
+        })
 
     @mcp.tool()
     def get_material_compile_errors(ctx: Context, asset_path: str, since: Optional[str] = None) -> Dict[str, Any]:
@@ -565,30 +408,11 @@ def register_material_tools(mcp: FastMCP):
             log_errors_historical, since_boundary, boundary_source, scanned_lines,
             matched_lines, total_error_count
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path}
-            if since is not None:
-                params["since"] = since
-            logger.info(f"Getting compile errors for material: {asset_path}")
-            response = unreal.send_command("get_material_compile_errors", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error getting material compile errors: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path}
+        if since is not None:
+            params["since"] = since
+        logger.info(f"Getting compile errors for material: {asset_path}")
+        return _bridge("get_material_compile_errors", params)
 
     @mcp.tool()
     def list_material_expressions(ctx: Context, asset_path: str) -> Dict[str, Any]:
@@ -613,28 +437,9 @@ def register_material_tools(mcp: FastMCP):
         orphans still occupy names and inflate the node count. Clean the graph with
         wipe_material_graph rather than deleting by this flag.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path}
-            logger.info(f"Listing expressions of material: {asset_path}")
-            response = unreal.send_command("list_material_expressions", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error listing material expressions: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path}
+        logger.info(f"Listing expressions of material: {asset_path}")
+        return _bridge("list_material_expressions", params)
 
     @mcp.tool()
     def get_material_graph(ctx: Context, asset_path: str) -> Dict[str, Any]:
@@ -651,28 +456,9 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict with edges, property_connections, parameters, expression_count
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path}
-            logger.info(f"Getting material graph: {asset_path}")
-            response = unreal.send_command("get_material_graph", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error getting material graph: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path}
+        logger.info(f"Getting material graph: {asset_path}")
+        return _bridge("get_material_graph", params)
 
     @mcp.tool()
     def get_material_expression_property(ctx: Context, asset_path: str, expression_name: str, property: str, expression_desc: Optional[str] = None) -> Dict[str, Any]:
@@ -704,30 +490,11 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict with value
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "expression_name": expression_name, "property": property}
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            logger.info(f"Getting expression property: {asset_path}[{expression_name}].{property}")
-            response = unreal.send_command("get_material_expression_property", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error getting expression property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "expression_name": expression_name, "property": property}
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        logger.info(f"Getting expression property: {asset_path}[{expression_name}].{property}")
+        return _bridge("get_material_expression_property", params)
 
     @mcp.tool()
     def set_material_expression_property(
@@ -772,36 +539,17 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict with success, recompiled (and warnings for code writes)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "asset_path": asset_path,
-                "expression_name": expression_name,
-                "property": property,
-                "value": value,
-                "recompile": recompile,
-            }
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            logger.info(f"Setting expression property: {asset_path}[{expression_name}].{property}")
-            response = unreal.send_command("set_material_expression_property", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting expression property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "asset_path": asset_path,
+            "expression_name": expression_name,
+            "property": property,
+            "value": value,
+            "recompile": recompile,
+        }
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        logger.info(f"Setting expression property: {asset_path}[{expression_name}].{property}")
+        return _bridge("set_material_expression_property", params)
 
     @mcp.tool()
     def create_material_expression(
@@ -850,39 +598,20 @@ def register_material_tools(mcp: FastMCP):
         Read the `outputs` array in the response when unsure; it comes from the same
         GetOutputs() the connect path validates against.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "asset_path": asset_path,
-                "expression_class": expression_class,
-                "editor_x": editor_x,
-                "editor_y": editor_y,
-            }
-            if desc is not None:
-                params["desc"] = desc
-            if code is not None:
-                params["code"] = code
-            if inputs is not None:
-                params["inputs"] = inputs
-            logger.info(f"Creating expression {expression_class} in: {asset_path}")
-            response = unreal.send_command("create_material_expression", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error creating material expression: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {
+            "asset_path": asset_path,
+            "expression_class": expression_class,
+            "editor_x": editor_x,
+            "editor_y": editor_y,
+        }
+        if desc is not None:
+            params["desc"] = desc
+        if code is not None:
+            params["code"] = code
+        if inputs is not None:
+            params["inputs"] = inputs
+        logger.info(f"Creating expression {expression_class} in: {asset_path}")
+        return _bridge("create_material_expression", params)
 
     @mcp.tool()
     def delete_material_expression(
@@ -895,32 +624,13 @@ def register_material_tools(mcp: FastMCP):
         Delete one expression by unique name or description. Index is deprecated.
         Duplicate or missing locators return candidates and do not delete.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path}
-            if expression_name is not None:
-                params["expression_name"] = expression_name
-            if expression_desc is not None:
-                params["expression_desc"] = expression_desc
-            logger.info(f"Deleting expression from: {asset_path}")
-            response = unreal.send_command("delete_material_expression", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error deleting material expression: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path}
+        if expression_name is not None:
+            params["expression_name"] = expression_name
+        if expression_desc is not None:
+            params["expression_desc"] = expression_desc
+        logger.info(f"Deleting expression from: {asset_path}")
+        return _bridge("delete_material_expression", params)
 
     @mcp.tool()
     def delete_material_expressions(
@@ -942,19 +652,10 @@ def register_material_tools(mcp: FastMCP):
                 expression_type); a selector matching nothing or several expressions fails
                 only its own item
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            response = unreal.send_command("delete_material_expressions", {
-                "asset_path": asset_path,
-                "expressions": expressions,
-            })
-            return response or {"success": False, "message": "No response from Unreal Engine"}
-        except Exception as e:
-            return {"success": False, "message": f"Error deleting material expressions: {e}"}
+        return _bridge("delete_material_expressions", {
+            "asset_path": asset_path,
+            "expressions": expressions,
+        })
 
     @mcp.tool()
     def wipe_material_graph(
@@ -978,25 +679,9 @@ def register_material_tools(mcp: FastMCP):
             Dict with iterations, deleted_total, remaining. remaining != 0 means the
             graph could not be emptied: success is false and error is "wipe_incomplete".
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "max_iterations": max_iterations}
-            logger.info(f"Wiping material graph: {asset_path}")
-            response = unreal.send_command("wipe_material_graph", params)
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            return response
-        except Exception as e:
-            error_msg = f"Error wiping material graph: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "max_iterations": max_iterations}
+        logger.info(f"Wiping material graph: {asset_path}")
+        return _bridge("wipe_material_graph", params)
 
     @mcp.tool()
     def disconnect_material_property(ctx: Context, asset_path: str, property: str) -> Dict[str, Any]:
@@ -1010,28 +695,9 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict with success, property, was_connected
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "property": property}
-            logger.info(f"Disconnecting property {property} on: {asset_path}")
-            response = unreal.send_command("disconnect_material_property", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error disconnecting material property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "property": property}
+        logger.info(f"Disconnecting property {property} on: {asset_path}")
+        return _bridge("disconnect_material_property", params)
 
     @mcp.tool()
     def get_material_parameters(ctx: Context, asset_path: str) -> Dict[str, Any]:
@@ -1047,28 +713,9 @@ def register_material_tools(mcp: FastMCP):
         Returns:
             Dict with asset_kind (material / material_instance) and parameters array
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path}
-            logger.info(f"Getting material parameters: {asset_path}")
-            response = unreal.send_command("get_material_parameters", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error getting material parameters: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path}
+        logger.info(f"Getting material parameters: {asset_path}")
+        return _bridge("get_material_parameters", params)
 
     @mcp.tool()
     def set_material_parameters(ctx: Context, asset_path: str, values: Dict[str, Any], recompile: bool = False) -> Dict[str, Any]:
@@ -1095,28 +742,9 @@ def register_material_tools(mcp: FastMCP):
             Dict with updated and missing arrays, plus param_scope / affects_live_render /
             live_components_using_material / live_render_worlds / live_render_note
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"asset_path": asset_path, "values": values, "recompile": recompile}
-            logger.info(f"Setting material parameters on: {asset_path}")
-            response = unreal.send_command("set_material_parameters", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error setting material parameters: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params = {"asset_path": asset_path, "values": values, "recompile": recompile}
+        logger.info(f"Setting material parameters on: {asset_path}")
+        return _bridge("set_material_parameters", params)
 
     @mcp.tool()
     def preview_material_expression(
@@ -1334,29 +962,16 @@ def register_material_tools(mcp: FastMCP):
             no_resource (never rendered - hint points at the grid's NumAttributes / NumCells),
             readback_failed.
         """
-        from unreal_mcp_server import get_unreal_connection
-
         if not asset_path:
             return {"status": "error", "error": "Missing 'asset_path' parameter"}
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            params: Dict[str, Any] = {"asset_path": asset_path,
-                                      "tile_width": tile_width,
-                                      "sample_step": sample_step}
-            if tile_height is not None:
-                params["tile_height"] = tile_height
-            if png_path:
-                params["png_path"] = png_path
-            return unreal.send_command("read_render_target_stats", params)
-
-        except Exception as e:
-            error_msg = f"Error reading render target stats: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+        params: Dict[str, Any] = {"asset_path": asset_path,
+                                  "tile_width": tile_width,
+                                  "sample_step": sample_step}
+        if tile_height is not None:
+            params["tile_height"] = tile_height
+        if png_path:
+            params["png_path"] = png_path
+        return _bridge("read_render_target_stats", params)
 
     logger.info("Material tools registered successfully")

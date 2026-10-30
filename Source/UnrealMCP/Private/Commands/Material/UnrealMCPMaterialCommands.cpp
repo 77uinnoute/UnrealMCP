@@ -994,7 +994,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleConnectMaterialPin(con
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' or 'property' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1152,7 +1152,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleConnectMaterialExpress
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1389,7 +1389,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleRecompileMaterial(cons
     Params->TryGetBoolField(TEXT("refresh"), bRefresh);
     Params->TryGetBoolField(TEXT("save"), bSave);
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1433,7 +1433,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleGetMaterialCompileErro
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1653,7 +1653,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleListMaterialExpression
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1728,7 +1728,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleGetMaterialGraph(const
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1843,7 +1843,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleGetMaterialExpressionP
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path', expression_name/expression_desc/expression_type or 'property' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -1910,7 +1910,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleSetMaterialExpressionP
     bool bRecompile = false;
     Params->TryGetBoolField(TEXT("recompile"), bRecompile);
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2055,7 +2055,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleCreateMaterialExpressi
     FString Desc;
     const bool bHasDesc = Params->TryGetStringField(TEXT("desc"), Desc);
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2200,7 +2200,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleWipeMaterialGraph(cons
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2268,7 +2268,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleDeleteMaterialExpressi
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' or expression_name/expression_desc/expression_type parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2347,7 +2347,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleDisconnectMaterialProp
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' or 'property' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2398,7 +2398,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleGetMaterialParameters(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UObject* Obj = LoadObject<UMaterialInterface>(nullptr, *AssetPath);
+    UObject* Obj = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterialInterface>(AssetPath);
     if (!Obj)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2675,7 +2675,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleSetMaterialParameters(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("'values' must contain at least one parameter"));
     }
 
-    UObject* Obj = LoadObject<UMaterialInterface>(nullptr, *AssetPath);
+    UObject* Obj = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterialInterface>(AssetPath);
     if (!Obj)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -2993,7 +2993,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleValidateCustomExpressi
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
     }
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -3214,7 +3214,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleSetCustomInputName(con
     bool bRecompile = false;
     Params->TryGetBoolField(TEXT("recompile"), bRecompile);
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -3311,7 +3311,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleAddCustomInput(const T
     bool bRecompile = false;
     Params->TryGetBoolField(TEXT("recompile"), bRecompile);
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));
@@ -3399,7 +3399,7 @@ TSharedPtr<FJsonObject> FUnrealMCPMaterialCommands::HandleRemoveCustomInput(cons
     bool bRecompile = false;
     Params->TryGetBoolField(TEXT("recompile"), bRecompile);
 
-    UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath);
+    UMaterial* Mat = FUnrealMCPCommonUtils::LoadAssetTyped<UMaterial>(AssetPath);
     if (!Mat)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *AssetPath));

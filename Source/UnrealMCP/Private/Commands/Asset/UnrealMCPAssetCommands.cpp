@@ -194,7 +194,9 @@ void FUnrealMCPAssetCommands::RegisterCommands(FMCPCommandRegistry& Registry)
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("asset_name"), TEXT("string"), TEXT("New asset name, e.g. \"M_MyMaterial\"")),
             MCPParam(TEXT("package_path"), TEXT("string"), TEXT("Content directory, e.g. /Game/Materials")),
-            MCPParam(TEXT("asset_class"), TEXT("string"), TEXT("unreal class, e.g. Material, ParticleSystem")),
+            MCPParamAliased(TEXT("asset_class"), TEXT("string"), TEXT("unreal class, e.g. Material, ParticleSystem"),
+                {TEXT("asset_class_name")}),
+            MCPParamOpt(TEXT("asset_class_name"), TEXT("string"), TEXT("Deprecated alias of 'asset_class'; the response echoes it in renamed_params[]")),
             MCPParamOpt(TEXT("factory"), TEXT("string"), TEXT("Factory class; default \"<asset_class>FactoryNew\"")),
             MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save the new asset's package (default true); pass false to batch creates and flush once yourself")),
         }), MCPFlags(false, false, false),
@@ -2873,7 +2875,7 @@ static TSharedPtr<FJsonObject> MoveOneAsset(UObject* SourceObject, const FString
     UObject* OldResolved = StaticFindObject(UObject::StaticClass(), /*Outer=*/ nullptr, *OldObjectPath);
     if (!OldResolved && FPackageName::DoesPackageExist(OldPackageName))
     {
-        OldResolved = LoadObject<UObject>(/*Outer=*/ nullptr, *OldObjectPath);
+        OldResolved = FUnrealMCPCommonUtils::LoadAssetTyped<UObject>(OldObjectPath);
     }
     const UObjectRedirector* OldRedirector = Cast<UObjectRedirector>(OldResolved);
     const UObject* NewResolved = StaticFindObject(UObject::StaticClass(), /*Outer=*/ nullptr, *NewObjectPath);

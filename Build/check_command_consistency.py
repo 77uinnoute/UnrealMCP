@@ -198,7 +198,7 @@ def collect_hidden():
 
 def collect_param_names():
     """Every parameter name declared by any command (used to ignore doc mentions of parameters)."""
-    pattern = re.compile(r'MCPParam(?:Opt)?\(\s*TEXT\("([a-z0-9_]+)"\)')
+    pattern = re.compile(r'MCPParam(?:Opt|Aliased)?\(\s*TEXT\("([a-z0-9_]+)"\)')
     names = set()
     for path in cpp_files():
         names.update(pattern.findall(read_text(path)))
@@ -333,7 +333,7 @@ def collect_tool_forwarded_command():
                     continue
                 func = inner.func
                 name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                if name not in ("send_command", "_send"):
+                if name not in SEND_CALL_NAMES:
                     continue
                 first = inner.args[0]
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
@@ -344,7 +344,7 @@ def collect_tool_forwarded_command():
 
 ENTRY_BLOCK = re.compile(r'MCP_REGISTER_COMMAND\(Registry, "([a-z0-9_]+)"(.*?)(?=MCP_REGISTER_COMMAND\(|\Z)',
                          re.DOTALL)
-REQUIRED_PARAM = re.compile(r'MCPParam\(\s*TEXT\("([a-z0-9_]+)"\)')
+REQUIRED_PARAM = re.compile(r'MCPParam(?:Aliased)?\(\s*TEXT\("([a-z0-9_]+)"\)')
 
 
 def collect_required_params():
@@ -359,11 +359,11 @@ def collect_required_params():
     return required
 
 
-ANY_PARAM = re.compile(r'MCPParam(?:Opt)?\(\s*TEXT\("([a-z0-9_]+)"\)')
+ANY_PARAM = re.compile(r'MCPParam(?:Opt|Aliased)?\(\s*TEXT\("([a-z0-9_]+)"\)')
 
 # `const auto FooParam = []() { return MCPParamOpt(TEXT("foo"), ...); };`
 HELPER_LAMBDA = re.compile(
-    r'(?:const\s+)?auto\s+(\w+)\s*=\s*\[\s*[^\]]*\]\s*\(\s*\)\s*\{\s*return\s+MCPParam(?:Opt)?\(\s*TEXT\("([a-z0-9_]+)"\)')
+    r'(?:const\s+)?auto\s+(\w+)\s*=\s*\[\s*[^\]]*\]\s*\(\s*\)\s*\{\s*return\s+MCPParam(?:Opt|Aliased)?\(\s*TEXT\("([a-z0-9_]+)"\)')
 # `const TArray<FMCPParamSpec> FooParams = { BarParam(), MCPParam(TEXT("baz"), ...) };`
 SPEC_ARRAY = re.compile(r'(?:const\s+)?(?:TArray<FMCPParamSpec>|auto)\s+(\w+)\s*=\s*\{(.*?)\}\s*;', re.DOTALL)
 # `Registry.AddParamsToCategory(TEXT("particle"), { MCPParamOpt(TEXT("detail"), ...), ... });`
@@ -502,7 +502,7 @@ def collect_tool_send_params():
                     continue
                 func = inner.func
                 name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                if name not in ("send_command", "_send"):
+                if name not in SEND_CALL_NAMES:
                     continue
                 first = inner.args[0]
                 if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):

@@ -53,6 +53,9 @@ metadata:
 - 单子面板（`Border` / `SizeBox` …）已满时 → `unsupported_parent`，且命令会把半成品控件丢掉（不留孤儿）。
 - 常用类：`CanvasPanel` / `VerticalBox` / `HorizontalBox` / `Overlay` / `GridPanel` / `ScrollBox` / `SizeBox` / `Border` / `WrapBox` / `Image` / `TextBlock` / `Button` / `ProgressBar` / `Slider` / `CheckBox` / `EditableText` / `Spacer`。
 - **建资产时就能选父类**：`create_umg_widget_blueprint(name, path?, parent_class?)` —— 原生类名（默认 `UserWidget`，它自己抽象但可以被继承，不是错误）或**某个控件蓝图的资产路径**（项目里最常见的"继承自己的 base widget"）。传错 → `invalid_parent_class`；原生候选清单对父类通常为空（抽象的 `UserWidget` 被过滤、具体的 user widget 全是蓝图），所以拒绝时给的是 `hint`：改传资产路径。
+- **根控件也能选（2026-10-15 起）**：`root_widget_class` —— 任意**具体**控件类（`SizeBox` / `Border` / `VerticalBox` / `Overlay` / `ScrollBox` …），或 `"none"`/`"empty"`/`"null"` 留**空树**（之后第一个 `add_widget` 自己当根，回包 `became_root: true`）。默认 `CanvasPanel`，与编辑器新建时一致，**现有脚本不受影响**。回包给 `has_root` + `root_widget_name` / `root_widget_class` 自证；传错 → `invalid_root_widget_class`（+ `root_widget_classes`），传抽象类（`PanelWidget` / `Widget`）→ `abstract_root_widget_class`。
+  - **为什么需要它**：`UCanvasPanel` 是**无布局容器**，按锚点/偏移摆子件、**不声明内在尺寸** ⇒ 根是画布时，这个 user widget 的 desired size = 0，**放进任何按内容量尺寸的父（`HorizontalBox`/`VerticalBox`/自动 SizeBox）都会量成 0×0**（实测：卡片被量成 0，纸底与内容全塌，只剩溢出的小字）。根是 `SizeBox`/`Border`/`Box` 就有尺寸。三种解法任选：① 建资产时 `root_widget_class="SizeBox"`（最直接）；② 放它的**父**侧包一层 SizeBox 或给槽尺寸（我给 `WBP_FTF_Toolbar` 的卡片就是这么绕的）；③ 不嵌套 user widget，把子件直接建在父树的对应面板里。
+  - 换根（`set_root_widget`）解决不了这个：它把**旧根塞进新根当子件**（于是 SizeBox 里还留着一层画布），而且单子件面板已有子件时会被拒。
 - **控件是否暴露为变量**：创建时用 `add_widget(as_variable=…)`；**已有的控件**用 `set_widget_variable(blueprint_name, widget_name, as_variable)`（`bIsVariable` 没开给反射，`set_widget_properties` 改不了）。命令会编译并回读生成类属性，不符 → `variable_not_effective`；请求的状态与现状相同 → `changed: false`（不写、不谎报）。
 
 ## 三、写属性（`set_widget_properties`）
@@ -255,6 +258,19 @@ keys=[{"time": 0.0, "value": {"translation": [0.0, 0.0], "angle": 0.0}},
    症状与窗口在屏与否**无关**：实测（2026-10-10）窗口矩形落在桌面内、`IsVisible=true`、`IsMinimized=false`、桌面截图里窗口也明明在，但设计器的**设计视口里只有空灰网格**；`FSlateApplication::TakeScreenshot` 走 `Renderer->PrepareToTakeScreenshot`（`SlateApplication.cpp:4217`）从窗口后缓冲拷像素，拷不到就 `return false`，而这条路径**判不出**"视图陈旧"（所以任何基于窗口几何的预检都会误判为"可以截"）。
    做法（实测有效）：`close_asset_editors(asset_path=…)` → `open_umg_designer(blueprint_name=…)` → 重新 `take_screenshot`。当场变化：同一资产同一次调用由 `widget_preview_screenshot_failed` 变为正常图（`553975` 字节）。
    反面做法：把窗口拖回屏内只对"窗口被最小化/移出桌面"有效（那种情况回的是 `pie_screenshot_failed` 一类的窗口侧错误），对"设计器视图陈旧"无效 —— 别在这上面花时间。
+5. **窗口的 show state 刚变过时不要截（会 AV 把编辑器打死）**：实测 2026-10-12，PIE 运行中调 `route="slate"`：窗口最小化时调用会正常回 `pie_screenshot_failed`（`window_minimized: true`，这是好行为），但从外部 `ShowWindowAsync(SW_RESTORE)` 把窗口拉回来**紧接着**再调同一个截图 ⇒ 客户端 `No response from Unreal Engine`，日志 `Unhandled Exception: EXCEPTION_ACCESS_VIOLATION reading address 0xffffffffffffffff`、栈顶 `SlateCore → Slate → ApplicationCore → USER32`，编辑器进程直接退出（`AudioMixerRenderThread crashed` 是表象）。做法：需要 UMG 的 `route="slate"` 截图安排在整个流程里"**窗口确定稳定**"的时刻（刚 `start_editor.bat` 起完、或用户确认窗口已在前台之后），**不要**与"外部动窗口 / 切分辨率 / 拖窗口"的调用相邻；   只要不看 UMG 就用默认 backbuffer 路（回包 `captured_via: pie_viewport_readback`）。
+6. **UI 出图不要依赖控件自己的 tick 把状态推上去**。控件的可见性/内容是它在 `NativeTick` 里读外部状态决定的，
+   这本身没问题；但**编辑器窗口在后台时 PIE tick 被节流**，到 `take_screenshot` 那一刻可能一次都没跑到
+   （实测：面板 `visibility=COLLAPSED`、15 个子件全是空数据，而回包里图片大小、`captured_via: pie_slate`、
+   `includes_umg: true` 全都正常；`get_pie_widget_tree` 那边给出 `has_geometry: false` +
+   "Slate only arranges a tree while it is drawing" 的提示）。**做法**：截图前由脚本把该控件实例的状态
+   **显式推一次** —— 从宿主（GameMode/PlayerController）拿到实例引用，直接调它的 `SetXxx` 方法 +
+   `w.set_visibility(...)`，再截图；   不要"设个全局开关然后等它自己刷新"。判据用控件自己的回读方法（如
+   `call_method("DescribePanel")`）或 `get_pie_widget_tree` 的结构，而不是"截图看着有"。
+   **更狠的一条：`Collapsed` 的 user widget 不会 tick** —— 若控件在 `NativeTick` 里决定自己该不该显示，
+   那它一旦被 Collapsed 就再也醒不过来（实测：subsystem 报 `open=1`、控件仍 `COLLAPSED`、子件全空；只有脚本
+   显式推它才显示；同一时刻 Actor 的 tick 是正常的，所以不是"PIE 没 tick"）。**做法**：控件自身保持可见
+   （`SelfHitTestInvisible`），"关着"用**隐藏内容**表达（背景图 Collapsed + 子件 Collapsed + 提示框隐藏）；
 
 ## 七、验收骨架（放 `Saved/MCPScripts/`，跑完自删夹具）
 
@@ -268,6 +284,10 @@ FAILURES = []
 def bridge(command, **params):                       # 与 TCP 同形状的同步派发（编辑器内回环）
     return json.loads(unreal.UnrealMCPPythonAPI.execute_mcp_command(command, json.dumps(params)))
 
+def tolerated(command, **params):                    # 预期会失败的那几条：放行给断言，不抛
+    params["on_error"] = "continue"                  # 守卫消费这个键，不会转给 handler
+    return json.loads(unreal.UnrealMCPPythonAPI.execute_mcp_command(command, json.dumps(params)))
+
 def call(command, **params):                         # (result, error_code)
     r = bridge(command, **params); res = r.get("result") or {}
     if r.get("status") == "success" and res.get("success") is not False: return res, None
@@ -278,15 +298,26 @@ def check(ok, msg, extra=None):
     if not ok: FAILURES.append(msg)
 
 def main():
-    bridge("safe_delete_asset", asset_path=PROBE)                      # 夹具从零开始
+    tolerated("safe_delete_asset", asset_path=PROBE)                   # 夹具从零开始（不存在是正常的）
     call("create_umg_widget_blueprint", name=PROBE_NAME, path=PROBE_DIR)
     ...                                                                # 断言集中收集，不中途 abort
-    deletion = bridge("safe_delete_asset", asset_path=PROBE)
+    deletion = tolerated("safe_delete_asset", asset_path=PROBE)
     check((deletion.get("result") or {}).get("deleted") is True, "fixture deleted", deletion)
     assert not FAILURES, FAILURES
 
 main()
 ```
+
+> **回环是 fail-fast 的**（2026-10-15 起）：脚本里某条 bridge 指令失败会抛
+> `unreal_mcp_loopback.UnrealMCPCommandError`（消息带命令名与 `error_code`），**脚本当场中断**，
+> 不再"把失败当返回值、后面几十条继续跑"。所以**故意造失败的每一步**（负例、可能不存在的夹具、
+> 断言 `deleted` 的删除）都必须显式放行：逐调用 `"on_error": "continue"`，或整段脚本开头
+> `import unreal_mcp_loopback; unreal_mcp_loopback.FAIL_FAST = False`。
+>
+> 配套的另一半（同日）：**"没达到预期效果"一律是失败**，不再有 `success:true` 但什么也没干的形状 ——
+> `safe_delete_asset` 拒删（被引用 / 关卡是 World Partition / 资产编辑器开着 / 引用不可达）现在直接回
+> `success:false` + `error_code`（= 原来的 `reason`），`set_widget_properties` 之类"全失败"的批同样
+> 回 `nothing_applied`；`dry_run` 是查询，仍 `success:true` 且**不带 `deleted` 字段**。
 
 - 运行：`execute_python_file(file_path=<绝对路径>, timeout=300)`（`timeout` 是**工具面**参数，bridge 命令只有 `file_path`/`deferred`）；脚本长/编译多时才考虑 `deferred=True`。
 - **断言用回读**：`applied[].value_after`、`slot.*`、`child_order`、`removed_*`、`blockers`；别断言"命令返回 success"。
@@ -323,6 +354,16 @@ main()
 - **`Border` 只有一个 brush ⇒ 画不出"描边 + 透明心"**：边框、圆角、发光、选中环都只能靠**带 9-slice margin 的贴图**（`draw_as=BOX` + `margin=(l,t,r,b)`）。用纯色 Border 当"框"只能得到实心块（选中框会盖住图标，这是实测踩到的）。
 - **9-slice 贴图不要用 AI 生图**：出图尺寸不是你请求的那个，而且边框宽度左右不对称 ⇒ 切不出精确 margin。程序化画（PIL/Python 画完存 PNG）才能拿到对称、精确的像素。导入走 `import_texture`：`srgb=true` / `compression=TC_EDITOR_ICON` / `lod_group=TEXTUREGROUP_UI` / `mip_gen=TMGS_NO_MIPMAPS`（逐项 before→after 回读）。
 - **`SizeBox` 的尺寸覆写没有 `b_override_*` 属性可写**：用方法 `set_width_override(v)` / `set_height_override(v)`（清除用 `clear_*`）；写 `b_override_width_override` 会报属性不存在。
+- **`VerticalBox` 自动尺寸 + 自动换行文字会叠在一起，用显式 canvas 锚点最稳**：两张 `TextBlock` 放进
+  `auto_size` 的 `VerticalBox`（`size_rule=Automatic`），PIE 量到的落位是"第二行 +46 单位"而堆叠位置应为
+  "+61" ⇒ 两行字重叠（观感上是"字压在字上"，截图一眼能看出）。改成**各自一个居中的 canvas 槽**
+  （`anchors=[0.5,y,0.5,y]` + `alignment=[0.5,0.5]` + `auto_size=True`，`y` 取 0.28 / 0.62 这类比例）
+  立刻确定：不需要猜容器怎么分摊高度。判据是 PIE 里 `get_pie_widget_tree` 报的
+  `geometry.absolute_position`，两行之间的差应 ≥ 上面一行的高度 + padding。
+- **`UImage::SetBrushFromTexture` 会把 brush 尺寸设成贴图的尺寸，槽小就溢出**：贴图 128×128、槽只有 84 时，
+  `SetBrushFromTexture(tex, true)` 让 brush 的 `ImageSize=128`，图会按 128 画（Overlay 不裁剪）⇒ 要么
+  在 `set_widget_brush(..., image_size=[w,h])` 里明确尺寸，要么在 C++ 里 `SetBrushFromTexture` 之后
+  再 `Image->SetBrushSize(FVector2D(w, h))`。**别指望宿主容器把它裁到槽里**。
 - **面板"外框 + 内衬"两色底**：内衬 Border 在 Overlay 里若是 `HAlign_Left/VAlign_Top`，它就只包住自己的内容，其余区域露出外框色（表现为一块"跑偏的斜框"）。要真正套住整块，把内衬的 **Overlay 槽**改成 `HAlign_Fill/VAlign_Fill`，并给外框 `Padding` 留出边框厚度。（slot 的 padding/对齐两条路都能写。）
 - **枚举成员名与 C++ 不同名**：`unreal.VerticalAlignment.V_ALIGN_CENTER/V_ALIGN_FILL`、`unreal.HorizontalAlignment.H_ALIGN_FILL`、`unreal.TextJustify.CENTER`、`unreal.SlateBrushDrawType.BOX`。写之前先 `dir(unreal.<Enum>)`（实测 `VerticalAlignment.CENTER` 不存在）。
 - **往 Box 里加按钮别用 `add_button_to_widget`**：它默认带 `position`，非 Canvas 父会被正面拒绝（`unsupported_parent`）。用 `add_widget`(Button) + `add_widget`(TextBlock, parent=按钮) 两步。

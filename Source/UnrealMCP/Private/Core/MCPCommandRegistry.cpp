@@ -1,4 +1,5 @@
 #include "Core/MCPCommandRegistry.h"
+#include "Core/MCPCommandJournal.h"
 #include "Commands/Common/UnrealMCPCommonUtils.h"
 
 FMCPCommandRegistry& FMCPCommandRegistry::Get()
@@ -125,10 +126,243 @@ const FMCPCommandEntry* FMCPCommandRegistry::Find(const FString& Name) const
     return Index ? &Commands[*Index] : nullptr;
 }
 
+namespace
+{
+    /**
+     * Records one dispatch in the command journal: opened on construction, closed on destruction - so the
+     * unwinding path of a handler that throws still leaves a finished entry behind instead of a permanent
+     * "in flight" ghost.
+     */
+    class FMCPJournalScope
+    {
+    public:
+        FMCPJournalScope(const FString& InCommand, const FString& InCategory, const TSharedPtr<FJsonObject>& Params)
+            : Seq(FMCPCommandJournal::Get().Begin(InCommand, InCategory, Params))
+        {
+        }
+
+        ~FMCPJournalScope()
+        {
+            FMCPCommandJournal::Get().Finish(Seq, ErrorCode);
+        }
+
+        void RecordOutcome(const TSharedPtr<FJsonObject>& Reply)
+        {
+            if (!Reply.IsValid() || FUnrealMCPCommonUtils::ResponseIndicatesSuccess(Reply))
+            {
+                return;
+            }
+            FString Code;
+            if (!Reply->TryGetStringField(TEXT("error_code"), Code))
+            {
+                Code = TEXT("failed");
+            }
+            ErrorCode = Code;
+        }
+
+        void RecordError(const FString& Code)
+        {
+            ErrorCode = Code;
+        }
+
+    private:
+        uint64 Seq;
+        FString ErrorCode;
+    };
+
+    FString JsonTypeName(EJson Type)
+    {
+        switch (Type)
+        {
+        case EJson::Null:    return TEXT("null");
+        case EJson::String:  return TEXT("string");
+        case EJson::Number:  return TEXT("number");
+        case EJson::Boolean: return TEXT("boolean");
+        case EJson::Array:   return TEXT("array");
+        case EJson::Object:  return TEXT("object");
+        default:             return TEXT("none");
+        }
+    }
+
+    /**
+     * Whether a value is clearly incompatible with the declared type.
+     *
+     * Deliberately lenient on scalars: a tool may forward "3" where the spec says int, or 1 where it says
+     * bool, and the handler reads what it needs. Only structural mismatches (object/array vs scalar) and
+     * non-numeric text for a numeric parameter are refused - those cannot be interpreted by any handler,
+     * so the current behaviour was a mid-handler failure with a much worse message ("Required parameter X
+     * missing" or a KeyError from python) instead of a uniform refusal.
+     */
+    bool ValueMatchesDeclaredType(const TSharedPtr<FJsonValue>& Value, const FString& DeclaredType)
+    {
+        const FString Type = DeclaredType.ToLower();
+        const EJson Actual = Value->Type;
+
+        if (Type == TEXT("object"))
+        {
+            return Actual == EJson::Object;
+        }
+        if (Type == TEXT("array"))
+        {
+            return Actual == EJson::Array;
+        }
+        if (Type == TEXT("bool"))
+        {
+            if (Actual == EJson::Boolean)
+            {
+                return true;
+            }
+            if (Actual == EJson::Number)
+            {
+                const double Number = Value->AsNumber();
+                return Number == 0.0 || Number == 1.0;
+            }
+            if (Actual == EJson::String)
+            {
+                const FString Text = Value->AsString().ToLower();
+                return Text == TEXT("true") || Text == TEXT("false") || Text == TEXT("0") || Text == TEXT("1");
+            }
+            return false;
+        }
+        if (Type == TEXT("int") || Type == TEXT("float"))
+        {
+            if (Actual == EJson::Number)
+            {
+                return Type == TEXT("float") || FMath::IsNearlyEqual(Value->AsNumber(), FMath::RoundToDouble(Value->AsNumber()));
+            }
+            if (Actual == EJson::String)
+            {
+                const FString Text = Value->AsString().TrimStartAndEnd();
+                return Text.IsNumeric();
+            }
+            return false;
+        }
+        if (Type == TEXT("string") || Type == TEXT("any") || Type == TEXT("enum"))
+        {
+            // Scalars are all printable into a string; only containers are refused.
+            return Actual != EJson::Object && Actual != EJson::Array;
+        }
+        return true;
+    }
+}
+
 TSharedPtr<FJsonObject> FMCPCommandRegistry::Execute(const FString& Name, const TSharedPtr<FJsonObject>& Params) const
 {
     if (const FMCPCommandEntry* Entry = Find(Name))
     {
+        FMCPJournalScope JournalScope(Entry->Name, Entry->Category, Params);
+
+        // Declared-contract enforcement, once, before the handler runs. The registry already knows which
+        // parameters are required and what shape each one takes (it is what list_mcp_commands reports), but
+        // nothing checked it: every handler re-derived "is X missing / is X a dict" by hand, in its own
+        // wording, and the python side had to guess which key to send. A missing required parameter and a
+        // structurally wrong value are refused here with one shape (see the fields below); a merely
+        // scalar-vs-scalar difference is accepted on purpose (see ValueMatchesDeclaredType).
+        TArray<FString> MissingRequired;
+        TArray<TSharedPtr<FJsonValue>> BadTypes;
+        TArray<TSharedPtr<FJsonValue>> BadValues;
+
+        const TSharedPtr<FJsonObject> Provided = Params.IsValid() ? Params : MakeShareable(new FJsonObject);
+
+        auto HasValue = [&Provided](const FString& Key) -> bool
+        {
+            const TSharedPtr<FJsonValue> Value = Provided->TryGetField(Key);
+            return Value.IsValid() && Value->Type != EJson::Null;
+        };
+
+        for (const FMCPParamSpec& Spec : Entry->Params)
+        {
+            if (Spec.bRequired && !HasValue(Spec.Name))
+            {
+                const bool bSatisfiedByAlias = Spec.AlsoSatisfiedBy.ContainsByPredicate(
+                    [&HasValue](const FString& Alias) { return HasValue(Alias); });
+                if (!bSatisfiedByAlias)
+                {
+                    MissingRequired.Add(Spec.Name);
+                    continue;
+                }
+            }
+
+            const TSharedPtr<FJsonValue> Value = Provided->TryGetField(Spec.Name);
+            if (!Value.IsValid() || Value->Type == EJson::Null)
+            {
+                continue;
+            }
+
+            if (!ValueMatchesDeclaredType(Value, Spec.Type))
+            {
+                TSharedPtr<FJsonObject> Item = MakeShareable(new FJsonObject);
+                Item->SetStringField(TEXT("param"), Spec.Name);
+                Item->SetStringField(TEXT("expected"), Spec.Type);
+                Item->SetStringField(TEXT("actual"), JsonTypeName(Value->Type));
+                BadTypes.Add(MakeShared<FJsonValueObject>(Item));
+                continue;
+            }
+
+            if (Spec.AllowedValues.Num() > 0 && Value->Type == EJson::String
+                && !Spec.AllowedValues.Contains(Value->AsString()))
+            {
+                TSharedPtr<FJsonObject> Item = MakeShareable(new FJsonObject);
+                Item->SetStringField(TEXT("param"), Spec.Name);
+                Item->SetStringField(TEXT("value"), Value->AsString());
+                TArray<TSharedPtr<FJsonValue>> Allowed;
+                Allowed.Reserve(Spec.AllowedValues.Num());
+                for (const FString& Legal : Spec.AllowedValues)
+                {
+                    Allowed.Add(MakeShared<FJsonValueString>(Legal));
+                }
+                Item->SetArrayField(TEXT("allowed_values"), Allowed);
+                BadValues.Add(MakeShared<FJsonValueObject>(Item));
+            }
+        }
+
+        if (MissingRequired.Num() > 0 || BadTypes.Num() > 0 || BadValues.Num() > 0)
+        {
+            const FString Code = MissingRequired.Num() > 0 ? TEXT("missing_params")
+                : (BadTypes.Num() > 0 ? TEXT("bad_param_type") : TEXT("invalid_value"));
+            const FString Message = MissingRequired.Num() > 0
+                ? FString::Printf(TEXT("%s is missing required parameter(s): %s"),
+                    *Entry->Name, *FString::Join(MissingRequired, TEXT(", ")))
+                : FString::Printf(TEXT("%s was called with parameter value(s) its declaration rejects"), *Entry->Name);
+
+            TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(Code, Message);
+            if (MissingRequired.Num() > 0)
+            {
+                TArray<TSharedPtr<FJsonValue>> Items;
+                for (const FString& Param : MissingRequired)
+                {
+                    Items.Add(MakeShared<FJsonValueString>(Param));
+                }
+                Error->SetArrayField(TEXT("missing_params"), Items);
+            }
+            if (BadTypes.Num() > 0)
+            {
+                Error->SetArrayField(TEXT("bad_param_types"), BadTypes);
+            }
+            if (BadValues.Num() > 0)
+            {
+                Error->SetArrayField(TEXT("invalid_values"), BadValues);
+            }
+
+            TArray<TSharedPtr<FJsonValue>> Declared;
+            for (const FMCPParamSpec& Spec : Entry->Params)
+            {
+                TSharedPtr<FJsonObject> Item = MakeShareable(new FJsonObject);
+                Item->SetStringField(TEXT("name"), Spec.Name);
+                Item->SetStringField(TEXT("type"), Spec.Type);
+                Item->SetBoolField(TEXT("required"), Spec.bRequired);
+                Declared.Add(MakeShared<FJsonValueObject>(Item));
+            }
+            Error->SetArrayField(TEXT("declared_params"), Declared);
+            Error->SetStringField(TEXT("hint"), FString::Printf(
+                TEXT("Nothing ran. Send the parameter(s) named above; list_mcp_commands reports the full "
+                     "declaration of '%s' (types, defaults, allowed values)."), *Entry->Name));
+
+            UE_LOG(LogTemp, Warning, TEXT("MCPCommandRegistry: rejected '%s' (%s)"), *Entry->Name, *Code);
+            JournalScope.RecordError(Code);
+            return Error;
+        }
+
         // One persist decision per dispatch. The flag is what the command's caller asked for; helpers
         // that save on their own (GuardPersist, MakeWriteResult, the compile handlers) read it back
         // through IsPersistEnabled() instead of deciding again - a batch that asked for persist=false
@@ -217,6 +451,7 @@ TSharedPtr<FJsonObject> FMCPCommandRegistry::Execute(const FString& Name, const 
         {
             FUnrealMCPCommonUtils::AddEditorWorldWriteWarning(Result, Entry->Name);
         }
+        JournalScope.RecordOutcome(Result);
         return Result;
     }
 
@@ -228,6 +463,8 @@ TSharedPtr<FJsonObject> FMCPCommandRegistry::Execute(const FString& Name, const 
     // usually a typo - but a few tools exist only in python (preview_material_expression: its
     // build_material_preview step is a command, the render/PNG step is python), and those can never
     // be called from execute_python_* inside the editor.
+    FMCPJournalScope JournalScope(Name, TEXT("unknown"), Params);
+    JournalScope.RecordError(TEXT("unknown_command"));
     TSharedPtr<FJsonObject> Error = FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("unknown_command"),
         FString::Printf(TEXT("Unknown command: %s"), *Name));
     Error->SetStringField(TEXT("hint"),

@@ -389,6 +389,16 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 	{
 		PackagePath = TEXT("/Game/Widgets");
 	}
+	// Unmounted folder -> CreatePackage() is a fatal engine error, so refuse it before the package is made.
+	{
+		FString NormalizedFolder;
+		if (TSharedPtr<FJsonObject> FolderError = FUnrealMCPCommonUtils::ValidateContentFolderOrError(
+			PackagePath, TEXT("path"), NormalizedFolder))
+		{
+			return FolderError;
+		}
+		PackagePath = NormalizedFolder;
+	}
 	const FString FullPath = PackagePath + TEXT("/") + AssetName;
 
 	// Check if asset already exists

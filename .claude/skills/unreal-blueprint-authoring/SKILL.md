@@ -1,6 +1,6 @@
 ---
 name: unreal-blueprint-authoring
-description: "UE5（UnrealMCP）里用 MCP 工具 + python 脚本程序化建/改蓝图的方法：图与节点的寻址（graph_name / node guid）、建节点→写引脚→连线→回读的固定顺序、常量与变量节点、组件层级与 socket 挂接、节点自身属性写入（pins_rebuilt）、结构化错误码与候选字段、批量脚本里走 bridge 回环或反射库的方式、逐步验证纪律。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— find_blueprint_nodes / verify_blueprint_graph / list_blueprint_graphs / add_blueprint_event_node / add_blueprint_function_node / add_blueprint_input_action_node / add_blueprint_variable / add_blueprint_variable_node / add_blueprint_literal_node / add_blueprint_node_by_class / add_blueprint_self_reference / add_blueprint_get_self_component_reference / connect_blueprint_nodes / set_blueprint_pin_default / set_blueprint_node_property / disconnect_blueprint_pins / delete_blueprint_nodes / compile_blueprint / create_blueprint / add_component_to_blueprint / set_component_property / set_static_mesh_properties / set_physics_properties / set_blueprint_property / attach_component_to_component；以及任何涉及「用 MCP 改/建 UE 蓝图、蓝图图节点连线、EventGraph/函数图/MacroGraph 寻址、K2 节点、Cast/Switch/Comment 节点、变量 Get/Set 节点、局部变量、组件层级与 socket、payload pin 默认值、unreal.UnrealMCPBlueprintGraphLibrary 反射库、蓝图验收脚本」的任务。"
+description: "UE5（UnrealMCP）里用 MCP 工具 + python 脚本程序化建/改蓝图的方法：图与节点的寻址（graph_name / node guid）、建节点→写引脚→连线→回读的固定顺序、常量与变量节点、组件层级与 socket 挂接、节点自身属性写入（pins_rebuilt）、结构化错误码与候选字段、批量脚本里走 bridge 回环或反射库的方式、逐步验证纪律。触发场景：准备调用以下任一 MCP 工具前 MUST 加载本 Skill —— find_blueprint_nodes / verify_blueprint_graph / list_blueprint_graphs / add_blueprint_event_node / add_blueprint_function_node / add_blueprint_input_action_node / add_blueprint_variable / add_blueprint_variable_node / add_blueprint_literal_node / add_blueprint_node_by_class / add_blueprint_self_reference / add_blueprint_get_self_component_reference / connect_blueprint_nodes / set_blueprint_pin_default / set_blueprint_node_property / disconnect_blueprint_pins / delete_blueprint_nodes / compile_blueprint / create_blueprint / add_component_to_blueprint / set_component_property / set_static_mesh_properties / set_physics_properties / set_blueprint_property / get_blueprint_property / attach_component_to_component；以及任何涉及「用 MCP 改/建 UE 蓝图、蓝图图节点连线、EventGraph/函数图/MacroGraph 寻址、K2 节点、Cast/Switch/Comment 节点、变量 Get/Set 节点、局部变量、组件层级与 socket、payload pin 默认值、unreal.UnrealMCPBlueprintGraphLibrary 反射库、蓝图验收脚本」的任务。"
 metadata:
   version: "1.0.0"
   upstream: ~
@@ -166,7 +166,15 @@ find_blueprint_nodes(bp, graph_name="FooFunc")    → 节点 + pins + connection
 | 加组件 | `add_component_to_blueprint(component_type=<无 U 前缀的类名>, component_name, location/rotation/scale, component_properties?)` | **所有新组件都落在 SCS root**，不建层级 |
 | 建层级 | `attach_component_to_component(child_component, parent_component, socket_name?)` | child/parent 都是**组件变量名**；socket 可选 |
 | 组件属性 | `set_component_property(component_name, property_name, property_value)` | 属性名可 C++ 名或 snake_case；回 `property_value_before/after`；**改的是 SCS 模板** ⇒ 另回 `placed_instances` / `counted_in`（`editor`/`pie`），实例数 > 0 时附 `hint`：**已放置实例各自保存属性值、不跟随模板** |
-| CDO 属性 | `set_blueprint_property(property_name, property_value)` | 改类默认对象 |
+| CDO 属性（写） | `set_blueprint_property(property_name, property_value)` | 改类默认对象 + 标脏 + 存盘；**两种拼写都收**（`HudWidgetClass` / `hud_widget_class`，2026-10-15 起与 getter 对称）；回 `property`（解析到的 C++ 名）+ `property_requested`（你写的那一个）+ `property_value_before/after`（形状同 getter）；解析不到 ⇒ `unknown_property` + `candidates` |
+| CDO 属性（读） | `get_blueprint_property(property_name)` | 读同一个 CDO。**两种拼写都收**（C++ 名与 snake_case 都解析到同一属性）；回 `property` / `property_type`（如 `TSubclassOf<UFTFHudWidget>`）/ `declared_by` / `value`（**与 setter 同形**：类/对象/软引用是资产路径 ⇒ 读出来能原样写回）/ `value_text`（导出文本，如 `720.000000`）；属性也存在于原生祖先时另回 `native_class` / `native_default` / `value_differs_from_native_default` ⇒ **"我的写入生效了吗"与"这就是 C++ 默认值"一眼可分**，不用再 python 绕 `get_default_object().get_editor_property()`。`property_name` 解析不到：`unknown_property` + `candidates`（候选来自与 setter 同一个建议器，对近似拼写偏保守、可能是空数组） |
+
+> **CDO 也可以用 python 写**（`unreal.get_default_object(bp.generated_class()).set_editor_property(...)`）：
+> `set_editor_property` 的 `notify_mode` 默认 `Default`，对 **object template（CDO 就是）会发变更通知**
+> ⇒ 包会被标脏 ⇒ 随后任何保存都能带上它（**实测跨编辑器重启存活**，见插件
+> `Docs/MCP_Findings_2026-10-15_UMG控件树与蓝图默认值.md` §3）。差别只在**便利性**：
+> 命令自带标脏 + 存盘 + `before/after` 回读，python 版**要自己存一次**（编辑器退出走 `taskkill /F`，
+> 没保存就丢 —— 这对任何 python 写入都一样，不是 CDO 特有）。
 
 - 引擎口径：同一 SCS 内挂接**只** `AddChildNode`，不写 `ParentComponentOrVariableName` / `ParentComponentOwnerClassName`（那是"父组件来自另一个 SCS"才用的路径，写错会让引擎 PostLoad 命中 `possible cyclic linkage` 的 `ensure`）；socket 走 `AttachToName`。命令已按此实现，返回值里的 `attach_parent` / `attach_socket` / `is_root` 是**服务端从 SCS 实读回读**的，不是回显请求。
 - `USCS_Node::AddChildNode(..., bAddToAllNodes)` 对 `AllNodes` 不去重：重挂组件时按"是否真的从 AllNodes 摘除"决定该标志位，并用 `len(names) == len(set(names))` 断言无重复登记。
@@ -292,7 +300,7 @@ set_blueprint_pin_default(node_id, 'Params_Profile', '/ProcHitReact/Profiles/HRP
 - **编译断言必须看效果**：`compile_blueprint` 返回 `status`（`EBlueprintStatus` 名）、`compiled`（只有 `BS_UpToDate*` 才为 true）与 `errors`。写脚本时 MUST 断言 `compiled is True` 且 `errors == []`，不要只断言命令 `status == "success"`。
 - **编译通过 ≠ 逻辑接通**：`compiled=true`/`errors=[]` 与"输出悬空、必需输入吃默认值、exec 输入多来源"完全可以并存。接完线先跑 `verify_blueprint_graph`（只读、不编译不保存）再谈验收；默认规则 `dangling_producer`、`required_input_unconnected`、`exec_multi_source`、`unreachable_node`、`anim_sequence_missing`、`anim_root_unconnected`，可用 `rules` 只跑一条。`issues` 为空才算静态通过。
 - **认节点用语义字段，别用标题**：`find_blueprint_nodes` 与建节点命令共用同一序列化 —— 函数类节点回 `function_reference`（`member_name`/`member_parent`/`member_guid`，非本地化），`K2Node_DynamicCast` 回 `target_type`，AnimGraph 节点回 `inner_node`（`sequence`/`loop_animation`/`play_rate` 等白名单）。中文环境里靠 `node_title` 或引脚顺序区分 Add 与 Greater 会认反。
-- **删除类命令会自证**：`safe_delete_asset` 返回的 `deleted` 只在**盘上文件与内存对象都消失**时才为 true；`asset_path` 接受对象路径 / 包路径 / 短名三种形态；失败时 `detail` 会说明原因（例如包内仍有存活对象）。`create_input_mapping` 返回 `persisted`（映射是否真写进 `Config/DefaultInput.ini`，不落盘则编辑器重启后失效）。
+- **删除类命令会自证**：`safe_delete_asset` 返回的 `deleted` 只在**盘上文件与内存对象都消失**时才为 true，**拒删则是失败**（`success:false` + `error_code`：`blocked_by_referencers` / `world_partition_open` / `would_fail_*`）；`asset_path` 接受对象路径 / 包路径 / 短名三种形态；失败时 `error` 会说明原因（例如包内仍有存活对象）。`create_input_mapping` 返回 `persisted`（映射是否真写进 `Config/DefaultInput.ini`，不落盘则编辑器重启后失效）。
 
 ### 7. 批量脚本与 bridge 回环
 

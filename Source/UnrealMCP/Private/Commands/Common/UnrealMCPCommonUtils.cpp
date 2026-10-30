@@ -824,10 +824,11 @@ UBlueprint* FUnrealMCPCommonUtils::FindBlueprintByName(const FString& BlueprintN
 
 UMaterial* FUnrealMCPCommonUtils::FindMaterial(const FString& MaterialName)
 {
-    // Step 1: If looks like an asset path (starts with /), try to load directly
+    // Step 1: If looks like an asset path (starts with /), try to load directly. FindAsset rather than
+    // LoadObject: a path whose root the engine does not know is a PackageName.cpp:967 fatal error.
     if (MaterialName.StartsWith(TEXT("/")))
     {
-        if (UMaterial* Mat = LoadObject<UMaterial>(nullptr, *MaterialName))
+        if (UMaterial* Mat = LoadAssetTyped<UMaterial>(MaterialName))
         {
             UE_LOG(LogTemp, Display, TEXT("FindMaterial: Loaded by path: %s"), *MaterialName);
             return Mat;
@@ -886,7 +887,7 @@ UMaterialFunction* FUnrealMCPCommonUtils::FindMaterialFunction(const FString& Fu
     // Step 1: If looks like an asset path, try to load directly
     if (FunctionName.StartsWith(TEXT("/")))
     {
-        if (UMaterialFunction* Func = LoadObject<UMaterialFunction>(nullptr, *FunctionName))
+        if (UMaterialFunction* Func = LoadAssetTyped<UMaterialFunction>(FunctionName))
         {
             UE_LOG(LogTemp, Display, TEXT("FindMaterialFunction: Loaded by path: %s"), *FunctionName);
             return Func;
@@ -1555,9 +1556,53 @@ UClass* FUnrealMCPCommonUtils::ResolveUClass(const FString& ClassReference, TArr
     return Resolved;
 }
 
-UObject* FUnrealMCPCommonUtils::FindAsset(const FString& AssetName)
+bool FUnrealMCPCommonUtils::NormalizeContentFolder(const FString& InFolder, FString& OutFolder, FString& OutError)
 {
-    if (AssetName.IsEmpty())
+    OutFolder = InFolder;
+    OutFolder.TrimStartAndEndInline();
+    while (OutFolder.EndsWith(TEXT("/")))
+    {
+        OutFolder.LeftChopInline(1);
+    }
+
+    if (OutFolder.IsEmpty())
+    {
+        OutError = TEXT("the content folder is empty");
+        return false;
+    }
+    if (!OutFolder.StartsWith(TEXT("/")))
+    {
+        OutError = FString::Printf(TEXT("'%s' is not an absolute content folder (it must start with '/')"), *OutFolder);
+        return false;
+    }
+    if (!FPackageName::IsValidLongPackageName(OutFolder))
+    {
+        OutError = FString::Printf(TEXT("'%s' does not map to a mounted content root (e.g. \"/Game/...\")"), *OutFolder);
+        return false;
+    }
+    return true;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::ValidateContentFolderOrError(const FString& InFolder, const TCHAR* FieldName,
+                                                                           FString& OutFolder)
+{
+    FString Reason;
+    if (NormalizeContentFolder(InFolder, OutFolder, Reason))
+    {
+        return nullptr;
+    }
+
+    TSharedPtr<FJsonObject> Error = CreateErrorResponse(TEXT("invalid_package_path"), Reason);
+    Error->SetStringField(TEXT("field"), FieldName);
+    Error->SetStringField(TEXT("requested"), InFolder);
+    Error->SetStringField(TEXT("hint"),
+        TEXT("Pass a mounted content folder, e.g. \"/Game/<Project>/Blueprints\". An unmounted folder would "
+             "make CreatePackage() a fatal engine error, so it is refused here instead."));
+    return Error;
+}
+
+UObject* FUnrealMCPCommonUtils::FindAsset(const FString& AssetName)
+{    if (AssetName.IsEmpty())
     {
         return nullptr;
     }
@@ -1666,10 +1711,21 @@ UObject* FUnrealMCPCommonUtils::CreateAssetDirect(const FString& AssetName, cons
         return nullptr;
     }
 
+    // Safety net for every creator that funnels through here (animation sequences / montages, and anything
+    // else): a folder the engine cannot mount turns the later package-name conversion into a fatal error,
+    // so the asset is refused (nullptr) instead.
+    FString NormalizedFolder;
+    FString FolderError;
+    if (!NormalizeContentFolder(AssetFolder, NormalizedFolder, FolderError))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("CreateAssetDirect refused '%s/%s': %s"), *AssetFolder, *AssetName, *FolderError);
+        return nullptr;
+    }
+
     // Keep the factory alive for the duration of the call, like IAssetTools::CreateAsset does.
     FGCObjectScopeGuard DontGCFactory(Factory);
 
-    const FString PackageName = UPackageTools::SanitizePackageName(AssetFolder + TEXT("/") + AssetName);
+    const FString PackageName = UPackageTools::SanitizePackageName(NormalizedFolder + TEXT("/") + AssetName);
     UPackage* Package = CreatePackage(*PackageName);
     if (!Package)
     {

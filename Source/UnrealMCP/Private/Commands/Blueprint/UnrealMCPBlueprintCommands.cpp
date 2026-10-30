@@ -94,10 +94,15 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::RunCommand(const FString& C
 
 void FUnrealMCPBlueprintCommands::RegisterCommands(FMCPCommandRegistry& Registry)
 {
-    MCP_REGISTER_COMMAND(Registry, "create_blueprint", "blueprint", "Create a Blueprint asset under /Game/Blueprints.",
+    MCP_REGISTER_COMMAND(Registry, "create_blueprint", "blueprint",
+        "Create a Blueprint asset. The folder is up to the caller (package_path); it used to be hard-wired "
+        "to /Game/Blueprints, which silently ignored every caller that wanted its own content root.",
         (TArray<FMCPParamSpec>{
             MCPParam(TEXT("name"), TEXT("string"), TEXT("Asset name of the new Blueprint")),
             MCPParamOpt(TEXT("parent_class"), TEXT("string"), TEXT("Parent class name (defaults to AActor)")),
+            MCPParamOpt(TEXT("package_path"), TEXT("string"),
+                TEXT("Content folder for the asset, e.g. \"/Game/FeedTheForest/Blueprints\" (default \"/Game/Blueprints\"); "
+                     "a full asset path (\"/Game/Dir/BP_X\") is accepted too and its last segment wins as the name")),
             MCPParamOpt(TEXT("persist"), TEXT("bool"), TEXT("Save after the command; default true. Pass false to batch writes and flush once yourself.")),
         }), MCPFlags(false, false, false, false) /* saves itself, not in the persist set */,
         ([this](const TSharedPtr<FJsonObject>& Params) { return RunCommand(TEXT("create_blueprint"), Params, [this](const TSharedPtr<FJsonObject>& P) { return HandleCreateBlueprint(P); }); }));
@@ -434,13 +439,59 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name' parameter"));
     }
 
+    // Folder comes from the caller. Default stays /Game/Blueprints so existing callers keep working.
+    FString PackagePath = TEXT("/Game/Blueprints");
+    Params->TryGetStringField(TEXT("package_path"), PackagePath);
+    PackagePath.TrimStartAndEndInline();
+    while (PackagePath.EndsWith(TEXT("/")))
+    {
+        PackagePath.LeftChopInline(1);
+    }
+
+    FString AssetName = BlueprintName.TrimStartAndEnd();
+    // Accept a full asset path in either field: "/Game/Dir/BP_X" or "/Game/Dir/BP_X.BP_X".
+    if (AssetName.StartsWith(TEXT("/")))
+    {
+        int32 LastSlash = INDEX_NONE;
+        if (AssetName.FindLastChar(TEXT('/'), LastSlash) && LastSlash > 0)
+        {
+            PackagePath = AssetName.Left(LastSlash);
+            AssetName = AssetName.Mid(LastSlash + 1);
+        }
+    }
+    if (AssetName.Contains(TEXT(".")))
+    {
+        AssetName = AssetName.Left(AssetName.Find(TEXT("."), ESearchCase::CaseSensitive));
+    }
+    if (PackagePath.EndsWith(FString::Printf(TEXT("/%s"), *AssetName)))
+    {
+        PackagePath.LeftChopInline(AssetName.Len() + 1);
+    }
+
+    if (AssetName.IsEmpty() || AssetName.Contains(TEXT("/")))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("invalid_asset_name"),
+            FString::Printf(TEXT("'%s' is not a usable asset name"), *BlueprintName));
+    }
+    // A folder the engine cannot mount makes CreatePackage() fatal (PackageName.cpp:967), so it is refused
+    // here instead of taking the editor down with it.
+    {
+        FString NormalizedFolder;
+        if (TSharedPtr<FJsonObject> FolderError = FUnrealMCPCommonUtils::ValidateContentFolderOrError(
+                PackagePath, TEXT("package_path"), NormalizedFolder))
+        {
+            return FolderError;
+        }
+        PackagePath = NormalizedFolder;
+    }
+
+    const FString PackageName = FString::Printf(TEXT("%s/%s"), *PackagePath, *AssetName);
+
     // Check if blueprint already exists
-    FString PackagePath = TEXT("/Game/Blueprints/");
-    FString AssetName = BlueprintName;
-    if (FUnrealMCPCommonUtils::DoesAssetPackageExist(PackagePath + AssetName))
+    if (FUnrealMCPCommonUtils::DoesAssetPackageExist(PackageName))
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("asset_exists"),
-            FString::Printf(TEXT("Blueprint already exists: %s"), *BlueprintName));
+            FString::Printf(TEXT("Blueprint already exists: %s"), *PackageName));
     }
 
     // Create the blueprint factory
@@ -480,7 +531,7 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
     Factory->ParentClass = SelectedParentClass;
 
     // Create the blueprint
-    UPackage* Package = CreatePackage(*(PackagePath + AssetName));
+    UPackage* Package = CreatePackage(*PackageName);
     UBlueprint* NewBlueprint = Cast<UBlueprint>(Factory->FactoryCreateNew(UBlueprint::StaticClass(), Package, *AssetName, RF_Standalone | RF_Public, nullptr, GWarn));
 
     if (NewBlueprint)
@@ -495,7 +546,7 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
         // `persist=false` skips the write: the asset stays in memory (in-memory lookups still find it,
         // but a path-based load from another session would not), which is what a batch that flushes
         // once wants.
-        const FString AssetPath = PackagePath + AssetName;
+        const FString AssetPath = PackageName;
         bool bPersist = true;
         Params->TryGetBoolField(TEXT("persist"), bPersist);
         bool bSaved = false;

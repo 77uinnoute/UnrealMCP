@@ -39,6 +39,8 @@ metadata:
 - 编辑器 sys.path 上**有** `Plugins/UnrealMCP/Content/Python`（含 `tools/`）⇒ 脚本可以 `import` 其中的**纯模块**。
 - 但编辑器 python **没有 `mcp`** ⇒ 依赖 `mcp.server.fastmcp` 的工具模块（`tools/ue_safe_api.py` 等）**在脚本里 import 会失败**。它们的**能力**不受影响：那批实现已搬成 bridge 命令，脚本用 `unreal.UnrealMCPPythonAPI.execute_mcp_command("create_asset_safe", …)` 直接调（工具层只是同名薄转发）；只有纯 python 实现的工具（如 `preview_material_expression`）才必须走 MCP 工具面。
 - 因此脚本里建/删资产优先调 **`create_asset_safe` / `delete_asset_safe`**（无模态框、有 blocker 语义）；退路才是 python API，此时**用唯一名**，或先 `does_asset_exist` → 删除 → **回读** `does_asset_exist` 再建 —— 对"可能已存在的同名包"直接 `create_asset` = 弹窗风险。
+- **脚本里的回环是 fail-fast 的**（2026-10-15 起）：第一条失败的 bridge 指令抛 `unreal_mcp_loopback.UnrealMCPCommandError` 并**当场中断脚本**，不会让后面几十条继续跑在坏状态上（消息里带命令名与 `error_code`）。要容忍某一步失败就**显式放行**：逐调用加 `"on_error": "continue"`（守卫消费这个键，不转发给 handler），或整段脚本 `import unreal_mcp_loopback; unreal_mcp_loopback.FAIL_FAST = False`。
+- 配套：**"没达到预期效果"就是失败**（同日改）——`safe_delete_asset` 拒删（`blocked_by_referencers` / `world_partition_open` / `would_fail_asset_editor_open` / `would_fail_unreachable_referencers`）、导入一个文件都没成、属性一条都没写上都回 `success:false` + `error_code`，不再有 "success 但 `deleted:false`/`applied:0`" 的形状；`dry_run` 是查询，仍 `success:true` 且不带 `deleted` 字段。
 
 ---
 
@@ -125,12 +127,20 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 
 ## 五、外部文件事实（导入器侧）
 
+- **程序化建的网格必须显式 `shade_smooth`（或等价地把法线弄平滑），否则法线是逐面片的**：实测（2026-10-12，Blender `mesh.from_pydata` + `bpy.ops.export_scene.fbx`）0.5 m 网格的圆顶/坡面上，平面着色的相邻面片**交替朝光/背光**，渲出来就是一片**深浅椒盐斑块**；看起来像贴图 bug 或 AO，于是在 UE 侧一路误判。**隔离顺序**（按代价从小到大）：① 关该灯 `CastShadows` 看是否消失（排除阴影 acne）② 关 UV 扰动/旁路自定义节点（排除材质采样）③ 关贴图 mip（`MipGenSettings=TMGS_NoMipmaps`）④ 关 `r.AmbientOcclusionLevels` ⑤ **回到源头查法线**。判据：`sum(1 for p in mesh.polygons if p.use_smooth) == len(mesh.polygons)`，导出前打印一次。
+
 - **导入侧的判据只有一条：rest 姿势逐骨比对**（§三）；"导出时看着对"不算。
 - **UE 读到的 cm = FBX 里写的数值 × 100**（`FbxMainImport.cpp:1558` 的 `bConvertSceneUnit`：FBX 声明米 → `FbxSystemUnit::cm.ConvertScene` 全场景 ×100）。
   `apply_unit_scale` / `scale_length` / 单位系统那套**对数值的影响不可靠**，只信导入后实测。
 - **骨架有没有内嵌 scale，只能靠"一根骨的局部平移量级"判**（`get_reference_pose` + `get_bone_pose(..., LOCAL)`，见 `unreal-retarget-authoring` §二.6）；
   `mesh.get_bounds()` 高度作交叉验证。动画-only 导入**必须**带 `skeleton_path`。
 - **"上次的导出参数"不可信**：Blender 的 `operator_properties_last('export_scene.fbx')` 可能回默认值，与真实导出不符。
+- **JSON → DataTable 的 `TSoftObjectPtr` 必须写"包路径 + `.对象名`"（规范形式）**：`"/Game/A/B.B"` 能解析；只写 `"/Game/A/B"`
+  会**原样存进去**、之后 `LoadSynchronous()` 落到那个 **Package** 上（`Cast<UTexture2D>` 失败）⇒ 静默拿到 `nullptr`，
+  消费侧只能看到"什么都没发生"（2026-10-15 实测：升级面板 24 个图标全部不显示，而 JSON / 命令回读里的路径看着都对；
+  同一工程里能正常显示的 `plants.json` 写的就是 `…/T_FTF_IconBush.T_FTF_IconBush`）。**判据**：拿回读到的路径去
+  `unreal.load_asset(path)` 成功 **不等于** 软指针能解析 —— 要看消费侧的实际效果，或用 python 打印软指针字段；
+  `fill_data_table_from_json_string` 的 `ok=True` 也不代表软指针可用。
 - **Blender 侧怎么产出这个文件**（mmd_tools 参数、×100 烘焙与 `global_scale` 标定、D 变形骨权重、shape key 两块都要缩、VMD → 动画 FBX 四条纪律、导出参数表）
   已拆成独立 skill：`blender-case-mmd-pipeline`；Blender MCP 用法与 bpy 纪律见 `blender-authoring`。
 
@@ -165,13 +175,13 @@ import_assets(paths=[绝对路径...], destination_path="/Game/...", force_legac
 ## 七、生命周期与错误码
 
 - 写命令成功即落盘；仍建议 `does_asset_exist` + 磁盘 mtime 复核。
-- `safe_delete_asset`：`deleted` 只在盘上文件与内存对象都消失时为 true；失败给 `detail`/`blockers`。删之前被引用问 `list_asset_blockers`。
+- `safe_delete_asset`：`deleted` 只在盘上文件与内存对象都消失时为 true；**拒删是失败**（`success:false` + `error_code` = `blocked_by_referencers` 等，证据在 `blockers[]`/`workarounds[]`）。删之前被引用问 `list_asset_blockers`。
   删前还有一道 **World Partition 守卫**：① referencer 里出现 `/__ExternalActors__/` 或 `/__ExternalObjects__/` 包
   ⇒ `world_partition_referenced`；② 任一已加载世界的 `UWorldPartition` 已初始化（= 正开着 WP 关卡）⇒ `world_partition_open`。
   两种情况**什么都不删**（内存与包文件都不动），响应给 `world_partition_open`、`workarounds`（Fix Up Redirectors / 关编辑器删磁盘 / 换非 WP 关卡）
   与 `detail`；`force=true` **不豁免**（force 只断引用，崩的是随后的 GC —— `WorldPartitionSubsystem.cpp:507` 的断言）。
   即：**开着 WP 关卡时这条命令整体不可用**，脚本里要把它放到换关卡/收尾阶段。
-- **`force=true` 且有 blockers 时先跑只读前置探测**，命中即拒绝并**保持零改动**（不断引用、不标垃圾、不写盘）：响应为 `{deleted:false, reason:"would_fail_*", detail:"什么都没动", workarounds:[...]}`、`detached: []`。三类命中：目标包文件只读 / 该资产仍开着资产编辑器 / **存在够不到的活引用者**（`unreachable_references[]`：引用者的包落在"本命令能清空的范围"（`blockers` + 目标包）之外，且不属于缩略图那类瞬态包）。判据取**真实内存引用图**，不是文件锁 —— 加载中的包本来就映射着 `.uasset`，"文件被占"是删除前的正常状态，用文件锁当判据会把 `force` 变成空操作。
+- **`force=true` 且有 blockers 时先跑只读前置探测**，命中即拒绝并**保持零改动**（不断引用、不标垃圾、不写盘）：响应为 `success:false` + `error_code:"would_fail_*"` + `detail:"什么都没动"` + `workarounds:[...]`、`deleted:false`、`detached: []`。三类命中：目标包文件只读 / 该资产仍开着资产编辑器 / **存在够不到的活引用者**（`unreachable_references[]`：引用者的包落在"本命令能清空的范围"（`blockers` + 目标包）之外，且不属于缩略图那类瞬态包）。判据取**真实内存引用图**，不是文件锁 —— 加载中的包本来就映射着 `.uasset`，"文件被占"是删除前的正常状态，用文件锁当判据会把 `force` 变成空操作。
 - **`dry_run=true`（只读）**：给 `would_delete` / `would_fail`(+`would_fail_reason`/`would_fail_detail`) / `would_clear[]`（每项含 referencer 路径与将被清空的属性**路径**，形如 `would_clear_property:<属性路径>`，能看到 AnimGraph 内部路径），且 `detached` 恒为 `[]`（计划不进 `detached`）。它**穿透 World Partition 前端检测**（该检测针对会崩编辑器的真删除，干跑不删任何东西）⇒ 在"WP 关卡常开"的工程里这是唯一还能给出答案的形态。
 - **`force=true`** 通过探测后忽略 `blockers`、先断开引用再删，`detached[]` 列出被断开的引用者：关卡内以该资产为类的 actor 实例、资产自身指向目标的引用、以及**嵌套在结构体与结构体数组里的对象引用**（例如蒙太奇段的 `CompositeSections[i].LinkedSequence` / `AnimSegments[j].AnimReference`）—— 走查不递归进 struct 时这些清不掉，会出现"删除成功但引用者仍指向已删资产"。
 - **所有未删成功的结局都带 `workarounds[]`**（关编辑器后同名覆盖 / 删磁盘包文件再重启、先把引用者换走或改名、关掉该资产的编辑器后重试），不要只回一个裸 `false`。

@@ -54,6 +54,8 @@ import logging
 from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import _bridge
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -61,16 +63,9 @@ logger = logging.getLogger("UnrealMCP")
 def register_pcg_tools(mcp: FastMCP):
     """Register the read-only PCG tools with the MCP server."""
 
-    def _send(command: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Forward one command to the bridge; returns None when there is no connection."""
-        from unreal_mcp_server import get_unreal_connection
-
-        unreal = get_unreal_connection()
-        if not unreal:
-            return None
-
-        response = unreal.send_command(command, params)
-        return response
+    def _send(command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Forward one command to the bridge; raises when it did not succeed."""
+        return _bridge(command, params)
 
     @mcp.tool()
     def list_pcg_assets(ctx: Context, folder: str = "/Game",
@@ -92,11 +87,7 @@ def register_pcg_tools(mcp: FastMCP):
         if class_filter is not None:
             params["class_filter"] = class_filter
 
-        response = _send("list_pcg_assets", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward list_pcg_assets to the editor"}
-        return response
+        return _send("list_pcg_assets", params)
 
     @mcp.tool()
     def get_pcg_graph(ctx: Context, asset_path: str, detail: str = "summary",
@@ -124,11 +115,7 @@ def register_pcg_tools(mcp: FastMCP):
         if max_nodes is not None:
             params["max_nodes"] = max_nodes
 
-        response = _send("get_pcg_graph", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward get_pcg_graph to the editor"}
-        return response
+        return _send("get_pcg_graph", params)
 
     @mcp.tool()
     def get_pcg_node(ctx: Context, asset_path: str, node_name: Optional[str] = None,
@@ -165,11 +152,7 @@ def register_pcg_tools(mcp: FastMCP):
         if max_properties is not None:
             params["max_properties"] = max_properties
 
-        response = _send("get_pcg_node", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward get_pcg_node to the editor"}
-        return response
+        return _send("get_pcg_node", params)
 
     @mcp.tool()
     def list_pcg_components(ctx: Context, actor_label: Optional[str] = None) -> Dict[str, Any]:
@@ -194,11 +177,7 @@ def register_pcg_tools(mcp: FastMCP):
         if actor_label is not None:
             params["actor_label"] = actor_label
 
-        response = _send("list_pcg_components", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward list_pcg_components to the editor"}
-        return response
+        return _send("list_pcg_components", params)
 
     @mcp.tool()
     def get_pcg_generated_output(ctx: Context, actor_label: Optional[str] = None,
@@ -241,11 +220,7 @@ def register_pcg_tools(mcp: FastMCP):
         if attribute is not None:
             params["attribute"] = attribute
 
-        response = _send("get_pcg_generated_output", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward get_pcg_generated_output to the editor"}
-        return response
+        return _send("get_pcg_generated_output", params)
 
     @mcp.tool()
     def add_pcg_node(ctx: Context, asset_path: str, node_class: str,
@@ -281,11 +256,7 @@ def register_pcg_tools(mcp: FastMCP):
         if editor_y is not None:
             params["editor_y"] = editor_y
 
-        response = _send("add_pcg_node", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward add_pcg_node to the editor"}
-        return response
+        return _send("add_pcg_node", params)
 
     @mcp.tool()
     def connect_pcg_pins(ctx: Context, asset_path: str, from_node: str, from_label: str,
@@ -321,11 +292,7 @@ def register_pcg_tools(mcp: FastMCP):
             "to_label": to_label,
         }
 
-        response = _send("connect_pcg_pins", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward connect_pcg_pins to the editor"}
-        return response
+        return _send("connect_pcg_pins", params)
 
     @mcp.tool()
     def disconnect_pcg_pins(ctx: Context, asset_path: str, from_node: str, from_label: str,
@@ -357,11 +324,7 @@ def register_pcg_tools(mcp: FastMCP):
             "to_label": to_label,
         }
 
-        response = _send("disconnect_pcg_pins", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward disconnect_pcg_pins to the editor"}
-        return response
+        return _send("disconnect_pcg_pins", params)
 
     @mcp.tool()
     def remove_pcg_node(ctx: Context, asset_path: str, node_name: str) -> Dict[str, Any]:
@@ -383,11 +346,7 @@ def register_pcg_tools(mcp: FastMCP):
         """
         params: Dict[str, Any] = {"asset_path": asset_path, "node_name": node_name}
 
-        response = _send("remove_pcg_node", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward remove_pcg_node to the editor"}
-        return response
+        return _send("remove_pcg_node", params)
 
     @mcp.tool()
     def set_pcg_node_property(ctx: Context, asset_path: str, property_name: str, value: Any,
@@ -443,11 +402,7 @@ def register_pcg_tools(mcp: FastMCP):
         if node_index is not None:
             params["node_index"] = node_index
 
-        response = _send("set_pcg_node_property", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward set_pcg_node_property to the editor"}
-        return response
+        return _send("set_pcg_node_property", params)
 
     @mcp.tool()
     def generate_pcg_component(ctx: Context, actor_label: Optional[str] = None,
@@ -482,11 +437,7 @@ def register_pcg_tools(mcp: FastMCP):
         if component_name is not None:
             params["component_name"] = component_name
 
-        response = _send("generate_pcg_component", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward generate_pcg_component to the editor"}
-        return response
+        return _send("generate_pcg_component", params)
 
     @mcp.tool()
     def cleanup_pcg_component(ctx: Context, actor_label: Optional[str] = None,
@@ -521,11 +472,7 @@ def register_pcg_tools(mcp: FastMCP):
         if component_name is not None:
             params["component_name"] = component_name
 
-        response = _send("cleanup_pcg_component", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward cleanup_pcg_component to the editor"}
-        return response
+        return _send("cleanup_pcg_component", params)
 
     @mcp.tool()
     def create_pcg_graph(ctx: Context, asset_path: str,
@@ -555,11 +502,7 @@ def register_pcg_tools(mcp: FastMCP):
         if folder is not None:
             params["folder"] = folder
 
-        response = _send("create_pcg_graph", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward create_pcg_graph to the editor"}
-        return response
+        return _send("create_pcg_graph", params)
 
     @mcp.tool()
     def set_pcg_component_graph(ctx: Context, graph_path: str,
@@ -600,11 +543,7 @@ def register_pcg_tools(mcp: FastMCP):
         if active is not None:
             params["active"] = active
 
-        response = _send("set_pcg_component_graph", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward set_pcg_component_graph to the editor"}
-        return response
+        return _send("set_pcg_component_graph", params)
 
     @mcp.tool()
     def set_pcg_mesh_selector_type(ctx: Context, asset_path: str, selector_class: str,
@@ -643,11 +582,7 @@ def register_pcg_tools(mcp: FastMCP):
         if node_index is not None:
             params["node_index"] = node_index
 
-        response = _send("set_pcg_mesh_selector_type", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward set_pcg_mesh_selector_type to the editor"}
-        return response
+        return _send("set_pcg_mesh_selector_type", params)
 
     @mcp.tool()
     def set_pcg_mesh_selector_entries(ctx: Context, asset_path: str, entries: List[Dict[str, Any]],
@@ -694,8 +629,4 @@ def register_pcg_tools(mcp: FastMCP):
         if node_index is not None:
             params["node_index"] = node_index
 
-        response = _send("set_pcg_mesh_selector_entries", params)
-        if not response:
-            return {"success": False, "error_code": "no_connection",
-                    "error": "Failed to forward set_pcg_mesh_selector_entries to the editor"}
-        return response
+        return _send("set_pcg_mesh_selector_entries", params)

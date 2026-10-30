@@ -18,4 +18,7 @@ public:
 private:
     // Specific project command handlers
     TSharedPtr<FJsonObject> HandleCreateInputMapping(const TSharedPtr<FJsonObject>& Params);
+
+    /** Recent dispatch history (timing, outcome, the one command still running) plus a jsonl mirror. */
+    TSharedPtr<FJsonObject> HandleGetCommandJournal(const TSharedPtr<FJsonObject>& Params);
 }; 

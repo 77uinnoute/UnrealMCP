@@ -8,6 +8,8 @@ import logging
 from typing import Dict, List, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
 
+from tools._bridge import MCPToolError, _bridge, result_of, surface_hidden_python_errors
+
 # Get logger
 logger = logging.getLogger("UnrealMCP")
 
@@ -21,40 +23,9 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             {"actors": [...], "count": N} — one response, not one per actor.
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.warning("Failed to connect to Unreal Engine")
-                return {"actors": [], "count": 0}
-                
-            response = unreal.send_command("get_actors_in_level", {})
-            
-            if not response:
-                logger.warning("No response from Unreal Engine")
-                return {"actors": [], "count": 0}
-                
-            # Log the complete response for debugging
-            logger.info(f"Complete response from Unreal: {response}")
-            
-            # Check response format
-            actors = None
-            if "result" in response and "actors" in response["result"]:
-                actors = response["result"]["actors"]
-            elif "actors" in response:
-                actors = response["actors"]
-                
-            if actors is None:
-                logger.warning(f"Unexpected response format: {response}")
-                return {"actors": [], "count": 0}
-                
-            logger.info(f"Found {len(actors)} actors in level")
-            return {"actors": actors, "count": len(actors)}
-            
-        except Exception as e:
-            logger.error(f"Error getting actors: {e}")
-            return {"actors": [], "count": 0, "error": str(e)}
+        actors = result_of(_bridge("get_actors_in_level")).get("actors") or []
+        logger.info(f"Found {len(actors)} actors in level")
+        return {"actors": actors, "count": len(actors)}
 
     @mcp.tool()
     def find_actors_by_name(ctx: Context, pattern: str) -> Dict[str, Any]:
@@ -63,37 +34,9 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             {"actors": [...], "count": N}
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.warning("Failed to connect to Unreal Engine")
-                return {"actors": [], "count": 0}
-                
-            response = unreal.send_command("find_actors_by_name", {
-                "pattern": pattern
-            })
-            
-            if not response:
-                return {"actors": [], "count": 0}
+        actors = result_of(_bridge("find_actors_by_name", {"pattern": pattern})).get("actors") or []
 
-            # The bridge wraps command payloads as {"status": "success", "result": {...}}.
-            actors = None
-            if "result" in response and "actors" in response["result"]:
-                actors = response["result"]["actors"]
-            elif "actors" in response:
-                actors = response["actors"]
-
-            if actors is None:
-                logger.warning(f"Unexpected response format: {response}")
-                return {"actors": [], "count": 0, "error": response.get("error")}
-
-            return {"actors": actors, "count": len(actors)}
-            
-        except Exception as e:
-            logger.error(f"Error finding actors: {e}")
-            return {"actors": [], "count": 0, "error": str(e)}
+        return {"actors": actors, "count": len(actors)}
     
     @mcp.tool()
     def spawn_actor(
@@ -117,53 +60,24 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Dict containing the created actor's properties
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            # Ensure all parameters are properly formatted
-            params = {
-                "name": name,
-                "type": type,          # class name as given; the editor resolves it case-insensitively
-                "location": location,
-                "rotation": rotation
-            }
-            
-            # Validate location and rotation formats
-            for param_name in ["location", "rotation"]:
-                param_value = params[param_name]
-                if not isinstance(param_value, list) or len(param_value) != 3:
-                    logger.error(f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
-                    return {"success": False, "message": f"Invalid {param_name} format. Must be a list of 3 float values."}
-                # Ensure all values are float
-                params[param_name] = [float(val) for val in param_value]
-            
-            logger.info(f"Creating actor '{name}' of type '{type}' with params: {params}")
-            response = unreal.send_command("spawn_actor", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            # Log the complete response for debugging
-            logger.info(f"Actor creation response: {response}")
-            
-            # Handle error responses correctly
-            if response.get("status") == "error":
-                error_message = response.get("error", "Unknown error")
-                logger.error(f"Error creating actor: {error_message}")
-                return {"success": False, "message": error_message}
-            
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error creating actor: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        # Ensure all parameters are properly formatted
+        params = {
+            "name": name,
+            "type": type,          # class name as given; the editor resolves it case-insensitively
+            "location": location,
+            "rotation": rotation
+        }
+
+        # Validate location and rotation formats
+        for param_name in ["location", "rotation"]:
+            param_value = params[param_name]
+            if not isinstance(param_value, list) or len(param_value) != 3:
+                raise MCPToolError("spawn_actor", "invalid_params",
+                                   f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
+            params[param_name] = [float(val) for val in param_value]
+
+        logger.info(f"Creating actor '{name}' of type '{type}' with params: {params}")
+        return _bridge("spawn_actor", params)
     
     @mcp.tool()
     def delete_actor(ctx: Context, name: str, flush: bool = False) -> Dict[str, Any]:
@@ -184,24 +98,8 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Dict with deleted_actor, pending_kill, hint (when pending_kill), flushed (when flush).
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            response = unreal.send_command("delete_actor", {
-                "name": name,
-                "flush": flush,
-            })
-            return response or {}
-            
-        except Exception as e:
-            logger.error(f"Error deleting actor: {e}")
-            return {}
-    
+        return _bridge("delete_actor", {"name": name, "flush": flush})
+
     @mcp.tool()
     def set_actor_transform(
         ctx: Context,
@@ -211,48 +109,20 @@ def register_editor_tools(mcp: FastMCP):
         scale: List[float] = None
     ) -> Dict[str, Any]:
         """Set the transform of an actor."""
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            params = {"name": name}
-            if location is not None:
-                params["location"] = location
-            if rotation is not None:
-                params["rotation"] = rotation
-            if scale is not None:
-                params["scale"] = scale
-                
-            response = unreal.send_command("set_actor_transform", params)
-            return response or {}
-            
-        except Exception as e:
-            logger.error(f"Error setting transform: {e}")
-            return {}
-    
+        params = {"name": name}
+        if location is not None:
+            params["location"] = location
+        if rotation is not None:
+            params["rotation"] = rotation
+        if scale is not None:
+            params["scale"] = scale
+
+        return _bridge("set_actor_transform", params)
+
     @mcp.tool()
     def get_actor_properties(ctx: Context, name: str) -> Dict[str, Any]:
         """Get all properties of an actor."""
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            response = unreal.send_command("get_actor_properties", {
-                "name": name
-            })
-            return response or {}
-            
-        except Exception as e:
-            logger.error(f"Error getting properties: {e}")
-            return {}
+        return _bridge("get_actor_properties", {"name": name})
 
     @mcp.tool()
     def set_actor_property(
@@ -290,31 +160,11 @@ def register_editor_tools(mcp: FastMCP):
             for a dotted name - `path_prefix` / `path_candidates` / `path_error` describing how far the path
             got and which fields exist at the step that failed.
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            response = unreal.send_command("set_actor_property", {
-                "name": name,
-                "property_name": property_name,
-                "property_value": property_value
-            })
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Set actor property response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error setting actor property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_actor_property", {
+            "name": name,
+            "property_name": property_name,
+            "property_value": property_value
+        })
 
     # @mcp.tool() commented out because it's buggy
     def focus_viewport(
@@ -336,32 +186,19 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Response from Unreal Engine
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            params = {}
-            if target:
-                params["target"] = target
-            elif location:
-                params["location"] = location
-            
-            if distance:
-                params["distance"] = distance
-                
-            if orientation:
-                params["orientation"] = orientation
-                
-            response = unreal.send_command("focus_viewport", params)
-            return response or {}
-            
-        except Exception as e:
-            logger.error(f"Error focusing viewport: {e}")
-            return {"status": "error", "message": str(e)}
+        params = {}
+        if target:
+            params["target"] = target
+        elif location:
+            params["location"] = location
+
+        if distance:
+            params["distance"] = distance
+
+        if orientation:
+            params["orientation"] = orientation
+
+        return _bridge("focus_viewport", params)
 
     @mcp.tool()
     def spawn_blueprint_actor(
@@ -388,47 +225,26 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Dict containing the spawned actor's properties
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            # Ensure all parameters are properly formatted
-            params = {
-                "blueprint_name": blueprint_name,
-                "actor_name": actor_name,
-                "location": location or [0.0, 0.0, 0.0],
-                "rotation": rotation or [0.0, 0.0, 0.0]
-            }
-            if scale is not None:
-                params["scale"] = scale
-            
-            # Validate location and rotation formats
-            for param_name in ["location", "rotation"]:
-                param_value = params[param_name]
-                if not isinstance(param_value, list) or len(param_value) != 3:
-                    logger.error(f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
-                    return {"success": False, "message": f"Invalid {param_name} format. Must be a list of 3 float values."}
-                # Ensure all values are float
-                params[param_name] = [float(val) for val in param_value]
-            
-            logger.info(f"Spawning blueprint actor with params: {params}")
-            response = unreal.send_command("spawn_blueprint_actor", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Spawn blueprint actor response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error spawning blueprint actor: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        # Ensure all parameters are properly formatted
+        params = {
+            "blueprint_name": blueprint_name,
+            "actor_name": actor_name,
+            "location": location or [0.0, 0.0, 0.0],
+            "rotation": rotation or [0.0, 0.0, 0.0]
+        }
+        if scale is not None:
+            params["scale"] = scale
+
+        # Validate location and rotation formats
+        for param_name in ["location", "rotation"]:
+            param_value = params[param_name]
+            if not isinstance(param_value, list) or len(param_value) != 3:
+                raise MCPToolError("spawn_blueprint_actor", "invalid_params",
+                                   f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
+            params[param_name] = [float(val) for val in param_value]
+
+        logger.info(f"Spawning blueprint actor with params: {params}")
+        return _bridge("spawn_blueprint_actor", params)
 
     @mcp.tool()
     def execute_python_command(ctx: Context, command: str, timeout: float = None) -> Dict[str, Any]:
@@ -457,8 +273,8 @@ def register_editor_tools(mcp: FastMCP):
           list_mcp_commands first. Asset import is the hard example: it MUST go through
           import_assets (a hand-rolled AssetImportTask hits Interchange and crashes the editor).
 
-        On failure (exception/traceback), the error is returned DIRECTLY as {'status': 'error',
-        'error': <full traceback>, 'result': {...}} — no need to inspect the log files.
+        On failure (exception/traceback), the tool call itself fails with the traceback as its message —
+        no need to inspect the log files.
 
         Args:
             ctx: The MCP context
@@ -466,61 +282,26 @@ def register_editor_tools(mcp: FastMCP):
             timeout: Response receive timeout in seconds (default: server recv-timeout)
 
         Returns:
-            Dict with 'status': 'success' carries 'result' (with 'success', evaluation 'result',
-            and 'log' entries); on failure 'status': 'error' with the traceback in 'error'.
-            result also carries 'duration_ms' (the whole bridge-side handler: banned-API scan +
-            python exec + log collection) and 'python_ms' (the engine's python call alone).
-            Both exclude the TCP round trip and this tool wrapper.
+            Dict with 'status': 'success' carrying 'result' (with 'success', evaluation 'result',
+            and 'log' entries). result also carries 'duration_ms' (the whole bridge-side handler:
+            banned-API scan + python exec + log collection) and 'python_ms' (the engine's python
+            call alone). Both exclude the TCP round trip and this tool wrapper.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"command": command}
+        if timeout is not None:
+            # Keep the C++ GameThread wait in sync with the client receive timeout so long-running
+            # compiles are not killed at 120s on one layer while the other waits longer.
+            params["timeout_ms"] = int(timeout * 1000)
+        reply = _bridge("execute_python_command", params, recv_timeout=timeout)
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        # Fallback: older bridge builds report success even when the Python command raised - the
+        # traceback only shows up as Error entries in result.log.
+        hidden = surface_hidden_python_errors(reply)
+        if hidden:
+            logger.error("Hidden Python errors detected in success response")
+            raise MCPToolError("execute_python_command", "python_error", hidden, reply)
 
-            params = {"command": command}
-            if timeout is not None:
-                # Keep the C++ GameThread wait in sync with the client receive
-                # timeout so long-running compiles are not killed at 120s on
-                # one layer while the other waits longer.
-                params["timeout_ms"] = int(timeout * 1000)
-            response = unreal.send_command("execute_python_command", params, recv_timeout=timeout)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            logger.info(f"Execute python command response: {response}")
-
-            # Fallback: older bridge builds report success even when the Python command
-            # raised — the traceback only shows up as Error entries in result.log.
-            # Surface those errors directly in the tool result.
-            if response.get("status") == "success":
-                result_obj = response.get("result")
-                if isinstance(result_obj, dict):
-                    error_parts = []
-                    for entry in (result_obj.get("log") or []):
-                        if isinstance(entry, dict) and entry.get("type") == "Error":
-                            line = str(entry.get("output", "")).replace("\r\n", "\n")
-                            if line and not line.endswith("\n"):
-                                line += "\n"
-                            error_parts.append(line)
-                    if error_parts:
-                        logger.error("Hidden Python errors detected in success response")
-                        return {
-                            "status": "error",
-                            "error": "".join(error_parts),
-                            "result": result_obj,
-                        }
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error executing python command: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return reply
 
     @mcp.tool()
     def execute_python_file(ctx: Context, file_path: str, timeout: float = None) -> Dict[str, Any]:
@@ -550,50 +331,18 @@ def register_editor_tools(mcp: FastMCP):
             Same shape as execute_python_command; additionally result carries file_path
             and code_bytes, plus the same duration_ms / python_ms timing fields.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"file_path": file_path}
+        if timeout is not None:
+            params["timeout_ms"] = int(timeout * 1000)
+        reply = _bridge("execute_python_file", params, recv_timeout=timeout)
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        # Surface hidden errors (same fallback as execute_python_command)
+        hidden = surface_hidden_python_errors(reply)
+        if hidden:
+            logger.error("Hidden Python errors detected in success response")
+            raise MCPToolError("execute_python_file", "python_error", hidden, reply)
 
-            params = {"file_path": file_path}
-            if timeout is not None:
-                params["timeout_ms"] = int(timeout * 1000)
-            response = unreal.send_command("execute_python_file", params, recv_timeout=timeout)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            logger.info(f"Execute python file response: {response}")
-
-            # Surface hidden errors (same fallback as execute_python_command)
-            if response.get("status") == "success":
-                result_obj = response.get("result")
-                if isinstance(result_obj, dict):
-                    error_parts = []
-                    for entry in (result_obj.get("log") or []):
-                        if isinstance(entry, dict) and entry.get("type") == "Error":
-                            line = str(entry.get("output", "")).replace("\r\n", "\n")
-                            if line and not line.endswith("\n"):
-                                line += "\n"
-                            error_parts.append(line)
-                    if error_parts:
-                        logger.error("Hidden Python errors detected in success response")
-                        return {
-                            "status": "error",
-                            "error": "".join(error_parts),
-                            "result": result_obj,
-                        }
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error executing python file: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return reply
 
     @mcp.tool()
     def take_screenshot(ctx: Context, filepath: str, source: str = "level_viewport",
@@ -663,49 +412,33 @@ def register_editor_tools(mcp: FastMCP):
             because the designer's widget outlines are painted over the preview area), and
             (for asset_editor) editor_name / resolved_viewport / focused
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"filepath": filepath, "source": source, "route": route}
+        if asset_path:
+            params["asset_path"] = asset_path
+        reply = _bridge("take_screenshot", params)
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
+        result_obj = result_of(reply)
+        file_size = int(result_obj.get("file_size") or 0)
 
-            params = {"filepath": filepath, "source": source, "route": route}
-            if asset_path:
-                params["asset_path"] = asset_path
-            response = unreal.send_command("take_screenshot", params)
-            if not response or response.get("status") != "success":
-                return response or {"status": "error", "error": "No response from Unreal Engine"}
-
-            result_obj = response.get("result") or {}
-            file_size = int(result_obj.get("file_size") or 0)
-
-            # 黑帧/陈旧帧防护：文件过小则重试一次。只对场景回读成立 —— 纯 UI 截图（含 UMG）本来就
-            # 可能很小（一个干净的控件预览比一帧 3D 画面小得多），那种情况下报错会把有效截图挡掉。
+        # 黑帧/陈旧帧防护：文件过小则重试一次。只对场景回读成立 —— 纯 UI 截图（含 UMG）本来就
+        # 可能很小（一个干净的控件预览比一帧 3D 画面小得多），那种情况下报错会把有效截图挡掉。
+        if file_size < 10 * 1024:
+            logger.warning(f"Suspiciously small screenshot ({file_size} bytes), retrying once")
+            try:
+                result_obj = result_of(_bridge("take_screenshot", params))
+                file_size = int(result_obj.get("file_size") or 0)
+            except MCPToolError as retry_error:
+                logger.warning(f"Screenshot retry failed: {retry_error}")
+            if file_size < 10 * 1024 and not result_obj.get("includes_umg"):
+                raise MCPToolError("take_screenshot", "screenshot_too_small",
+                                   f"Screenshot file too small ({file_size} bytes) — viewport may be unfocused/idle",
+                                   reply)
             if file_size < 10 * 1024:
-                logger.warning(f"Suspiciously small screenshot ({file_size} bytes), retrying once")
-                response = unreal.send_command("take_screenshot", params)
-                if response and response.get("status") == "success":
-                    result_obj = response.get("result") or {}
-                    file_size = int(result_obj.get("file_size") or 0)
-                if file_size < 10 * 1024 and not result_obj.get("includes_umg"):
-                    return {
-                        "status": "error",
-                        "error": f"Screenshot file too small ({file_size} bytes) — viewport may be unfocused/idle",
-                        "result": result_obj,
-                    }
-                if file_size < 10 * 1024:
-                    result_obj["warning"] = (
-                        f"small capture ({file_size} bytes) - expected for a pure UI capture, "
-                        "check the PNG content rather than the size"
-                    )
-            return response
-
-        except Exception as e:
-            error_msg = f"Error taking screenshot: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+                result_obj["warning"] = (
+                    f"small capture ({file_size} bytes) - expected for a pure UI capture, "
+                    "check the PNG content rather than the size"
+                )
+        return reply
 
     @mcp.tool()
     def get_console_variable(ctx: Context, name: str) -> Dict[str, Any]:
@@ -720,20 +453,7 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Dict with status success and result carrying name and value
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("get_console_variable", {"name": name}) or {}
-
-        except Exception as e:
-            error_msg = f"Error getting console variable: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+        return _bridge("get_console_variable", {"name": name})
 
     @mcp.tool()
     def set_console_variable(ctx: Context, name: str, value: str) -> Dict[str, Any]:
@@ -746,20 +466,7 @@ def register_editor_tools(mcp: FastMCP):
         Returns:
             Dict with status success and result carrying name and the value read back
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("set_console_variable", {"name": name, "value": value}) or {}
-
-        except Exception as e:
-            error_msg = f"Error setting console variable: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+        return _bridge("set_console_variable", {"name": name, "value": value})
 
     @mcp.tool()
     def live_coding_compile(ctx: Context, wait: bool = True) -> Dict[str, Any]:
@@ -782,21 +489,8 @@ def register_editor_tools(mcp: FastMCP):
               duration_ms - how long the call took (wait=True only)
               log_tail    - the LogLiveCoding lines captured for this request
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"live_coding_compile requested (wait={wait})")
-            return unreal.send_command("live_coding_compile", {"wait": wait}) or {}
-
-        except Exception as e:
-            error_msg = f"Error requesting a Live Coding compile: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+        logger.info(f"live_coding_compile requested (wait={wait})")
+        return _bridge("live_coding_compile", {"wait": wait})
 
     @mcp.tool()
     def live_coding_status(ctx: Context) -> Dict[str, Any]:
@@ -810,20 +504,7 @@ def register_editor_tools(mcp: FastMCP):
             Dict with result.data carrying available / has_started / enabled_for_session /
             is_compiling / request_pending / outcome / outcome_source / log_tail.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("live_coding_status", {}) or {}
-
-        except Exception as e:
-            error_msg = f"Error reading Live Coding status: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+        return _bridge("live_coding_status", {})
 
     @mcp.tool()
     def close_asset_editors(ctx: Context, asset_path: str) -> Dict[str, Any]:
@@ -853,21 +534,8 @@ def register_editor_tools(mcp: FastMCP):
               configuration_changed - whether the ini was touched at all (false for a
                                       pure no-op, i.e. closed_editors == 0)
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-
-            logger.info(f"Closing asset editors for: {asset_path}")
-            return unreal.send_command("close_asset_editors", {"asset_path": asset_path}) or {}
-
-        except Exception as e:
-            error_msg = f"Error closing asset editors: {e}"
-            logger.error(error_msg)
-            return {"status": "error", "error": error_msg}
+        logger.info(f"Closing asset editors for: {asset_path}")
+        return _bridge("close_asset_editors", {"asset_path": asset_path})
 
     @mcp.tool()
     def spawn_particle_actor(
@@ -902,53 +570,31 @@ def register_editor_tools(mcp: FastMCP):
             relative_location and activated. Errors: not_particle_system (template is not a
             UParticleSystem) / actor_not_found (attach_to, with candidates) / duplicate name.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {
+            "name": name,
+            "template": template,
+            "location": location,
+            "rotation": rotation,
+            "auto_activate": auto_activate,
+        }
+        if attach_to:
+            params["attach_to"] = attach_to
+        if relative_location is not None:
+            params["relative_location"] = relative_location
+        if relative_rotation is not None:
+            params["relative_rotation"] = relative_rotation
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+        for param_name in ("location", "rotation", "relative_location", "relative_rotation"):
+            param_value = params.get(param_name)
+            if param_value is None:
+                continue
+            if not isinstance(param_value, list) or len(param_value) != 3:
+                raise MCPToolError("spawn_particle_actor", "invalid_params",
+                                   f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
+            params[param_name] = [float(val) for val in param_value]
 
-            params = {
-                "name": name,
-                "template": template,
-                "location": location,
-                "rotation": rotation,
-                "auto_activate": auto_activate,
-            }
-            if attach_to:
-                params["attach_to"] = attach_to
-            if relative_location is not None:
-                params["relative_location"] = relative_location
-            if relative_rotation is not None:
-                params["relative_rotation"] = relative_rotation
-
-            for param_name in ("location", "rotation", "relative_location", "relative_rotation"):
-                param_value = params.get(param_name)
-                if param_value is None:
-                    continue
-                if not isinstance(param_value, list) or len(param_value) != 3:
-                    logger.error(f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
-                    return {"success": False, "message": f"Invalid {param_name} format. Must be a list of 3 float values."}
-                params[param_name] = [float(val) for val in param_value]
-
-            response = unreal.send_command("spawn_particle_actor", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            if response.get("status") == "error":
-                return {"success": False, "message": response.get("error", "Unknown error")}
-
-            result = response.get("result", response)
-            if isinstance(result, dict) and result.get("success") is False:
-                return {"success": False, "message": result.get("error", "Unknown error")}
-            return result if isinstance(result, dict) else {"success": True, "actor": name}
-
-        except Exception as e:
-            logger.error(f"Error spawning particle actor: {e}")
-            return {"success": False, "message": str(e)}
+        reply = _bridge("spawn_particle_actor", params)
+        result = result_of(reply)
+        return result if result else {"success": True, "actor": name}
 
     logger.info("Editor tools registered successfully")

@@ -5,8 +5,10 @@ This module provides tools for creating and manipulating Blueprint assets in Unr
 """
 
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from mcp.server.fastmcp import FastMCP, Context
+
+from tools._bridge import MCPToolError
 
 # Get logger
 logger = logging.getLogger("UnrealMCP")
@@ -18,17 +20,24 @@ def register_blueprint_tools(mcp: FastMCP):
     def create_blueprint(
         ctx: Context,
         name: str,
-        parent_class: str
+        parent_class: str,
+        package_path: Optional[str] = None,
+        persist: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
-        Create a new Blueprint under /Game/Blueprints/.
+        Create a new Blueprint.
 
         Args:
-            name: Asset name
+            name: Asset name. A full asset path ("/Game/Dir/BP_X" or "/Game/Dir/BP_X.BP_X") is
+                accepted too - its last segment becomes the name and its folder the package_path.
             parent_class: Any class reference: a full path ("/Script/Engine.Character",
                 "/Game/Dir/BP_X.BP_X_C"), the class name as it really is ("Character",
                 "AnimNotify", "AnimNotifyState", "AnimInstance"), or the legacy short
                 form ("Pawn" -> APawn).
+            package_path: Content folder for the new asset, e.g. "/Game/FeedTheForest/Blueprints".
+                Default "/Game/Blueprints" (kept for older callers). An unmounted folder is
+                refused with invalid_package_path instead of taking the editor down.
+            persist: Save after creating; default true. Pass false to batch creates and flush once.
 
         Returns:
             Dict with name, path, parent_class / parent_class_path (the RESOLVED class,
@@ -38,31 +47,14 @@ def register_blueprint_tools(mcp: FastMCP):
             An unresolvable parent_class is an error: `parent_class_not_found` with the
             `tried` forms, and NO asset is created. It never falls back to Actor.
         """
-        # Import inside function to avoid circular imports
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            response = unreal.send_command("create_blueprint", {
-                "name": name,
-                "parent_class": parent_class
-            })
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Blueprint creation response: {response}")
-            return response or {}
-            
-        except Exception as e:
-            error_msg = f"Error creating blueprint: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        params: Dict[str, Any] = {"name": name, "parent_class": parent_class}
+        if package_path:
+            params["package_path"] = package_path
+        if persist is not None:
+            params["persist"] = persist
+
+        logger.info(f"Creating blueprint: {name} in {package_path or '/Game/Blueprints'}")
+        return _bridge("create_blueprint", params)
     
     @mcp.tool()
     def get_asset_properties(
@@ -83,22 +75,7 @@ def register_blueprint_tools(mcp: FastMCP):
         Returns:
             Dict containing asset name, class, path, and all properties
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            response = unreal.send_command("get_asset_properties", {
-                "asset_name": asset_name
-            }, recv_timeout=timeout)
-            return response or {}
-            
-        except Exception as e:
-            logger.error(f"Error getting asset properties: {e}")
-            return {}
+        return _bridge("get_asset_properties", {"asset_name": asset_name}, recv_timeout=timeout)
 
     @mcp.tool()
     def add_component_to_blueprint(
@@ -130,51 +107,28 @@ def register_blueprint_tools(mcp: FastMCP):
             per-property applied / failed arrays. Fails with blueprint_not_ready
             instead of crashing when the Blueprint has no usable construction script.
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            # Ensure all parameters are properly formatted
-            params = {
-                "blueprint_name": blueprint_name,
-                "component_type": component_type,
-                "component_name": component_name,
-                "location": location or [0.0, 0.0, 0.0],
-                "rotation": rotation or [0.0, 0.0, 0.0],
-                "scale": scale or [1.0, 1.0, 1.0]
-            }
-            
-            # Add component_properties if provided
-            if component_properties and len(component_properties) > 0:
-                params["component_properties"] = component_properties
-            
-            # Validate location, rotation, and scale formats
-            for param_name in ["location", "rotation", "scale"]:
-                param_value = params[param_name]
-                if not isinstance(param_value, list) or len(param_value) != 3:
-                    logger.error(f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
-                    return {"success": False, "message": f"Invalid {param_name} format. Must be a list of 3 float values."}
-                # Ensure all values are float
-                params[param_name] = [float(val) for val in param_value]
-            
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-                
-            logger.info(f"Adding component to blueprint with params: {params}")
-            response = unreal.send_command("add_component_to_blueprint", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Component addition response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error adding component to blueprint: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        # Ensure all parameters are properly formatted
+        params = {
+            "blueprint_name": blueprint_name,
+            "component_type": component_type,
+            "component_name": component_name,
+            "location": location or [0.0, 0.0, 0.0],
+            "rotation": rotation or [0.0, 0.0, 0.0],
+            "scale": scale or [1.0, 1.0, 1.0]
+        }
+
+        if component_properties and len(component_properties) > 0:
+            params["component_properties"] = component_properties
+
+        for param_name in ["location", "rotation", "scale"]:
+            param_value = params[param_name]
+            if not isinstance(param_value, list) or len(param_value) != 3:
+                raise MCPToolError("add_component_to_blueprint", "invalid_params",
+                                   f"Invalid {param_name} format: {param_value}. Must be a list of 3 float values.")
+            params[param_name] = [float(val) for val in param_value]
+
+        logger.info(f"Adding component to blueprint with params: {params}")
+        return _bridge("add_component_to_blueprint", params)
     
     @mcp.tool()
     def set_static_mesh_properties(
@@ -194,34 +148,12 @@ def register_blueprint_tools(mcp: FastMCP):
         Returns:
             Response indicating success or failure
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "blueprint_name": blueprint_name,
-                "component_name": component_name,
-                "static_mesh": static_mesh
-            }
-            
-            logger.info(f"Setting static mesh properties with params: {params}")
-            response = unreal.send_command("set_static_mesh_properties", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Set static mesh properties response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error setting static mesh properties: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting static mesh properties with params: {blueprint_name}/{component_name}/{static_mesh}")
+        return _bridge("set_static_mesh_properties", {
+            "blueprint_name": blueprint_name,
+            "component_name": component_name,
+            "static_mesh": static_mesh
+        })
     
     @mcp.tool()
     def set_component_property(
@@ -259,35 +191,13 @@ def register_blueprint_tools(mcp: FastMCP):
             saying they keep their own property values and do NOT follow the template.
         """
 
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "blueprint_name": blueprint_name,
-                "component_name": component_name,
-                "property_name": property_name,
-                "property_value": property_value
-            }
-            
-            logger.info(f"Setting component property with params: {params}")
-            response = unreal.send_command("set_component_property", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Set component property response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error setting component property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting component property {blueprint_name}/{component_name}/{property_name}")
+        return _bridge("set_component_property", {
+            "blueprint_name": blueprint_name,
+            "component_name": component_name,
+            "property_name": property_name,
+            "property_value": property_value
+        })
     
     @mcp.tool()
     def set_physics_properties(
@@ -301,38 +211,16 @@ def register_blueprint_tools(mcp: FastMCP):
         angular_damping: float = 0.0
     ) -> Dict[str, Any]:
         """Set physics properties on a component."""
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "blueprint_name": blueprint_name,
-                "component_name": component_name,
-                "simulate_physics": simulate_physics,
-                "gravity_enabled": gravity_enabled,
-                "mass": float(mass),
-                "linear_damping": float(linear_damping),
-                "angular_damping": float(angular_damping)
-            }
-            
-            logger.info(f"Setting physics properties with params: {params}")
-            response = unreal.send_command("set_physics_properties", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Set physics properties response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error setting physics properties: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting physics properties on {blueprint_name}/{component_name}")
+        return _bridge("set_physics_properties", {
+            "blueprint_name": blueprint_name,
+            "component_name": component_name,
+            "simulate_physics": simulate_physics,
+            "gravity_enabled": gravity_enabled,
+            "mass": float(mass),
+            "linear_damping": float(linear_damping),
+            "angular_damping": float(angular_damping)
+        })
     
     @mcp.tool()
     def compile_blueprint(
@@ -347,32 +235,8 @@ def register_blueprint_tools(mcp: FastMCP):
             and warnings (per-node compiler messages).
         """
 
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "blueprint_name": blueprint_name
-            }
-            
-            logger.info(f"Compiling blueprint: {blueprint_name}")
-            response = unreal.send_command("compile_blueprint", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Compile blueprint response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error compiling blueprint: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Compiling blueprint: {blueprint_name}")
+        return _bridge("compile_blueprint", {"blueprint_name": blueprint_name})
 
     @mcp.tool()
     def set_blueprint_property(
@@ -399,34 +263,12 @@ def register_blueprint_tools(mcp: FastMCP):
             (both in the shapes the getter returns), or a structured error
             (blueprint_not_found / unknown_property with `candidates`).
         """
-        from unreal_mcp_server import get_unreal_connection
-        
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-            
-            params = {
-                "blueprint_name": blueprint_name,
-                "property_name": property_name,
-                "property_value": property_value
-            }
-            
-            logger.info(f"Setting blueprint property with params: {params}")
-            response = unreal.send_command("set_blueprint_property", params)
-            
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-            
-            logger.info(f"Set blueprint property response: {response}")
-            return response
-            
-        except Exception as e:
-            error_msg = f"Error setting blueprint property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Setting blueprint property {blueprint_name}.{property_name}")
+        return _bridge("set_blueprint_property", {
+            "blueprint_name": blueprint_name,
+            "property_name": property_name,
+            "property_value": property_value
+        })
 
     @mcp.tool()
     def get_blueprint_property(
@@ -452,28 +294,9 @@ def register_blueprint_tools(mcp: FastMCP):
             value_differs_from_native_default - so "my write landed" is distinguishable from "that is
             the C++ default" without a second call.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "property_name": property_name}
-            logger.info(f"Getting blueprint property with params: {params}")
-            response = unreal.send_command("get_blueprint_property", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error getting blueprint property: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Getting blueprint property {blueprint_name}.{property_name}")
+        return _bridge("get_blueprint_property", {"blueprint_name": blueprint_name,
+                                                  "property_name": property_name})
 
     # @mcp.tool() commented out, just use set_component_property instead
     def set_pawn_properties(
@@ -539,13 +362,7 @@ def register_blueprint_tools(mcp: FastMCP):
                 }
                 
                 logger.info(f"Setting pawn property {prop_name} to {prop_value}")
-                response = unreal.send_command("set_blueprint_property", params)
-                
-                if not response:
-                    logger.error(f"No response from Unreal Engine for property {prop_name}")
-                    results[prop_name] = {"success": False, "message": "No response from Unreal Engine"}
-                    overall_success = False
-                    continue
+                response = _bridge("set_blueprint_property", params)
                 
                 results[prop_name] = response
                 if not response.get("success", False):
@@ -587,35 +404,16 @@ def register_blueprint_tools(mcp: FastMCP):
             Errors: component_not_found (with the available component names) /
             invalid_attach (self-attach, cycle, or a component that is not a scene component).
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {
+            "blueprint_name": blueprint_name,
+            "child_component": child_component,
+            "parent_component": parent_component
+        }
+        if socket_name:
+            params["socket_name"] = socket_name
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {
-                "blueprint_name": blueprint_name,
-                "child_component": child_component,
-                "parent_component": parent_component
-            }
-            if socket_name:
-                params["socket_name"] = socket_name
-
-            logger.info(f"Attaching component '{child_component}' to '{parent_component}'")
-            response = unreal.send_command("attach_component_to_component", params)
-
-            if not response:
-                logger.error("No response from Unreal Engine")
-                return {"success": False, "message": "No response from Unreal Engine"}
-
-            return response
-
-        except Exception as e:
-            error_msg = f"Error attaching component: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        logger.info(f"Attaching component '{child_component}' to '{parent_component}'")
+        return _bridge("attach_component_to_component", params)
 
     @mcp.tool()
     def list_blueprint_variables(
@@ -634,22 +432,7 @@ def register_blueprint_tools(mcp: FastMCP):
             class_editable (CPF_Edit: visible/editable in the class defaults panel),
             flags{...}}] and variable_count.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("list_blueprint_variables",
-                                       {"blueprint_name": blueprint_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error listing blueprint variables: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("list_blueprint_variables", {"blueprint_name": blueprint_name})
 
     @mcp.tool()
     def get_blueprint_variable_info(
@@ -672,23 +455,8 @@ def register_blueprint_tools(mcp: FastMCP):
             rep_notify_func / category / tooltip / transient / private).
             A missing variable reports variable_not_found with the current names in candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("get_blueprint_variable_info",
-                                       {"blueprint_name": blueprint_name,
-                                        "variable_name": variable_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error reading blueprint variable info: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("get_blueprint_variable_info", {"blueprint_name": blueprint_name,
+                                                       "variable_name": variable_name})
 
     @mcp.tool()
     def remove_blueprint_variable(
@@ -710,23 +478,8 @@ def register_blueprint_tools(mcp: FastMCP):
             Dict with removed, the remaining variables and the compile result (compiled / errors).
             A missing variable reports variable_not_found with candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("remove_blueprint_variable",
-                                       {"blueprint_name": blueprint_name,
-                                        "variable_name": variable_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error removing blueprint variable: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("remove_blueprint_variable", {"blueprint_name": blueprint_name,
+                                                     "variable_name": variable_name})
 
     @mcp.tool()
     def rename_blueprint_variable(
@@ -750,24 +503,10 @@ def register_blueprint_tools(mcp: FastMCP):
             a variable with an OnRep function reports rep_notify_cleared, because the engine's
             rename path would otherwise open a modal dialog.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("rename_blueprint_variable",
-                                       {"blueprint_name": blueprint_name,
-                                        "old_name": old_name,
-                                        "new_name": new_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error renaming blueprint variable: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("rename_blueprint_variable",
+                       {"blueprint_name": blueprint_name,
+                        "old_name": old_name,
+                        "new_name": new_name})
 
     @mcp.tool()
     def set_blueprint_variable_type(
@@ -805,29 +544,14 @@ def register_blueprint_tools(mcp: FastMCP):
             An unsupported type reports unsupported_variable_type with supported_types.
             Refusals carry error=variable_referenced_by_nodes + referencing_nodes[] + hint.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "variable_name": variable_name,
+                  "variable_type": variable_type}
+        if sub_class:
+            params["sub_class"] = sub_class
+        if container:
+            params["container"] = container
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "variable_name": variable_name,
-                      "variable_type": variable_type}
-            if sub_class:
-                params["sub_class"] = sub_class
-            if container:
-                params["container"] = container
-
-
-            return unreal.send_command("set_blueprint_variable_type", params) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error setting blueprint variable type: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_blueprint_variable_type", params)
 
     @mcp.tool()
     def set_blueprint_variable_default_value(
@@ -851,24 +575,10 @@ def register_blueprint_tools(mcp: FastMCP):
         Returns:
             Dict with default_value read back and the compile result.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("set_blueprint_variable_default_value",
-                                       {"blueprint_name": blueprint_name,
-                                        "variable_name": variable_name,
-                                        "default_value": default_value}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error setting blueprint variable default value: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_blueprint_variable_default_value",
+                       {"blueprint_name": blueprint_name,
+                        "variable_name": variable_name,
+                        "default_value": default_value})
 
     @mcp.tool()
     def set_blueprint_variable_flags(
@@ -893,24 +603,10 @@ def register_blueprint_tools(mcp: FastMCP):
             failed_count, the variable's flags and the compile result. An unknown key lands in
             `failed` with the supported key names in candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("set_blueprint_variable_flags",
-                                       {"blueprint_name": blueprint_name,
-                                        "variable_name": variable_name,
-                                        "props": props or {}}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error setting blueprint variable flags: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_blueprint_variable_flags",
+                       {"blueprint_name": blueprint_name,
+                        "variable_name": variable_name,
+                        "props": props or {}})
 
     @mcp.tool()
     def list_blueprint_local_variables(
@@ -930,23 +626,8 @@ def register_blueprint_tools(mcp: FastMCP):
             A missing graph reports function_graph_not_found with candidates, and an override
             function (created with signature_class) reports function_not_editable.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("list_blueprint_local_variables",
-                                       {"blueprint_name": blueprint_name,
-                                        "function_name": function_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error listing local variables: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("list_blueprint_local_variables",
+                       {"blueprint_name": blueprint_name, "function_name": function_name})
 
     @mcp.tool()
     def add_blueprint_local_variable(
@@ -976,28 +657,14 @@ def register_blueprint_tools(mcp: FastMCP):
             A name in use reports variable_name_in_use with candidates; an override function
             reports function_not_editable.
         """
-        from unreal_mcp_server import get_unreal_connection
+        params = {"blueprint_name": blueprint_name, "function_name": function_name,
+                  "variable_name": variable_name, "variable_type": variable_type}
+        if sub_class:
+            params["sub_class"] = sub_class
+        if default_value is not None:
+            params["default_value"] = default_value
 
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "function_name": function_name,
-                      "variable_name": variable_name, "variable_type": variable_type}
-            if sub_class:
-                params["sub_class"] = sub_class
-            if default_value is not None:
-                params["default_value"] = default_value
-
-            return unreal.send_command("add_blueprint_local_variable", params) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error adding local variable: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("add_blueprint_local_variable", params)
 
     @mcp.tool()
     def remove_blueprint_local_variable(
@@ -1017,24 +684,10 @@ def register_blueprint_tools(mcp: FastMCP):
         Returns:
             Dict with removed, the remaining local variables and the compile result.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("remove_blueprint_local_variable",
-                                       {"blueprint_name": blueprint_name,
-                                        "function_name": function_name,
-                                        "variable_name": variable_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error removing local variable: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("remove_blueprint_local_variable",
+                       {"blueprint_name": blueprint_name,
+                        "function_name": function_name,
+                        "variable_name": variable_name})
 
     @mcp.tool()
     def rename_blueprint_local_variable(
@@ -1058,25 +711,11 @@ def register_blueprint_tools(mcp: FastMCP):
             reference_nodes_stale and the compile result. A taken name reports
             variable_name_in_use with candidates (the engine's own rename silently no-ops).
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("rename_blueprint_local_variable",
-                                       {"blueprint_name": blueprint_name,
-                                        "function_name": function_name,
-                                        "old_name": old_name,
-                                        "new_name": new_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error renaming local variable: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("rename_blueprint_local_variable",
+                       {"blueprint_name": blueprint_name,
+                        "function_name": function_name,
+                        "old_name": old_name,
+                        "new_name": new_name})
 
     @mcp.tool()
     def set_blueprint_local_variable_default(
@@ -1098,25 +737,11 @@ def register_blueprint_tools(mcp: FastMCP):
         Returns:
             Dict with default_value read back and the compile result.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("set_blueprint_local_variable_default",
-                                       {"blueprint_name": blueprint_name,
-                                        "function_name": function_name,
-                                        "variable_name": variable_name,
-                                        "default_value": default_value}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error setting local variable default: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_blueprint_local_variable_default",
+                       {"blueprint_name": blueprint_name,
+                        "function_name": function_name,
+                        "variable_name": variable_name,
+                        "default_value": default_value})
 
     @mcp.tool()
     def get_blueprint_component_hierarchy(
@@ -1139,22 +764,7 @@ def register_blueprint_tools(mcp: FastMCP):
             and is null for components without a transform (a plain ActorComponent). A blueprint
             without a construction script reports blueprint_not_ready.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("get_blueprint_component_hierarchy",
-                                       {"blueprint_name": blueprint_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error reading component hierarchy: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("get_blueprint_component_hierarchy", {"blueprint_name": blueprint_name})
 
     @mcp.tool()
     def remove_component_from_blueprint(
@@ -1180,23 +790,9 @@ def register_blueprint_tools(mcp: FastMCP):
             the only root reports root_component_protected unless force=True; a missing component
             reports component_not_found with candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            params = {"blueprint_name": blueprint_name, "component_name": component_name,
-                      "recursive": recursive, "force": force}
-            return unreal.send_command("remove_component_from_blueprint", params) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error removing component: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("remove_component_from_blueprint",
+                       {"blueprint_name": blueprint_name, "component_name": component_name,
+                        "recursive": recursive, "force": force})
 
     @mcp.tool()
     def set_blueprint_root_component(
@@ -1216,23 +812,8 @@ def register_blueprint_tools(mcp: FastMCP):
             unique_root (the response must show exactly one root), plus the compile result.
             A non-scene component reports component_not_scene.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("set_blueprint_root_component",
-                                       {"blueprint_name": blueprint_name,
-                                        "component_name": component_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error setting root component: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_blueprint_root_component",
+                       {"blueprint_name": blueprint_name, "component_name": component_name})
 
     @mcp.tool()
     def detach_component(
@@ -1251,23 +832,8 @@ def register_blueprint_tools(mcp: FastMCP):
             Dict with the hierarchy read back (the component's parent is the SCS root, or it is the
             root itself) and the compile result. A non-scene component reports component_not_scene.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("detach_component",
-                                       {"blueprint_name": blueprint_name,
-                                        "component_name": component_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error detaching component: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("detach_component",
+                       {"blueprint_name": blueprint_name, "component_name": component_name})
 
     @mcp.tool()
     def set_component_collision(
@@ -1297,24 +863,10 @@ def register_blueprint_tools(mcp: FastMCP):
             counted_in (editor|pie) and - when instances exist - a hint saying they keep their own
             collision and do NOT follow the template.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("set_component_collision",
-                                       {"blueprint_name": blueprint_name,
-                                        "component_name": component_name,
-                                        "props": props or {}}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error setting component collision: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("set_component_collision",
+                       {"blueprint_name": blueprint_name,
+                        "component_name": component_name,
+                        "props": props or {}})
 
     @mcp.tool()
     def implement_blueprint_interface(
@@ -1335,23 +887,8 @@ def register_blueprint_tools(mcp: FastMCP):
             second set of graphs), generated_graphs, the interface description and the compile
             result. An unresolvable path reports interface_not_found with candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("implement_blueprint_interface",
-                                       {"blueprint_name": blueprint_name,
-                                        "interface_path": interface_path}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error implementing interface: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("implement_blueprint_interface",
+                       {"blueprint_name": blueprint_name, "interface_path": interface_path})
 
     @mcp.tool()
     def unimplement_blueprint_interface(
@@ -1373,24 +910,10 @@ def register_blueprint_tools(mcp: FastMCP):
             compile result. An interface the blueprint does not implement reports
             interface_not_found with the implemented interface paths as candidates.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("unimplement_blueprint_interface",
-                                       {"blueprint_name": blueprint_name,
-                                        "interface_path": interface_path,
-                                        "preserve_functions": preserve_functions}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error removing interface: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("unimplement_blueprint_interface",
+                       {"blueprint_name": blueprint_name,
+                        "interface_path": interface_path,
+                        "preserve_functions": preserve_functions})
 
     @mcp.tool()
     def list_blueprint_interfaces(
@@ -1407,22 +930,7 @@ def register_blueprint_tools(mcp: FastMCP):
             Dict with interfaces: [{interface_name, interface_path, graphs,
             functions: [{function_name, implemented}]}] and interface_count.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("list_blueprint_interfaces",
-                                       {"blueprint_name": blueprint_name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error listing interfaces: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("list_blueprint_interfaces", {"blueprint_name": blueprint_name})
 
     @mcp.tool()
     def list_overridable_functions(
@@ -1445,23 +953,9 @@ def register_blueprint_tools(mcp: FastMCP):
             overridden}] (overridden means a graph or event of that name already exists) and
             function_count / overridden_count. Plain BlueprintCallable functions are not listed.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("list_overridable_functions",
-                                       {"blueprint_name": blueprint_name,
-                                        "include_parent_events": include_parent_events}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error listing overridable functions: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("list_overridable_functions",
+                       {"blueprint_name": blueprint_name,
+                        "include_parent_events": include_parent_events})
 
     @mcp.tool()
     def check_blueprint_element(
@@ -1488,24 +982,8 @@ def register_blueprint_tools(mcp: FastMCP):
             found=false is a normal answer, not an error code; an unknown kind reports
             invalid_params with the legal kinds.
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("check_blueprint_element",
-                                       {"blueprint_name": blueprint_name,
-                                        "kind": kind,
-                                        "name": name}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error checking blueprint element: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("check_blueprint_element",
+                       {"blueprint_name": blueprint_name, "kind": kind, "name": name})
 
     @mcp.tool()
     def compare_blueprints(
@@ -1526,22 +1004,7 @@ def register_blueprint_tools(mcp: FastMCP):
             each blueprint's parent_class. A path that does not resolve reports blueprint_not_found
             with side "a" or "b".
         """
-        from unreal_mcp_server import get_unreal_connection
-
-        try:
-            unreal = get_unreal_connection()
-            if not unreal:
-                logger.error("Failed to connect to Unreal Engine")
-                return {"success": False, "message": "Failed to connect to Unreal Engine"}
-
-            return unreal.send_command("compare_blueprints",
-                                       {"blueprint_a": blueprint_a,
-                                        "blueprint_b": blueprint_b}) or {
-                "success": False, "message": "No response from Unreal Engine"}
-
-        except Exception as e:
-            error_msg = f"Error comparing blueprints: {e}"
-            logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+        return _bridge("compare_blueprints", {"blueprint_a": blueprint_a,
+                                              "blueprint_b": blueprint_b})
 
     logger.info("Blueprint tools registered successfully") 

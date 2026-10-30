@@ -19,6 +19,14 @@ struct FMCPParamSpec
     /** Optional legal values, for enum-like parameters. */
     TArray<FString> AllowedValues;
 
+    /**
+     * Deprecated aliases that satisfy this required parameter. Dispatch rejects a command whose
+     * required parameter is absent, so a parameter the handler also accepts under an older name
+     * ("target" / "object_path") names that older spelling here - otherwise a caller using the
+     * deprecated name would be refused before the handler (which understands both) ever ran.
+     */
+    TArray<FString> AlsoSatisfiedBy;
+
     FString Description;
 };
 
@@ -138,6 +146,15 @@ inline FMCPParamSpec MCPParam(const FString& Name, const FString& Type, const FS
     Spec.Type = Type;
     Spec.bRequired = true;
     Spec.Description = Description;
+    return Spec;
+}
+
+/** Required parameter spec whose older spellings also count as provided. */
+inline FMCPParamSpec MCPParamAliased(const FString& Name, const FString& Type, const FString& Description,
+                                     const TArray<FString>& Aliases)
+{
+    FMCPParamSpec Spec = MCPParam(Name, Type, Description);
+    Spec.AlsoSatisfiedBy = Aliases;
     return Spec;
 }
 

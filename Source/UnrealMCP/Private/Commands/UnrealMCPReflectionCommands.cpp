@@ -225,7 +225,8 @@ void FUnrealMCPReflectionCommands::RegisterCommands(FMCPCommandRegistry& Registr
         "(written_count == 0) the response is an error carrying the first failure's code / message / hint, with "
         "the per-item detail in 'data'.",
         (TArray<FMCPParamSpec>{
-            MCPParam(TEXT("target"), TEXT("string"), TEXT("Asset, class, or sub-object path to write, e.g. \"/Game/X.X:A.Config\"")),
+            MCPParamAliased(TEXT("target"), TEXT("string"), TEXT("Asset, class, or sub-object path to write, e.g. \"/Game/X.X:A.Config\""),
+                {TEXT("object_path")}),
             MCPParamOpt(TEXT("object_path"), TEXT("string"), TEXT("Deprecated alias of 'target' (same meaning); the response echoes it in renamed_params[]")),
             MCPParamOpt(TEXT("property_name"), TEXT("string"), TEXT("Single-property form: property name (snake_case resolves) or a path like \"LodData[0].PhysicalMeshData.WeightMaps[1].Values\"")),
             MCPParamOpt(TEXT("property_value"), TEXT("any"), TEXT("Single-property form: value in the shape reflect_probe reports")),
